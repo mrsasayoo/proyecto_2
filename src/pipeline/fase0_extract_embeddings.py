@@ -37,6 +37,9 @@ Uso:
  
 import os
 import argparse
+import logging
+import time
+import json
 import numpy as np
 import torch
 import torch.nn as nn
@@ -49,6 +52,57 @@ from pathlib import Path
 import SimpleITK as sitk   # para LUNA16 y Pancreas
 import cv2                 # para CLAHE en OA
  
+
+# ──────────────────────────────────────────────────────────
+# 0. LOGGING
+# ──────────────────────────────────────────────────────────
+
+# Esta función configura un sistema de registro de eventos (logging) jerárquico. Su función principal es doble: 
+# escribe todos los detalles técnicos (nivel DEBUG) en un archivo de texto persistente para auditoría, mientras 
+# que, simultáneamente, filtra y muestra solo la información relevante (nivel INFO) en la consola para que el 
+# desarrollador pueda seguir el progreso en tiempo real sin saturar la pantalla.
+
+def setup_logging(output_dir: str) -> logging.Logger:
+    """
+    Configura el sistema de logging del pipeline.
+    Escribe simultáneamente a consola (INFO) y a archivo (DEBUG).
+ 
+    Niveles usados en este script:
+      DEBUG   → detalles internos útiles para depuración profunda
+      INFO    → progreso normal del pipeline
+      WARNING → situación anómala que no detiene la ejecución
+                (dataset vacío, d_model inesperado, batch con NaN, etc.)
+      ERROR   → fallo grave que probablemente corrompe los embeddings
+                (backbone con gradientes activos, NaN sistémico, etc.)
+    """
+    os.makedirs(output_dir, exist_ok=True)
+    log_path = Path(output_dir) / "fase0.log"
+ 
+    fmt = "%(asctime)s | %(levelname)-8s | %(name)s | %(message)s"
+    datefmt = "%Y-%m-%d %H:%M:%S"
+ 
+    logging.basicConfig(
+        level=logging.DEBUG,
+        format=fmt,
+        datefmt=datefmt,
+        handlers=[
+            logging.FileHandler(log_path, mode="w", encoding="utf-8"),
+            logging.StreamHandler(),   # consola
+        ]
+    )
+    # La consola solo muestra INFO y superior — el archivo guarda todo
+    logging.getLogger().handlers[1].setLevel(logging.INFO)
+ 
+    log = logging.getLogger("fase0")
+    log.info(f"Log iniciado → {log_path}")
+    return log
+ 
+ 
+# Logger global — se inicializa en main() con setup_logging()
+# Las clases Dataset lo obtienen con getLogger para no depender del orden de importación
+log = logging.getLogger("fase0")
+
+
 # ──────────────────────────────────────────────────────────
 # 1. CONFIGURACIÓN GLOBAL
 # ──────────────────────────────────────────────────────────
@@ -200,10 +254,10 @@ def volume_to_vit_input(volume_3d_tensor):
     embeddings de routing. Para clasificación 3D real se usa
     la arquitectura 3D del experto (R3D-18, Swin3D-Tiny).
     """
-    v = volume_3d_tensor.squeeze(0)           # [64, 64, 64]
+    v = volume_3d_tensor.squeeze(0)          # [64, 64, 64]
     d, h, w = v.shape
  
-    axial    = v[d // 2, :, :]                # corte central eje Z
+    axial    = v[d // 2, :, :]               # corte central eje Z
     coronal  = v[:, h // 2, :]               # corte central eje Y
     sagittal = v[:, :, w // 2]               # corte central eje X
  
@@ -213,7 +267,7 @@ def volume_to_vit_input(volume_3d_tensor):
     # Resize a 224×224
     rgb = nn.functional.interpolate(
         rgb.unsqueeze(0), size=(224, 224), mode="bilinear", align_corners=False
-    ).squeeze(0)                              # [3, 224, 224]
+    ).squeeze(0)                             # [3, 224, 224]
  
     # Normalizar como ImageNet (el volumen ya está en [0,1])
     mean = torch.tensor(IMAGENET_MEAN).view(3, 1, 1)
@@ -239,18 +293,44 @@ class ChestXray14Dataset(Dataset):
         self.expert_id = EXPERT_IDS["chest"]
  
         df = pd.read_csv(csv_path)
-        # Filtrar según train_val_list.txt o test_list.txt
+        log.debug(f"[Chest] CSV cargado: {len(df):,} filas totales en {csv_path}")
+ 
         with open(file_list) as f:
             valid_files = set(f.read().splitlines())
+        log.debug(f"[Chest] file_list '{file_list}': {len(valid_files):,} nombres")
+ 
         self.df = df[df["Image Index"].isin(valid_files)].reset_index(drop=True)
+        n_matched = len(self.df)
+        n_missing_csv = len(valid_files) - n_matched
+ 
+        if n_matched == 0:
+            log.error("[Chest] ¡Dataset vacío! Ninguna imagen del file_list está en el CSV. "
+                      "Verifica que chest_csv y chest_train_list correspondan al mismo release.")
+        elif n_missing_csv > 0:
+            log.warning(f"[Chest] {n_missing_csv:,} nombres del file_list no aparecen en el CSV "
+                        f"(esperado si usas un subset). Imágenes cargadas: {n_matched:,}")
+        else:
+            log.info(f"[Chest] {n_matched:,} imágenes cargadas correctamente")
+ 
+        # Verificar que los archivos existen físicamente en disco (muestra primeros 5 faltantes)
+        missing_disk = [r for r in self.df["Image Index"] if not (self.img_dir / r).exists()]
+        if missing_disk:
+            log.warning(f"[Chest] {len(missing_disk):,} archivos en CSV no encontrados en disco. "
+                        f"Primeros 5: {missing_disk[:5]}")
  
     def __len__(self):
         return len(self.df)
  
     def __getitem__(self, idx):
         img_name = self.df.loc[idx, "Image Index"]
-        img      = Image.open(self.img_dir / img_name).convert("RGB")
-        img      = self.transform(img)
+        img_path = self.img_dir / img_name
+        try:
+            img = Image.open(img_path).convert("RGB")
+        except Exception as e:
+            log.warning(f"[Chest] Error abriendo imagen '{img_path}': {e}. "
+                        f"Reemplazando con tensor cero.")
+            img = Image.fromarray(np.zeros((224, 224, 3), dtype=np.uint8))
+        img = self.transform(img)
         return img, self.expert_id, img_name
  
  
@@ -296,9 +376,14 @@ class ISICDataset(Dataset):
         self.mode      = mode
  
         df = pd.read_csv(gt_csv)
+        log.debug(f"[ISIC] CSV cargado: {len(df):,} filas en {gt_csv}")
  
         # Eliminar duplicados conocidos antes de cualquier split
+        before = len(df)
         df = df[~df["image"].isin(["ISIC_0067980", "ISIC_0069013"])].reset_index(drop=True)
+        removed = before - len(df)
+        if removed:
+            log.info(f"[ISIC] {removed} duplicados conocidos eliminados (ISIC_0067980, ISIC_0069013)")
  
         # Split aproximado — en producción usar lesion_id del metadata CSV
         if split == "train":
@@ -306,10 +391,21 @@ class ISICDataset(Dataset):
         else:
             self.df = df.drop(df.sample(frac=0.8, random_state=42).index).reset_index(drop=True)
  
+        log.info(f"[ISIC] split='{split}' mode='{mode}': {len(self.df):,} imágenes")
+ 
         # En modo expert: convertir one-hot → índice de clase (0–7)
         if self.mode == "expert":
             self.df = self.df.copy()
             self.df["class_label"] = self.df[self.CLASSES].values.argmax(axis=1)
+            dist = self.df["class_label"].value_counts().sort_index()
+            log.debug(f"[ISIC] Distribución de clases (modo expert):\n"
+                      + "\n".join(f"    {self.CLASSES[i]:>4}: {dist.get(i,0):>5,}" for i in range(len(self.CLASSES))))
+ 
+            # Detectar filas donde todas las clases son 0 (no debería ocurrir en train)
+            all_zero = (self.df[self.CLASSES].sum(axis=1) == 0).sum()
+            if all_zero:
+                log.warning(f"[ISIC] {all_zero} filas con todas las columnas de clase en 0 "
+                            f"(posiblemente clase UNK). Serán asignadas a clase 0 por argmax.")
  
     def __len__(self):
         return len(self.df)
@@ -317,14 +413,16 @@ class ISICDataset(Dataset):
     def __getitem__(self, idx):
         img_name = self.df.loc[idx, "image"]
         img_path = self.img_dir / f"{img_name}.jpg"
-        img      = Image.open(img_path).convert("RGB")
-        img      = self.transform(img)
+        try:
+            img = Image.open(img_path).convert("RGB")
+        except Exception as e:
+            log.warning(f"[ISIC] Error abriendo '{img_path}': {e}. Reemplazando con tensor cero.")
+            img = Image.fromarray(np.zeros((224, 224, 3), dtype=np.uint8))
+        img = self.transform(img)
  
         if self.mode == "embedding":
-            # FASE 0: el router aprende "soy imagen de ISIC"
             return img, self.expert_id, img_name
         else:
-            # FASE 2: el Experto 2 aprende la patología real
             label = int(self.df.loc[idx, "class_label"])
             return img, label, img_name
 
@@ -345,13 +443,34 @@ class OAKneeDataset(Dataset):
         self.samples   = []
  
         split_dir = Path(root_dir) / split
-        # Inferir carpetas: 0/, 1/, 2/ (o verificar con os.listdir)
+        if not split_dir.exists():
+            log.error(f"[OA] Directorio de split no encontrado: {split_dir}")
+            return
+ 
+        class_counts = {}
+        found_classes = []
         for class_dir in sorted(split_dir.iterdir()):
             if class_dir.is_dir():
-                for img_path in class_dir.glob("*.jpg"):
+                found_classes.append(class_dir.name)
+                imgs = list(class_dir.glob("*.jpg")) + list(class_dir.glob("*.png"))
+                for img_path in imgs:
                     self.samples.append((img_path, int(class_dir.name)))
-                for img_path in class_dir.glob("*.png"):
-                    self.samples.append((img_path, int(class_dir.name)))
+                class_counts[class_dir.name] = len(imgs)
+ 
+        log.info(f"[OA] split='{split}': {len(self.samples):,} imágenes | "
+                 f"clases encontradas: {found_classes}")
+        log.debug(f"[OA] Distribución por clase: " +
+                  " | ".join(f"clase {k}: {v:,}" for k, v in class_counts.items()))
+ 
+        if len(self.samples) == 0:
+            log.error(f"[OA] Dataset vacío en '{split_dir}'. "
+                      f"Verifica que existan subcarpetas 0/, 1/, 2/ con imágenes.")
+ 
+        # Advertir si solo hay 2 clases (KL5 puede estar ausente en algunos subsets)
+        if len(found_classes) < 3:
+            log.warning(f"[OA] Solo {len(found_classes)} clases encontradas ({found_classes}). "
+                        f"Se esperaban 3 (Normal/Leve/Severo). "
+                        f"¿El ZIP incluye las 3 carpetas?")
  
         self.final_transform = transforms.Compose([
             transforms.ToTensor(),
@@ -362,9 +481,15 @@ class OAKneeDataset(Dataset):
         return len(self.samples)
  
     def __getitem__(self, idx):
-        img_path, _ = self.samples[idx]
-        img = Image.open(img_path).convert("RGB")
-        # CLAHE antes del resize (requisito del proyecto)
+        img_path, kl_class = self.samples[idx]
+        try:
+            img = Image.open(img_path).convert("RGB")
+        except Exception as e:
+            log.warning(f"[OA] Error abriendo '{img_path}': {e}. Reemplazando con tensor cero.")
+            img = Image.fromarray(np.zeros((224, 224, 3), dtype=np.uint8))
+            img = self.final_transform(img)
+            return img, self.expert_id, str(img_path.name)
+ 
         img = apply_clahe(img)
         img = img.resize((self.img_size, self.img_size), Image.BICUBIC)
         img = self.final_transform(img)
@@ -378,35 +503,65 @@ class LUNA16Dataset(Dataset):
     LUNA16 — Clasificación de candidatos 3D.
     Para embedding: convierte volumen 3D → representación 2D (3 slices).
     Etiqueta de experto = 3.
- 
-    NOTA IMPORTANTE: La conversión world→vóxel ya debe estar resuelta
-    antes de llamar a este dataset. Este dataset asume que tienes
-    parches 3D pre-extraídos guardados como .npy de [64,64,64].
     """
     def __init__(self, patches_dir, candidates_csv):
-        """
-        patches_dir: carpeta con archivos candidate_XXXXX.npy (64×64×64, HU)
-        candidates_csv: candidates_V2.csv con columnas seriesuid, class
-        """
         self.patches_dir = Path(patches_dir)
         self.expert_id   = EXPERT_IDS["luna"]
  
+        if not self.patches_dir.exists():
+            log.error(f"[LUNA16] Directorio de parches no encontrado: {self.patches_dir}")
+            self.samples = []
+            return
+ 
         df = pd.read_csv(candidates_csv)
+        log.debug(f"[LUNA16] candidates_V2.csv: {len(df):,} candidatos totales")
+ 
         self.samples = []
+        missing = 0
         for _, row in df.iterrows():
             patch_file = self.patches_dir / f"candidate_{row.name:06d}.npy"
             if patch_file.exists():
                 self.samples.append((patch_file, int(row["class"])))
+            else:
+                missing += 1
+ 
+        n_pos = sum(1 for _, c in self.samples if c == 1)
+        n_neg = sum(1 for _, c in self.samples if c == 0)
+        ratio = n_neg / n_pos if n_pos > 0 else float("inf")
+ 
+        log.info(f"[LUNA16] {len(self.samples):,} parches cargados | "
+                 f"positivos (nódulo): {n_pos:,} | negativos: {n_neg:,} | ratio neg/pos: {ratio:.0f}:1")
+ 
+        if missing > 0:
+            log.warning(f"[LUNA16] {missing:,} parches en el CSV no encontrados en disco '{self.patches_dir}'. "
+                        f"¿Ejecutaste la extracción de parches 3D previa?")
+        if n_pos == 0:
+            log.error(f"[LUNA16] ¡Cero candidatos positivos! El modelo no podrá aprender nódulos. "
+                      f"Verifica que candidates_V2.csv tenga filas con class=1.")
+        if ratio > 1000:
+            log.warning(f"[LUNA16] Ratio neg/pos extremo ({ratio:.0f}:1). "
+                        f"Considera FocalLoss(gamma=2) o subsampling de negativos en el DataLoader.")
  
     def __len__(self):
         return len(self.samples)
  
     def __getitem__(self, idx):
         patch_file, _ = self.samples[idx]
-        volume  = np.load(patch_file)                   # [64, 64, 64] HU crudo
-        volume  = normalize_hu(volume)                  # → [0, 1]
-        volume_t = resize_volume_3d(volume)             # [1, 64, 64, 64]
-        img     = volume_to_vit_input(volume_t)         # [3, 224, 224]
+        try:
+            volume = np.load(patch_file)          # [64, 64, 64] HU crudo
+        except Exception as e:
+            log.warning(f"[LUNA16] Error cargando parche '{patch_file}': {e}. "
+                        f"Reemplazando con tensor cero.")
+            return torch.zeros(3, 224, 224), self.expert_id, patch_file.stem
+ 
+        # Detectar volumen completamente vacío (padding excesivo o error de extracción)
+        if volume.max() == volume.min():
+            log.warning(f"[LUNA16] Parche '{patch_file.name}' es constante "
+                        f"(valor={volume.max():.1f} HU). Posible error de extracción.")
+ 
+        volume   = normalize_hu(volume)
+        volume_t = resize_volume_3d(volume)
+        img      = volume_to_vit_input(volume_t)
         return img, self.expert_id, patch_file.stem
 # Sugerencia:
 # Dado que este dataset carga archivos .npy (que suelen ser rápidos de leer), el entrenamiento debería ser fluido. 
@@ -429,17 +584,42 @@ class PancreasDataset(Dataset):
     def __init__(self, patches_dir):
         self.patches_dir = Path(patches_dir)
         self.expert_id   = EXPERT_IDS["pancreas"]
+ 
+        if not self.patches_dir.exists():
+            log.error(f"[Pancreas] Directorio no encontrado: {self.patches_dir}")
+            self.samples = []
+            return
+ 
         self.samples = list(self.patches_dir.glob("*.npy"))
+        log.info(f"[Pancreas] {len(self.samples):,} volúmenes encontrados en '{self.patches_dir}'")
+ 
+        if len(self.samples) == 0:
+            log.error(f"[Pancreas] ¡Sin archivos .npy! Verifica que hayas preprocesado "
+                      f"los volúmenes PANORAMA y que estén en '{self.patches_dir}'.")
+        elif len(self.samples) < 50:
+            log.warning(f"[Pancreas] Solo {len(self.samples)} volúmenes — dataset muy pequeño. "
+                        f"Considera k-fold CV (k=5) para estimaciones más estables.")
  
     def __len__(self):
         return len(self.samples)
  
     def __getitem__(self, idx):
         patch_file = self.samples[idx]
-        volume  = np.load(patch_file)
-        volume  = normalize_hu(volume)
+        try:
+            volume = np.load(patch_file)
+        except Exception as e:
+            log.warning(f"[Pancreas] Error cargando '{patch_file}': {e}. "
+                        f"Reemplazando con tensor cero.")
+            return torch.zeros(3, 224, 224), self.expert_id, patch_file.stem
+ 
+        if volume.max() == volume.min():
+            log.warning(f"[Pancreas] Volumen '{patch_file.name}' es constante "
+                        f"(valor={volume.max():.1f} HU). ¿HU clip mal aplicado?")
+ 
+        # Pancreas usa rango HU abdominal [-100, 400], distinto a LUNA [-1000, 400]
+        volume   = normalize_hu(volume, min_hu=-100, max_hu=400)
         volume_t = resize_volume_3d(volume)
-        img     = volume_to_vit_input(volume_t)
+        img      = volume_to_vit_input(volume_t)
         return img, self.expert_id, patch_file.stem
 # Consejo:
 # Como este experto es el último (Experto 4), el balance de carga 
@@ -453,8 +633,7 @@ class PancreasDataset(Dataset):
 # ──────────────────────────────────────────────────────────
 # 4. BACKBONE ViT — EXTRACTOR (CONGELADO)
 # ──────────────────────────────────────────────────────────
-
-
+#
 # ¿Qué hace esta sección?
 #   Carga un Vision Transformer preentrenado en ImageNet (via timm),
 #   congela TODOS sus parámetros (requires_grad=False) y lo convierte
@@ -506,9 +685,9 @@ def load_frozen_backbone(backbone_name="vit_tiny_patch16_224", device="cuda"):
  
     expected_d = BACKBONE_CONFIGS[backbone_name]["d_model"]
     vram_est   = BACKBONE_CONFIGS[backbone_name]["vram_gb"]
-    print(f"[ViT] Backbone seleccionado : {backbone_name}")
-    print(f"[ViT] d_model esperado      : {expected_d}")
-    print(f"[ViT] VRAM estimada (extrac): ~{vram_est} GB")
+    log.info(f"[Backbone] Seleccionado  : {backbone_name}")
+    log.info(f"[Backbone] d_model esp.  : {expected_d}")
+    log.info(f"[Backbone] VRAM estimada : ~{vram_est} GB")
  
     model = timm.create_model(
         backbone_name,
@@ -517,12 +696,19 @@ def load_frozen_backbone(backbone_name="vit_tiny_patch16_224", device="cuda"):
     )
  
     # Congelar TODOS los parámetros — FASE 0 es extracción pura, no aprendizaje
-    # (alineado con sección 4.1: "backbone congelado en FASE 0 y FASE 1")
     for param in model.parameters():
         param.requires_grad = False
  
     model.eval()
     model.to(device)
+ 
+    # Verificar que el congelamiento fue efectivo — cualquier grad activo es un ERROR grave
+    trainable = [n for n, p in model.named_parameters() if p.requires_grad]
+    if trainable:
+        log.error(f"[Backbone] ¡{len(trainable)} parámetros con requires_grad=True tras el congelamiento! "
+                  f"Los embeddings NO serán reproducibles. Primeros 3: {trainable[:3]}")
+    else:
+        log.debug(f"[Backbone] Congelamiento verificado: 0 parámetros entrenables.")
  
     # Verificar d_model con un forward pass dummy
     dummy = torch.zeros(1, 3, 224, 224).to(device)
@@ -531,13 +717,16 @@ def load_frozen_backbone(backbone_name="vit_tiny_patch16_224", device="cuda"):
  
     actual_d = out.shape[1]
     if actual_d != expected_d:
-        print(f"[ViT] ⚠ d_model real ({actual_d}) difiere del esperado ({expected_d}). "
-              f"Actualiza BACKBONE_CONFIGS si agregaste un backbone nuevo.")
+        log.warning(f"[Backbone] d_model real ({actual_d}) difiere del esperado ({expected_d}). "
+                    f"Actualiza BACKBONE_CONFIGS si agregaste un backbone nuevo.")
+    else:
+        log.debug(f"[Backbone] d_model verificado: {actual_d} ✓")
  
-    print(f"[ViT] d_model real (CLS dim): {actual_d}")
-    print(f"[ViT] Parámetros congelados : {sum(p.numel() for p in model.parameters()):,}")
+    total_params = sum(p.numel() for p in model.parameters())
+    log.info(f"[Backbone] d_model real (CLS dim) : {actual_d}")
+    log.info(f"[Backbone] Parámetros congelados  : {total_params:,}")
  
-    return model, actual_d   # (model, d_model)
+    return model, actual_d
 # Consejo para el reporte:
 # Puedes incluir una sección llamada "Evaluación de Backbones" donde muestres 
 # una tabla comparando los 3 backbones. Al dejar tu código así de flexible, 
@@ -557,36 +746,83 @@ def load_frozen_backbone(backbone_name="vit_tiny_patch16_224", device="cuda"):
 @torch.no_grad()
 def extract_embeddings(model, dataloader, device, d_model, desc=""):
     """
-    Pasa el dataloader completo por el backbone y acumula:
-      - Z:           [N, d_model] — CLS tokens
-      - y_expert:    [N]          — etiqueta de experto (0–4, dominios clínicos)
-      - img_names:   [N]          — nombre de imagen para auditoría
- 
-    Nota sobre el Experto 5 (OOD):
-      El Experto 6 (ID=5) NO aparece en y_expert porque no tiene dataset
-      propio. y_expert solo contendrá valores en {0, 1, 2, 3, 4}.
-      El Experto 6 se inicializa y entrena en FASE 1 mediante L_error.
+    Pasa el dataloader completo por el backbone y acumula CLS tokens.
+    Detecta activamente: NaN/Inf en embeddings, VRAM excesiva, batches vacíos.
     """
-    Z          = np.zeros((len(dataloader.dataset), d_model), dtype=np.float32)
-    y_expert   = np.zeros(len(dataloader.dataset), dtype=np.int64)
-    img_names  = []
-    cursor     = 0
+    n_total   = len(dataloader.dataset)
+    Z         = np.zeros((n_total, d_model), dtype=np.float32)
+    y_expert  = np.zeros(n_total, dtype=np.int64)
+    img_names = []
+    cursor    = 0
+ 
+    nan_batches  = 0    # batches con NaN en el embedding
+    inf_batches  = 0    # batches con Inf en el embedding
+    t_start      = time.time()
+ 
+    log.info(f"[Extract/{desc}] Iniciando extracción: {n_total:,} imágenes | "
+             f"d_model={d_model} | batch_size={dataloader.batch_size}")
  
     for batch_idx, (imgs, experts, names) in enumerate(dataloader):
         imgs = imgs.to(device)
- 
-        # Forward pass (sin gradientes — congelado)
-        z = model(imgs)                          # [B, d_model]
+        z    = model(imgs)           # [B, d_model]
         z_np = z.cpu().numpy()
+        B    = z_np.shape[0]
  
-        B = z_np.shape[0]
+        # ── Detección de NaN / Inf — señal de problema grave ──────────────
+        if np.isnan(z_np).any():
+            nan_batches += 1
+            log.error(f"[Extract/{desc}] NaN detectado en batch {batch_idx} "
+                      f"(imágenes {cursor}–{cursor+B}). "
+                      f"Causa probable: imagen corrupta o overflow en el backbone.")
+        if np.isinf(z_np).any():
+            inf_batches += 1
+            log.error(f"[Extract/{desc}] Inf detectado en batch {batch_idx} "
+                      f"(imágenes {cursor}–{cursor+B}). "
+                      f"Causa probable: normalización incorrecta de píxeles.")
+ 
         Z[cursor:cursor + B]        = z_np
         y_expert[cursor:cursor + B] = experts.numpy()
         img_names.extend(names)
         cursor += B
  
+        # ── Progreso cada 50 batches ───────────────────────────────────────
         if batch_idx % 50 == 0:
-            print(f"  {desc} [{cursor}/{len(dataloader.dataset)}]")
+            elapsed  = time.time() - t_start
+            speed    = cursor / elapsed if elapsed > 0 else 0
+            eta_s    = (n_total - cursor) / speed if speed > 0 else 0
+            log.info(f"[Extract/{desc}] {cursor:>6,}/{n_total:,} "
+                     f"({100*cursor/n_total:.1f}%) | "
+                     f"{speed:.0f} img/s | ETA {eta_s/60:.1f} min")
+ 
+        # ── VRAM cada 200 batches (solo GPU) ──────────────────────────────
+        if device == "cuda" and batch_idx % 200 == 0:
+            used_gb  = torch.cuda.memory_allocated() / 1e9
+            total_gb = torch.cuda.get_device_properties(0).total_memory / 1e9
+            pct      = 100 * used_gb / total_gb
+            log.debug(f"[Extract/{desc}] VRAM: {used_gb:.2f}/{total_gb:.1f} GB ({pct:.1f}%)")
+            if pct > 90:
+                log.warning(f"[Extract/{desc}] VRAM al {pct:.1f}% — riesgo de OOM. "
+                            f"Considera reducir --batch_size.")
+ 
+    elapsed_total = time.time() - t_start
+    log.info(f"[Extract/{desc}] Completado: {cursor:,} embeddings en {elapsed_total:.1f}s "
+             f"({cursor/elapsed_total:.0f} img/s)")
+ 
+    # ── Resumen de anomalías ───────────────────────────────────────────────
+    if nan_batches or inf_batches:
+        log.error(f"[Extract/{desc}] RESUMEN ANOMALÍAS: "
+                  f"NaN en {nan_batches} batches | Inf en {inf_batches} batches. "
+                  f"Los embeddings resultantes no son confiables.")
+    else:
+        log.info(f"[Extract/{desc}] Sin NaN ni Inf detectados ✓")
+ 
+    # Verificar norma L2 media — embeddings ViT sanos tienen norma ~10–30
+    norms = np.linalg.norm(Z[:cursor], axis=1)
+    log.debug(f"[Extract/{desc}] Norma L2 embeddings — "
+              f"media: {norms.mean():.2f} | min: {norms.min():.2f} | max: {norms.max():.2f}")
+    if norms.mean() < 1.0:
+        log.warning(f"[Extract/{desc}] Norma L2 media muy baja ({norms.mean():.3f}). "
+                    f"¿El backbone devuelve el CLS token correctamente?")
  
     return Z[:cursor], y_expert[:cursor], img_names
 # Un pequeño consejo "pro" para tu reporte:
@@ -627,7 +863,7 @@ def build_datasets(cfg):
  
     # ── Experto 1: NIH ChestXray14 ──
     if cfg.get("chest_csv") and cfg.get("chest_imgs"):
-        print("[Dataset] Cargando NIH ChestXray14...")
+        log.info("[Dataset] Cargando NIH ChestXray14 (Experto 0)...")
         chest_train = ChestXray14Dataset(
             csv_path=cfg["chest_csv"],
             img_dir=cfg["chest_imgs"],
@@ -642,43 +878,68 @@ def build_datasets(cfg):
         )
         train_datasets.append(chest_train)
         val_datasets.append(chest_val)
-        print(f"  train: {len(chest_train):,}  val: {len(chest_val):,}")
+        log.info(f"  → train: {len(chest_train):,}  val: {len(chest_val):,}")
+    else:
+        log.warning("[Dataset] NIH ChestXray14 OMITIDO — falta --chest_csv o --chest_imgs")
  
     # ── Experto 2: ISIC 2019 ──
     if cfg.get("isic_gt") and cfg.get("isic_imgs"):
-        print("[Dataset] Cargando ISIC 2019...")
+        log.info("[Dataset] Cargando ISIC 2019 (Experto 1)...")
         isic_train = ISICDataset(cfg["isic_gt"], cfg["isic_imgs"], transform_2d, split="train")
         isic_val   = ISICDataset(cfg["isic_gt"], cfg["isic_imgs"], transform_2d, split="val")
         train_datasets.append(isic_train)
         val_datasets.append(isic_val)
-        print(f"  train: {len(isic_train):,}  val: {len(isic_val):,}")
+        log.info(f"  → train: {len(isic_train):,}  val: {len(isic_val):,}")
+    else:
+        log.warning("[Dataset] ISIC 2019 OMITIDO — falta --isic_gt o --isic_imgs")
  
     # ── Experto 3: OA Rodilla ──
     if cfg.get("oa_root"):
-        print("[Dataset] Cargando Osteoarthritis Knee...")
+        log.info("[Dataset] Cargando Osteoarthritis Knee (Experto 2)...")
         oa_train = OAKneeDataset(cfg["oa_root"], split="train")
         oa_val   = OAKneeDataset(cfg["oa_root"], split="val")
         train_datasets.append(oa_train)
         val_datasets.append(oa_val)
-        print(f"  train: {len(oa_train):,}  val: {len(oa_val):,}")
+        log.info(f"  → train: {len(oa_train):,}  val: {len(oa_val):,}")
+    else:
+        log.warning("[Dataset] OA Rodilla OMITIDO — falta --oa_root")
  
     # ── Experto 4: LUNA16 ──
     if cfg.get("luna_patches") and cfg.get("luna_csv"):
-        print("[Dataset] Cargando LUNA16 (parches 3D pre-extraídos)...")
+        log.info("[Dataset] Cargando LUNA16 parches 3D (Experto 3)...")
         luna_train = LUNA16Dataset(cfg["luna_patches"] + "/train", cfg["luna_csv"])
         luna_val   = LUNA16Dataset(cfg["luna_patches"] + "/val",   cfg["luna_csv"])
         train_datasets.append(luna_train)
         val_datasets.append(luna_val)
-        print(f"  train: {len(luna_train):,}  val: {len(luna_val):,}")
+        log.info(f"  → train: {len(luna_train):,}  val: {len(luna_val):,}")
+    else:
+        log.warning("[Dataset] LUNA16 OMITIDO — falta --luna_patches o --luna_csv")
  
     # ── Experto 5: Pancreas ──
     if cfg.get("pancreas_patches_train") and cfg.get("pancreas_patches_val"):
-        print("[Dataset] Cargando Pancreas CT 3D...")
+        log.info("[Dataset] Cargando Pancreas CT 3D (Experto 4)...")
         panc_train = PancreasDataset(cfg["pancreas_patches_train"])
         panc_val   = PancreasDataset(cfg["pancreas_patches_val"])
         train_datasets.append(panc_train)
         val_datasets.append(panc_val)
-        print(f"  train: {len(panc_train):,}  val: {len(panc_val):,}")
+        log.info(f"  → train: {len(panc_train):,}  val: {len(panc_val):,}")
+    else:
+        log.warning("[Dataset] Pancreas OMITIDO — falta --pancreas_patches_train o --pancreas_patches_val")
+ 
+    # ── Experto 6 (OOD) — ausente intencionalmente ──
+    log.info("[Dataset] Experto 5 (OOD) — sin dataset en FASE 0. Se inicializa en FASE 1.")
+ 
+    if not train_datasets:
+        log.error("[Dataset] ¡Ningún dataset cargado! Verifica que al menos una ruta sea válida.")
+ 
+    # Advertir si el balance entre expertos es muy desigual (objetivo: max/min < 1.30)
+    sizes = [len(d) for d in train_datasets]
+    if sizes:
+        ratio = max(sizes) / min(sizes)
+        log.info(f"[Dataset] Tamaños train por experto: {sizes}")
+        if ratio > 10:
+            log.warning(f"[Dataset] Balance muy desigual: max/min = {ratio:.1f}x. "
+                        f"Considera WeightedRandomSampler en el DataLoader de FASE 1.")
  
     return ConcatDataset(train_datasets), ConcatDataset(val_datasets)
 # Sugerencia:
@@ -692,13 +953,32 @@ def build_datasets(cfg):
 # multimodales, hasta la ejecución del forward pass del backbone y la persistencia de los resultados 
 # (embeddings) y auditorías (nombres de archivo) en el almacenamiento.
 def main(args):
+    # ── Inicializar logging lo primero de todo ──
+    global log
+    log = setup_logging(args.output_dir)
+ 
+    log.info("=" * 60)
+    log.info("FASE 0 — Extracción de CLS tokens (Embeddings)")
+    log.info("=" * 60)
+    log.info(f"Argumentos recibidos: {vars(args)}")
+ 
+    # ── Setup de dispositivo ──
     device = "cuda" if torch.cuda.is_available() else "cpu"
-    print(f"[Setup] Dispositivo: {device}")
+    log.info(f"[Setup] Dispositivo: {device}")
     if device == "cuda":
-        print(f"[Setup] GPU: {torch.cuda.get_device_name(0)}")
-        print(f"[Setup] VRAM disponible: {torch.cuda.get_device_properties(0).total_memory / 1e9:.1f} GB")
+        log.info(f"[Setup] GPU           : {torch.cuda.get_device_name(0)}")
+        total_vram = torch.cuda.get_device_properties(0).total_memory / 1e9
+        log.info(f"[Setup] VRAM total    : {total_vram:.1f} GB")
+        expected_vram = BACKBONE_CONFIGS[args.backbone]["vram_gb"]
+        if expected_vram > total_vram * 0.8:
+            log.warning(f"[Setup] El backbone '{args.backbone}' requiere ~{expected_vram} GB "
+                        f"pero solo hay {total_vram:.1f} GB. Considera reducir --batch_size.")
+    else:
+        log.warning("[Setup] Corriendo en CPU — la extracción será muy lenta. "
+                    "Se recomienda GPU para un dataset de esta escala.")
  
     # ── Cargar backbone congelado ──
+    log.info("[Setup] Cargando backbone...")
     model, d_model = load_frozen_backbone(args.backbone, device)
  
     # ── Construir datasets ──
@@ -716,14 +996,15 @@ def main(args):
         "pancreas_patches_val":   args.pancreas_patches_val,
     }
  
+    log.info("[Setup] Construyendo datasets...")
     train_dataset, val_dataset = build_datasets(cfg)
-    print(f"\n[Dataset] Total train: {len(train_dataset):,}")
-    print(f"[Dataset] Total val:   {len(val_dataset):,}")
+    log.info(f"[Dataset] Total train: {len(train_dataset):,}")
+    log.info(f"[Dataset] Total val  : {len(val_dataset):,}")
  
     train_loader = DataLoader(
         train_dataset,
         batch_size=args.batch_size,
-        shuffle=False,          # NO mezclar — queremos reproducibilidad
+        shuffle=False,
         num_workers=args.workers,
         pin_memory=(device == "cuda")
     )
@@ -738,46 +1019,74 @@ def main(args):
     # ── Extraer embeddings ──
     os.makedirs(args.output_dir, exist_ok=True)
  
-    print("\n[FASE 0] Extrayendo embeddings de TRAIN...")
+    log.info("[FASE 0] Extrayendo embeddings de TRAIN...")
+    t0 = time.time()
     Z_train, y_train, names_train = extract_embeddings(
         model, train_loader, device, d_model, desc="train"
     )
+    log.info(f"[FASE 0] TRAIN completado en {time.time()-t0:.1f}s")
  
-    print("\n[FASE 0] Extrayendo embeddings de VAL...")
+    log.info("[FASE 0] Extrayendo embeddings de VAL...")
+    t0 = time.time()
     Z_val, y_val, names_val = extract_embeddings(
         model, val_loader, device, d_model, desc="val"
     )
+    log.info(f"[FASE 0] VAL completado en {time.time()-t0:.1f}s")
  
     # ── Guardar en disco ──
     out = Path(args.output_dir)
-    np.save(out / "Z_train.npy",     Z_train)
-    np.save(out / "y_train.npy",     y_train)
-    np.save(out / "Z_val.npy",       Z_val)
-    np.save(out / "y_val.npy",       y_val)
+    log.info(f"[Guardado] Escribiendo archivos en '{out}'...")
+    np.save(out / "Z_train.npy", Z_train)
+    np.save(out / "y_train.npy", y_train)
+    np.save(out / "Z_val.npy",   Z_val)
+    np.save(out / "y_val.npy",   y_val)
+    log.debug(f"[Guardado] Z_train.npy: {Z_train.shape}  ({Z_train.nbytes/1e6:.1f} MB)")
+    log.debug(f"[Guardado] Z_val.npy  : {Z_val.shape}  ({Z_val.nbytes/1e6:.1f} MB)")
  
-    # Guardar nombres para auditoría (opcional pero útil)
     with open(out / "names_train.txt", "w") as f:
         f.write("\n".join(names_train))
     with open(out / "names_val.txt", "w") as f:
         f.write("\n".join(names_val))
  
+    backbone_meta = {
+        "backbone": args.backbone,
+        "d_model":  int(Z_train.shape[1]),
+        "n_train":  int(Z_train.shape[0]),
+        "n_val":    int(Z_val.shape[0]),
+        "vram_gb":  BACKBONE_CONFIGS[args.backbone]["vram_gb"],
+    }
+    with open(out / "backbone_meta.json", "w") as f:
+        json.dump(backbone_meta, f, indent=2)
+    log.info(f"[Guardado] backbone_meta.json escrito")
+ 
     # ── Reporte final ──
-    print(f"\n{'='*55}")
-    print(f"FASE 0 completada")
-    print(f"{'='*55}")
-    print(f"Z_train:  {Z_train.shape}  ({Z_train.nbytes / 1e6:.1f} MB)")
-    print(f"Z_val:    {Z_val.shape}  ({Z_val.nbytes / 1e6:.1f} MB)")
-    print(f"\nDistribución de expertos en train (dominios clínicos 0–4):")
+    log.info("=" * 55)
+    log.info("FASE 0 completada")
+    log.info("=" * 55)
+    log.info(f"Z_train : {Z_train.shape}  ({Z_train.nbytes/1e6:.1f} MB)")
+    log.info(f"Z_val   : {Z_val.shape}  ({Z_val.nbytes/1e6:.1f} MB)")
+ 
+    log.info("Distribución de expertos en train (dominios clínicos 0–4):")
     for exp_name, exp_id in EXPERT_IDS.items():
         count = (y_train == exp_id).sum()
         pct   = count / len(y_train) * 100
-        print(f"  Experto {exp_id} ({exp_name:<10}): {count:>6,}  ({pct:.1f}%)")
-    print(f"\n  Experto 5 (ood       ):      0  (0.0%)  ← esperado: sin dataset en FASE 0")
-    print(f"  [Experto 5 se inicializa en FASE 1 como MLP OOD — entrenado via L_error]")
-    print(f"\n  N_EXPERTS_DOMAIN = {N_EXPERTS_DOMAIN}  (con dataset propio)")
-    print(f"  N_EXPERTS_TOTAL  = {N_EXPERTS_TOTAL}  (incluye Experto 5 OOD)")
-    print(f"\nArchivos guardados en: {args.output_dir}")
-    print(f"Siguiente paso: python fase1_ablation_router.py --embeddings {args.output_dir}")
+        log.info(f"  Experto {exp_id} ({exp_name:<10}): {count:>6,}  ({pct:.1f}%)")
+    log.info(f"  Experto 5 (ood       ):      0  (0.0%)  ← esperado: sin dataset en FASE 0")
+    log.info(f"  [Experto 5 se inicializa en FASE 1 como MLP OOD — entrenado via L_error]")
+    log.info(f"  N_EXPERTS_DOMAIN = {N_EXPERTS_DOMAIN} | N_EXPERTS_TOTAL = {N_EXPERTS_TOTAL}")
+ 
+    # Verificar balance entre expertos (objetivo del proyecto: max/min < 1.30 en FASE 1)
+    counts = [(y_train == i).sum() for i in range(N_EXPERTS_DOMAIN)]
+    if min(counts) > 0:
+        balance = max(counts) / min(counts)
+        if balance > 10:
+            log.warning(f"[Balance] ratio max/min = {balance:.1f}x — muy desigual. "
+                        f"Usa WeightedRandomSampler en FASE 1 para compensar.")
+        else:
+            log.info(f"[Balance] ratio max/min = {balance:.1f}x")
+ 
+    log.info(f"Archivos guardados en: {args.output_dir}")
+    log.info(f"Siguiente paso: python fase1_ablation_router.py --embeddings {args.output_dir}")
 
 
 # ──────────────────────────────────────────────────────────
@@ -791,11 +1100,25 @@ def main(args):
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="FASE 0 — Extracción de embeddings MoE")
  
-    # Backbone
-    parser.add_argument("--backbone",     default="vit_tiny_patch16_224",
-                        choices=["vit_tiny_patch16_224", "cvt_13",
-                                 "swin_tiny_patch4_window7_224"],
-                        help="Backbone ViT a usar (proyecto permite ViT, CvT o Swin-Tiny)")
+    # ── Backbone ──────────────────────────────────────────────────────────────
+    # Usa --backbone para el ablation study del backbone (ver BACKBONE_CONFIGS).
+    # CONSEJO: corre FASE 0 tres veces con distintos backbones y guarda en
+    # carpetas separadas para comparar la calidad de embeddings en FASE 1:
+    #   python fase0_extract_embeddings.py --backbone vit_tiny_patch16_224 --output_dir ./embeddings/vit_tiny
+    #   python fase0_extract_embeddings.py --backbone swin_tiny_patch4_window7_224 --output_dir ./embeddings/swin_tiny
+    #   python fase0_extract_embeddings.py --backbone cvt_13 --output_dir ./embeddings/cvt
+    parser.add_argument(
+        "--backbone",
+        default="vit_tiny_patch16_224",
+        choices=list(BACKBONE_CONFIGS.keys()),
+        help=(
+            "Backbone para extraer CLS tokens. Opciones:\n"
+            "  vit_tiny_patch16_224        → d_model=192, ~2GB VRAM (DEFAULT: primera corrida)\n"
+            "  swin_tiny_patch4_window7_224→ d_model=768, ~4GB VRAM (recomendado: ablation final)\n"
+            "  cvt_13                      → d_model=384, ~3GB VRAM (balance intermedio)\n"
+            "El d_model resultante determina el tamaño de Z_train.npy y los parámetros del router."
+        )
+    )
     parser.add_argument("--batch_size",   type=int, default=64)
     parser.add_argument("--workers",      type=int, default=4)
     parser.add_argument("--output_dir",   default="./embeddings",
