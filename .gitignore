@@ -1,0 +1,72 @@
+# ═══════════════════════════════════════════════════════════════
+# IDE & Editor
+# ═══════════════════════════════════════════════════════════════
+.vscode/
+*.swp
+*.swo
+*~
+.idea/
+.DS_Store
+
+# ═══════════════════════════════════════════════════════════════
+# Python
+# ═══════════════════════════════════════════════════════════════
+__pycache__/
+*.pyc
+*.pyo
+*.egg-info/
+dist/
+build/
+.pytest_cache/
+.mypy_cache/
+*.egg
+venv/
+env/
+.venv
+
+# ═══════════════════════════════════════════════════════════════
+# Datasets (ignore content but keep directory structure via .gitkeep)
+# ═══════════════════════════════════════════════════════════════
+# Ignore ALL files in datasets subdirectories EXCEPT .gitkeep
+datasets/nih_chest_xrays/*
+!datasets/nih_chest_xrays/.gitkeep
+
+datasets/isic_2019/*
+!datasets/isic_2019/.gitkeep
+
+datasets/osteoarthritis/*
+!datasets/osteoarthritis/.gitkeep
+
+datasets/luna_lung_cancer/*
+!datasets/luna_lung_cancer/.gitkeep
+
+datasets/zenodo_13715870/*
+!datasets/zenodo_13715870/.gitkeep
+
+# ═══════════════════════════════════════════════════════════════
+# Logs & Temporary Files (in datasets root)
+# ═══════════════════════════════════════════════════════════════
+datasets/*.log
+datasets/*.sh
+datasets/monitor.sh
+
+# ═══════════════════════════════════════════════════════════════
+# Environment & Config
+# ═══════════════════════════════════════════════════════════════
+.env
+.env.local
+.env.*.local
+
+# ═══════════════════════════════════════════════════════════════
+# Jupyter Notebooks
+# ═══════════════════════════════════════════════════════════════
+.ipynb_checkpoints/
+*.ipynb_checkpoints
+
+# ═══════════════════════════════════════════════════════════════
+# OS-specific
+# ═══════════════════════════════════════════════════════════════
+Thumbs.db
+.DS_Store
+.AppleDouble
+.LSOverride
