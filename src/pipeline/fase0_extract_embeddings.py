@@ -56,12 +56,7 @@ import cv2                 # para CLAHE en OA
 # ──────────────────────────────────────────────────────────
 # 0. LOGGING
 # ──────────────────────────────────────────────────────────
-
-# Esta función configura un sistema de registro de eventos (logging) jerárquico. Su función principal es doble: 
-# escribe todos los detalles técnicos (nivel DEBUG) en un archivo de texto persistente para auditoría, mientras 
-# que, simultáneamente, filtra y muestra solo la información relevante (nivel INFO) en la consola para que el 
-# desarrollador pueda seguir el progreso en tiempo real sin saturar la pantalla.
-
+ 
 def setup_logging(output_dir: str) -> logging.Logger:
     """
     Configura el sistema de logging del pipeline.
@@ -97,7 +92,7 @@ def setup_logging(output_dir: str) -> logging.Logger:
     log.info(f"Log iniciado → {log_path}")
     return log
  
- 
+  
 # Logger global — se inicializa en main() con setup_logging()
 # Las clases Dataset lo obtienen con getLogger para no depender del orden de importación
 log = logging.getLogger("fase0")
@@ -142,6 +137,33 @@ EXPERT_IDS = {
 # Número total de expertos en la arquitectura final (incluye OOD)
 N_EXPERTS_TOTAL  = 6   # Expertos 0–4 de dominio + Experto 5 OOD
 N_EXPERTS_DOMAIN = 5   # Solo los expertos con dataset propio (FASE 0)
+ 
+# ── NIH ChestXray14 — 14 patologías en orden canónico ───────
+# Orden idéntico al de las columnas en BBox_List_2017.csv y a la literatura.
+# CRÍTICO: el vector binario de etiquetas SIEMPRE debe respetar este orden.
+# En modo expert, __getitem__ devuelve un tensor float32 de longitud 14
+# donde 1.0 indica presencia de la patología.
+# Loss: BCEWithLogitsLoss (NO CrossEntropyLoss — las clases NO son mutuamente excluyentes).
+CHEST_PATHOLOGIES = [
+    "Atelectasis",        # 0
+    "Cardiomegaly",       # 1
+    "Effusion",           # 2
+    "Infiltration",       # 3
+    "Mass",               # 4
+    "Nodule",             # 5
+    "Pneumonia",          # 6
+    "Pneumothorax",       # 7
+    "Consolidation",      # 8
+    "Edema",              # 9
+    "Emphysema",          # 10
+    "Fibrosis",           # 11
+    "Pleural_Thickening", # 12
+    "Hernia",             # 13
+    # "No Finding" se excluye del vector — indica ausencia de todas las anteriores.
+    # Si "No Finding" aparece solo, el vector será todo ceros.
+]
+N_CHEST_CLASSES = len(CHEST_PATHOLOGIES)   # = 14
+ 
  
 # Normalización ImageNet — estándar para todos los datasets 2D
 IMAGENET_MEAN = [0.485, 0.456, 0.406]
@@ -254,10 +276,10 @@ def volume_to_vit_input(volume_3d_tensor):
     embeddings de routing. Para clasificación 3D real se usa
     la arquitectura 3D del experto (R3D-18, Swin3D-Tiny).
     """
-    v = volume_3d_tensor.squeeze(0)          # [64, 64, 64]
+    v = volume_3d_tensor.squeeze(0)           # [64, 64, 64]
     d, h, w = v.shape
  
-    axial    = v[d // 2, :, :]               # corte central eje Z
+    axial    = v[d // 2, :, :]                # corte central eje Z
     coronal  = v[:, h // 2, :]               # corte central eje Y
     sagittal = v[:, :, w // 2]               # corte central eje X
  
@@ -267,7 +289,7 @@ def volume_to_vit_input(volume_3d_tensor):
     # Resize a 224×224
     rgb = nn.functional.interpolate(
         rgb.unsqueeze(0), size=(224, 224), mode="bilinear", align_corners=False
-    ).squeeze(0)                             # [3, 224, 224]
+    ).squeeze(0)                              # [3, 224, 224]
  
     # Normalizar como ImageNet (el volumen ya está en [0,1])
     mean = torch.tensor(IMAGENET_MEAN).view(3, 1, 1)
@@ -279,60 +301,247 @@ def volume_to_vit_input(volume_3d_tensor):
 # 3. DATASETS
 # ──────────────────────────────────────────────────────────
  
-# Esta clase define el contenedor de datos especializado para el dataset NIH ChestXray14. Su función es filtrar
-# los archivos de imagen mediante las listas oficiales de división (train/val), asignar automáticamente la identidad 
-# del experto (0) y aplicar las transformaciones de imagen necesarias para que el backbone del sistema pueda procesarlas.
+# Esta clase es el cargador del Experto 0. Implementa dos modos:
+#   "embedding" — para FASE 0: extrae representaciones del backbone (etiqueta = expert_id=0)
+#   "expert"    — para FASE 2: devuelve vector multi-label de 14 patologías para BCEWithLogitsLoss
+# Adicionalmente verifica integridad del split (no leakage por Patient ID),
+# valida las columnas críticas del CSV y computa pesos de clase para el desbalance.
+
+
+# Esta clase es un Cargador de Datos con Auditoría de Integridad. No solo carga imágenes, sino que actúa 
+# como un filtro de validación que impide el data leakage (verificando IDs de pacientes), convierte 
+# etiquetas de texto libre en vectores binarios (multi-label) y calcula pesos de clase dinámicos, garantizando 
+# que el Experto 0 esté configurado correctamente para lidiar con el desbalance extremo de las 14 patologías.
 class ChestXray14Dataset(Dataset):
     """
     NIH ChestXray14 — Multi-label, 14 patologías.
-    Para embedding: la etiqueta de experto es siempre 0.
+ 
+    ⚠ HALLAZGO 1 — Multi-label, NO multiclase:
+      Cada imagen puede tener cero o varias patologías simultáneas.
+      Loss obligatoria: BCEWithLogitsLoss (una sigmoide por clase).
+      CrossEntropyLoss es INCORRECTO — softmax hace que las clases compitan.
+      En modo expert, __getitem__ devuelve un vector float32 [14] con 0/1 por patología.
+ 
+    ⚠ HALLAZGO 2 — Data leakage por Patient ID:
+      El dataset tiene seguimiento longitudinal — mismo paciente, múltiples visitas.
+      Splits oficiales (train_val_list.txt / test_list.txt) garantizan separación
+      por paciente. Este dataset verifica que NO haya Patient ID compartido entre
+      el split cargado y un segundo split de referencia (ver parámetro patient_ids_other).
+ 
+    ⚠ HALLAZGO 3 — Ruido estructural en etiquetas:
+      Etiquetas generadas por NLP sobre reportes radiológicos (~>90% precisión).
+      AUC-ROC alto ≠ calidad clínica real. Benchmark: DenseNet-121 ≈ 0.81 AUC macro.
+      Si el modelo supera 0.85 significativamente, revisar por confounding.
+ 
+    Dos modos de uso:
+      mode="embedding" → FASE 0: devuelve (img, expert_id=0, img_name)
+      mode="expert"    → FASE 2: devuelve (img, label_vector_14, img_name)
     """
-    def __init__(self, csv_path, img_dir, file_list, transform):
+ 
+    def __init__(self, csv_path, img_dir, file_list, transform,
+                 mode="embedding", patient_ids_other=None):
+        """
+        Args:
+            csv_path           : ruta a Data_Entry_2017.csv
+            img_dir            : directorio con los .png
+            file_list          : train_val_list.txt o test_list.txt (split oficial)
+            transform          : torchvision transform pipeline
+            mode               : "embedding" (FASE 0) o "expert" (FASE 2)
+            patient_ids_other  : set de Patient IDs del OTRO split (para verificar
+                                 leakage). Pasar el set del split complementario.
+                                 Si es None, se omite la verificación cruzada.
+        """
+        assert mode in ("embedding", "expert"), \
+            f"[Chest] mode debe ser 'embedding' o 'expert', recibido: '{mode}'"
+ 
         self.img_dir   = Path(img_dir)
         self.transform = transform
         self.expert_id = EXPERT_IDS["chest"]
+        self.mode      = mode
  
-        df = pd.read_csv(csv_path)
-        log.debug(f"[Chest] CSV cargado: {len(df):,} filas totales en {csv_path}")
+        # ── Verificación de columnas (Hallazgo 2 + 3) ────────────────────
+        df_full = pd.read_csv(csv_path)
+        log.debug(f"[Chest] CSV cargado: {len(df_full):,} filas en {csv_path}")
  
+        required_cols = {"Image Index", "Finding Labels", "Patient ID",
+                         "View Position", "Follow-up #"}
+        missing_cols = required_cols - set(df_full.columns)
+        if missing_cols:
+            log.error(f"[Chest] Columnas faltantes en el CSV: {missing_cols}. "
+                      f"Verifica que sea Data_Entry_2017.csv oficial.")
+        else:
+            log.debug(f"[Chest] Columnas verificadas: {required_cols} ✓")
+ 
+        # ── Aplicar split oficial (Hallazgo 2) ────────────────────────────
         with open(file_list) as f:
             valid_files = set(f.read().splitlines())
-        log.debug(f"[Chest] file_list '{file_list}': {len(valid_files):,} nombres")
+        log.debug(f"[Chest] file_list '{Path(file_list).name}': {len(valid_files):,} nombres")
  
-        self.df = df[df["Image Index"].isin(valid_files)].reset_index(drop=True)
-        n_matched = len(self.df)
+        self.df = df_full[df_full["Image Index"].isin(valid_files)].reset_index(drop=True)
+        n_matched     = len(self.df)
         n_missing_csv = len(valid_files) - n_matched
  
         if n_matched == 0:
             log.error("[Chest] ¡Dataset vacío! Ninguna imagen del file_list está en el CSV. "
-                      "Verifica que chest_csv y chest_train_list correspondan al mismo release.")
+                      "Verifica que chest_csv y chest_train_list sean del mismo release.")
         elif n_missing_csv > 0:
-            log.warning(f"[Chest] {n_missing_csv:,} nombres del file_list no aparecen en el CSV "
-                        f"(esperado si usas un subset). Imágenes cargadas: {n_matched:,}")
+            log.warning(f"[Chest] {n_missing_csv:,} nombres del file_list no están en el CSV "
+                        f"(aceptable si usas un subset). Imágenes cargadas: {n_matched:,}")
         else:
-            log.info(f"[Chest] {n_matched:,} imágenes cargadas correctamente")
+            log.info(f"[Chest] {n_matched:,} imágenes cargadas (split '{Path(file_list).name}')")
  
-        # Verificar que los archivos existen físicamente en disco (muestra primeros 5 faltantes)
-        missing_disk = [r for r in self.df["Image Index"] if not (self.img_dir / r).exists()]
+        # ── Verificación de leakage por Patient ID (Hallazgo 2) ──────────
+        self.patient_ids = set(self.df["Patient ID"].unique())
+        log.info(f"[Chest] Pacientes únicos en este split: {len(self.patient_ids):,}")
+ 
+        if patient_ids_other is not None:
+            leaked = self.patient_ids & patient_ids_other
+            if leaked:
+                log.error(f"[Chest] ¡DATA LEAKAGE! {len(leaked)} Patient IDs aparecen "
+                          f"en AMBOS splits. Primeros 5: {list(leaked)[:5]}. "
+                          f"Usa EXCLUSIVAMENTE los splits oficiales train_val_list.txt "
+                          f"y test_list.txt.")
+            else:
+                log.info(f"[Chest] Verificación de leakage: 0 Patient IDs compartidos ✓")
+        else:
+            log.warning("[Chest] patient_ids_other=None — verificación de leakage OMITIDA. "
+                        "Pasa el set de Patient IDs del split complementario para validar.")
+ 
+        # ── Estadísticas de seguimiento longitudinal (Hallazgo 2) ────────
+        if "Follow-up #" in self.df.columns:
+            followup_count = (self.df["Follow-up #"] > 0).sum()
+            pct_followup   = 100 * followup_count / n_matched if n_matched > 0 else 0
+            log.info(f"[Chest] Imágenes con Follow-up # > 0 (visitas repetidas): "
+                     f"{followup_count:,} ({pct_followup:.1f}%) — "
+                     f"estas refuerzan la importancia de separar por Patient ID.")
+ 
+        # ── Estadísticas de View Position (Hallazgo 2 — bias PA vs AP) ───
+        if "View Position" in self.df.columns:
+            view_counts = self.df["View Position"].value_counts()
+            log.info(f"[Chest] Distribución View Position: "
+                     + " | ".join(f"{v}: {c:,}" for v, c in view_counts.items()))
+            if "AP" in view_counts and "PA" in view_counts:
+                ap_pct = 100 * view_counts.get("AP", 0) / n_matched
+                log.warning(f"[Chest] {ap_pct:.1f}% de imágenes son vistas AP (pacientes encamados). "
+                             f"Las vistas AP tienen corazón aparentemente más grande y mayor "
+                             f"distorsión geométrica. Considera filtrar solo PA para estudios "
+                             f"controlados o agregar View Position como feature al experto.")
+ 
+        # ── Archivos físicos en disco ─────────────────────────────────────
+        missing_disk = [r for r in self.df["Image Index"]
+                        if not (self.img_dir / r).exists()]
         if missing_disk:
-            log.warning(f"[Chest] {len(missing_disk):,} archivos en CSV no encontrados en disco. "
-                        f"Primeros 5: {missing_disk[:5]}")
+            log.warning(f"[Chest] {len(missing_disk):,} archivos no encontrados en disco "
+                        f"'{self.img_dir}'. Primeros 5: {missing_disk[:5]}")
  
+        # ── En modo expert: preparar vector multi-label + pesos de clase ──
+        self.class_weights = None
+        if self.mode == "expert":
+            log.info(f"[Chest] Modo 'expert': preparando vectores multi-label de 14 patologías.")
+            log.info(f"[Chest] ⚠ Loss obligatoria: BCEWithLogitsLoss — NO CrossEntropyLoss.")
+            log.info(f"[Chest] ⚠ Hallazgo 3 — Ruido en etiquetas: generadas por NLP sobre "
+                     f"reportes radiológicos. Benchmark DenseNet-121 ≈ 0.81 AUC macro. "
+                     f"Si superas 0.85 significativamente, revisar por confounding.")
+ 
+            # Construir columna de vector binario (Hallazgo 1)
+            self.df = self.df.copy()
+            self.df["label_vector"] = self.df["Finding Labels"].apply(
+                self._parse_finding_labels
+            )
+ 
+            # Estadísticas de distribución de patologías
+            all_labels = np.stack(self.df["label_vector"].values)   # [N, 14]
+            prevalence = all_labels.mean(axis=0)
+            log.info(f"[Chest] Prevalencia por patología (modo expert):")
+            for i, (name, prev) in enumerate(zip(CHEST_PATHOLOGIES, prevalence)):
+                bar = "█" * max(1, int(prev * 30))
+                log.info(f"    {name:<22}: {prev:.3f}  {bar}")
+ 
+            # Pesos de clase para BCEWithLogitsLoss: pos_weight = (N_neg / N_pos) por clase
+            # Clases muy raras (Hernia ~0.2%) necesitan peso altísimo
+            n_pos  = all_labels.sum(axis=0).clip(min=1)
+            n_neg  = len(all_labels) - n_pos
+            self.class_weights = torch.tensor(n_neg / n_pos, dtype=torch.float32)
+            log.info(f"[Chest] pos_weight BCEWithLogitsLoss (min/max): "
+                     f"{self.class_weights.min():.1f} / {self.class_weights.max():.1f}")
+            log.debug(f"[Chest] pos_weight por clase: "
+                      + " | ".join(f"{n}:{w:.1f}"
+                                   for n, w in zip(CHEST_PATHOLOGIES, self.class_weights.tolist())))
+ 
+            # Verificar "No Finding" — si está solo, el vector debe ser todo ceros
+            no_finding_only = self.df["Finding Labels"].str.strip() == "No Finding"
+            nf_count = no_finding_only.sum()
+            log.info(f"[Chest] Imágenes 'No Finding' (vector todo-ceros): "
+                     f"{nf_count:,} ({100*nf_count/n_matched:.1f}%)")
+ 
+# Esta función es un parser de etiquetas multiclase. Su función es tomar una cadena de texto 
+# (como "Atelectasis|Mass") y convertirla en un vector binario de 14 posiciones ([1, 0, 0, 1, 0...]), donde 
+# cada posición 1 indica la presencia de una patología específica, permitiendo el entrenamiento multi-etiqueta.
+    @staticmethod
+    def _parse_finding_labels(label_str: str) -> np.ndarray:
+        """
+        Convierte "Cardiomegaly|Effusion" → vector binario float32 de longitud 14.
+        "No Finding" → vector todo ceros (ausencia de todas las patologías).
+        Las patologías no presentes en CHEST_PATHOLOGIES (ej. "No Finding") se ignoran.
+        """
+        vec    = np.zeros(N_CHEST_CLASSES, dtype=np.float32)
+        labels = [l.strip() for l in label_str.split("|")]
+        for label in labels:
+            if label in CHEST_PATHOLOGIES:
+                vec[CHEST_PATHOLOGIES.index(label)] = 1.0
+        return vec
+
+# Esta es una utilidad de pre-auditoría de splits. Su función es extraer el conjunto único de identificadores 
+# de pacientes (Patient IDs) de un split específico (train o val) basándose en la lista oficial de archivos, 
+# permitiendo realizar comprobaciones cruzadas para asegurar que no existan pacientes compartidos entre sets 
+# (lo cual invalidaría el experimento).
+    @staticmethod
+    def get_patient_ids_from_file_list(csv_path: str, file_list: str) -> set:
+        """
+        Utilidad para obtener el set de Patient IDs de un split
+        sin construir el dataset completo.
+        Uso típico:
+            ids_val = ChestXray14Dataset.get_patient_ids_from_file_list(csv, val_list)
+            train_ds = ChestXray14Dataset(..., patient_ids_other=ids_val)
+        """
+        df = pd.read_csv(csv_path, usecols=["Image Index", "Patient ID"])
+        with open(file_list) as f:
+            valid = set(f.read().splitlines())
+        return set(df[df["Image Index"].isin(valid)]["Patient ID"].unique())
+
+
+# Esta función devuelve la cantidad total de muestras (imágenes o volúmenes) contenidas en el dataset. Es el 
+# contador maestro que permite al DataLoader calcular cuántos pasos (batches) componen una "época" de 
+# entrenamiento.
     def __len__(self):
         return len(self.df)
  
+
+# Este método implementa el puente de datos dinámico del dataset. Dependiendo del mode configurado, decide si 
+# entrega una etiqueta simple para identificar la modalidad (útil para el Router) o un vector binario de 14 
+# patologías (útil para que el Experto realice el diagnóstico médico). Además, incluye una capa de tolerancia 
+# a fallos que previene que el entrenamiento se detenga si encuentra una imagen corrupta en disco.
     def __getitem__(self, idx):
         img_name = self.df.loc[idx, "Image Index"]
         img_path = self.img_dir / img_name
         try:
             img = Image.open(img_path).convert("RGB")
         except Exception as e:
-            log.warning(f"[Chest] Error abriendo imagen '{img_path}': {e}. "
+            log.warning(f"[Chest] Error abriendo '{img_path}': {e}. "
                         f"Reemplazando con tensor cero.")
             img = Image.fromarray(np.zeros((224, 224, 3), dtype=np.uint8))
         img = self.transform(img)
-        return img, self.expert_id, img_name
  
+        if self.mode == "embedding":
+            # FASE 0: el router aprende "soy imagen de ChestXray14"
+            return img, self.expert_id, img_name
+        else:
+            # FASE 2: el Experto 0 aprende las 14 patologías con BCEWithLogitsLoss
+            label_vec = torch.tensor(
+                self.df.loc[idx, "label_vector"], dtype=torch.float32
+            )
+            return img, label_vec, img_name
+
  
 # Esta clase es un DataLoader polimórfico: cambia su comportamiento dinámicamente según la fase del entrenamiento. 
 # En modo embedding, oculta la patología y solo muestra la "etiqueta de experto" para que el Router se especialice 
@@ -837,10 +1046,11 @@ def extract_embeddings(model, dataloader, device, d_model, desc=""):
 # ──────────────────────────────────────────────────────────
  
 
-# Esta función actúa como una "Fábrica de Datasets". Su rol es verificar qué datasets están disponibles 
-# según la configuración, instanciar las clases específicas para cada modalidad (2D o 3D) y unificar todos 
-# estos conjuntos heterogéneos en dos estructuras únicas (ConcatDataset) para entrenamiento y validación, 
-# permitiendo que el sistema procese un flujo mixto de imágenes médicas sin distinción de origen.
+# Esta función actúa como una Fábrica de Datasets con Auditoría de Leakage. Su función es orquestar la carga 
+# de los 5 datasets, pero con una capa crítica de seguridad: antes de instanciar el dataset del NIH, extrae 
+# los identificadores de pacientes de ambos splits (train/val) y los cruza para garantizar que no haya filtración 
+# de información entre ellos. Finalmente, fusiona todo en un ConcatDataset para que el Router entrene con una 
+# distribución equilibrada de las 5 modalidades.
 def build_datasets(cfg):
     """
     Construye los datasets de train y val para los 5 expertos de dominio.
@@ -864,17 +1074,35 @@ def build_datasets(cfg):
     # ── Experto 1: NIH ChestXray14 ──
     if cfg.get("chest_csv") and cfg.get("chest_imgs"):
         log.info("[Dataset] Cargando NIH ChestXray14 (Experto 0)...")
+ 
+        # Hallazgo 2: obtener Patient IDs de cada split ANTES de construir los datasets
+        # para poder verificar que no haya leakage cruzado
+        if cfg.get("chest_train_list") and cfg.get("chest_val_list"):
+            ids_train = ChestXray14Dataset.get_patient_ids_from_file_list(
+                cfg["chest_csv"], cfg["chest_train_list"])
+            ids_val   = ChestXray14Dataset.get_patient_ids_from_file_list(
+                cfg["chest_csv"], cfg["chest_val_list"])
+            log.debug(f"[Chest] Patient IDs pre-cargados: train={len(ids_train):,} | "
+                      f"val={len(ids_val):,}")
+        else:
+            ids_train, ids_val = None, None
+            log.warning("[Chest] No se pueden verificar Patient IDs — faltan rutas de file_list.")
+ 
         chest_train = ChestXray14Dataset(
             csv_path=cfg["chest_csv"],
             img_dir=cfg["chest_imgs"],
             file_list=cfg["chest_train_list"],
-            transform=transform_2d
+            transform=transform_2d,
+            mode="embedding",
+            patient_ids_other=ids_val,    # verifica que val no filtra en train
         )
         chest_val = ChestXray14Dataset(
             csv_path=cfg["chest_csv"],
             img_dir=cfg["chest_imgs"],
             file_list=cfg["chest_val_list"],
-            transform=transform_2d
+            transform=transform_2d,
+            mode="embedding",
+            patient_ids_other=ids_train,  # verifica que train no filtra en val
         )
         train_datasets.append(chest_train)
         val_datasets.append(chest_val)
