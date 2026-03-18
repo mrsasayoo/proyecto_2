@@ -118,11 +118,19 @@ ENTROPY_THRESHOLD_DEFAULT = 1.4   # ln(5) ≈ 1.609 = entropía máxima uniforme
 # ── Notas por experto para el JSON de resultados ────────────
 # Estas notas se insertan en ablation_results.json para guiar FASE 2.
 EXPERT_NOTES = {
-    0: ("NIH ChestXray14 — MULTI-LABEL (14 patologías). "
-        "Loss: BCEWithLogitsLoss con pos_weight por clase. "
-        "NO usar CrossEntropyLoss. "
-        "Hallazgo 3: etiquetas por NLP, benchmark DenseNet-121 ≈ 0.81 AUC macro. "
-        "AUC > 0.85 significativo → revisar por confounding."),
+    0: (
+        "NIH ChestXray14 — MULTI-LABEL (14 patologías). "
+        "H1: Loss=BCEWithLogitsLoss con pos_weight; NO CrossEntropyLoss. "
+        "H2: splits por Patient ID verificados (train_val_list.txt / test_list.txt). "
+        "H3: etiquetas por NLP, benchmark DenseNet-121 ≈ 0.81 AUC macro; "
+        "AUC > 0.85 significativo → revisar confounding. "
+        "H4: filtro View Position PA recomendado para estudios controlados (--chest_view_filter PA). "
+        "H5: BBox disponible para 8/14 clases (~1000 imgs) — usar en dashboard "
+        "para validar heatmaps ViT con ChestXray14Dataset.load_bbox_index(). "
+        "H6: ⚠ NUNCA usar Accuracy (~54% prediciendo siempre 'No Finding'). "
+        "Métricas: AUC-ROC por clase + F1 Macro + AUPRC. "
+        "FocalLossMultiLabel(gamma=2) disponible como alternativa a BCEWithLogitsLoss."
+    ),
     1: "ISIC 2019 — MULTICLASE (8 clases en train, UNK solo en test). Loss: CrossEntropyLoss con pesos.",
     2: "OA Knee — ORDINAL (3 clases KL). Loss: CrossEntropyLoss + QWK como métrica principal.",
     3: "LUNA16 — BINARIO parches 3D. Loss: FocalLoss(gamma=2). Métrica: CPM + curva FROC.",
