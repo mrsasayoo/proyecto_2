@@ -131,9 +131,37 @@ EXPERT_NOTES = {
         "Métricas: AUC-ROC por clase + F1 Macro + AUPRC. "
         "FocalLossMultiLabel(gamma=2) disponible como alternativa a BCEWithLogitsLoss."
     ),
-    1: "ISIC 2019 — MULTICLASE (8 clases en train, UNK solo en test). Loss: CrossEntropyLoss con pesos.",
-    2: "OA Knee — ORDINAL (3 clases KL). Loss: CrossEntropyLoss + QWK como métrica principal.",
-    3: "LUNA16 — BINARIO parches 3D. Loss: FocalLoss(gamma=2). Métrica: CPM + curva FROC.",
+    1: ("ISIC 2019 — MULTICLASE (8 clases en train, UNK solo en test). "
+        "H1: Loss: CrossEntropyLoss con pesos class_weights. NO BCEWithLogitsLoss. "
+        "Capa de salida: 9 neuronas softmax (incluye slot UNK para inferencia). "
+        "H2: Split por lesion_id (build_lesion_split). Sin metadata_csv → riesgo de leakage. "
+        "H3: 3 fuentes (HAM10000/BCN_20000/MSK) con bias de dominio — ColorJitter agresivo. "
+        "Métricas: BMCA (oficial) + AUC-ROC por clase. "
+        "UNK en inferencia → H(g) alta → Experto 5 OOD la captura."),
+    2: ("OA Rodilla — ORDINAL (3 clases: Normal/Leve/Severo, consolidadas de KL 0-4). "
+        "H1: Opción A (pragmática): CrossEntropyLoss con class_weights. "
+        "Opción B: OrdinalLoss(n_classes=3) — salida [B,2] logits. "
+        "Métrica principal: QWK — llamar OAKneeDataset.compute_qwk(y_true, y_pred) "
+        "en cada época de validación. ⚠ NO usar Accuracy ni F1 como métricas principales para OA. "
+        "H2: Aug offline detectado → NO aug adicional en runtime. "
+        "H3: Sin Patient ID — documentar como limitación en el reporte. "
+        "H4: CLAHE SIEMPRE antes del resize (apply_clahe() → resize(224×224)). "
+        "H5: KL1 contamina Clase1 — frontera 0↔1 será la más difícil. "
+        "Usar OAKneeDataset.evaluate_boundary_confusion() + log_boundary_confusion() "
+        "en cada época de validación. ⚠ NUNCA RandomVerticalFlip."),
+    3: ("LUNA16 — BINARIO parches 3D (NO volúmenes completos). "
+        "H1: Tarea = clasificar parche 64×64×64 centrado en candidato (x,y,z). "
+        "Tensor FASE 2: [B, 1, 64, 64, 64] — arquitectura 3D (R3D-18, Swin3D). "
+        "H2: Desbalance ~490:1 — FocalLoss(gamma=2, alpha=0.25) obligatoria. "
+        "BCELoss → modelo trivial (siempre class=0). "
+        "H3: Conversión world→vóxel con LUNA16PatchExtractor.world_to_voxel(). "
+        "Validar con LUNA16PatchExtractor.validate_extraction() antes de producción. "
+        "Item-2: SIEMPRE candidates_V2.csv (V1 obsoleto, 24 nódulos menos). "
+        "Item-4: HU clip[-1000,400]→[0,1] en LUNA16PatchExtractor.extract(). "
+        "Item-7: gradient checkpointing obligatorio (batch=4, FP16, 12GB VRAM). "
+        "Item-8: CPM+FROC con noduleCADEvaluationLUNA16.py. "
+        "Techo teórico: 94.4% (LUNA16Dataset.SENSITIVITY_CEILING). "
+        "Item-9: spacing variable en volúmenes — verificado en __init__."),
     4: "Pancreas PANORAMA — BINARIO volumen 3D. Loss: FocalLoss(alpha=0.75, gamma=2). Métrica: AUC-ROC.",
 }
 
