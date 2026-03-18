@@ -57,6 +57,7 @@ import cv2                 # para CLAHE en OA
 # 0. LOGGING
 # ──────────────────────────────────────────────────────────
  
+ 
 def setup_logging(output_dir: str) -> logging.Logger:
     """
     Configura el sistema de logging del pipeline.
@@ -102,6 +103,7 @@ log = logging.getLogger("fase0")
 # 1. CONFIGURACIÓN GLOBAL
 # ──────────────────────────────────────────────────────────
  
+
 EXPERT_IDS = {
     "chest":    0,   # NIH ChestXray14      — radiografía tórax 2D
     "isic":     1,   # ISIC 2019            — dermatoscopía 2D
@@ -163,8 +165,7 @@ CHEST_PATHOLOGIES = [
     # Si "No Finding" aparece solo, el vector será todo ceros.
 ]
 N_CHEST_CLASSES = len(CHEST_PATHOLOGIES)   # = 14
- 
- 
+  
 # Normalización ImageNet — estándar para todos los datasets 2D
 IMAGENET_MEAN = [0.485, 0.456, 0.406]
 IMAGENET_STD  = [0.229, 0.224, 0.225]
@@ -300,7 +301,8 @@ def volume_to_vit_input(volume_3d_tensor):
 # ──────────────────────────────────────────────────────────
 # 3. DATASETS
 # ──────────────────────────────────────────────────────────
- 
+
+
 # Esta clase es el cargador del Experto 0. Implementa dos modos:
 #   "embedding" — para FASE 0: extrae representaciones del backbone (etiqueta = expert_id=0)
 #   "expert"    — para FASE 2: devuelve vector multi-label de 14 patologías para BCEWithLogitsLoss
@@ -473,7 +475,8 @@ class ChestXray14Dataset(Dataset):
             nf_count = no_finding_only.sum()
             log.info(f"[Chest] Imágenes 'No Finding' (vector todo-ceros): "
                      f"{nf_count:,} ({100*nf_count/n_matched:.1f}%)")
- 
+
+
 # Esta función es un parser de etiquetas multiclase. Su función es tomar una cadena de texto 
 # (como "Atelectasis|Mass") y convertirla en un vector binario de 14 posiciones ([1, 0, 0, 1, 0...]), donde 
 # cada posición 1 indica la presencia de una patología específica, permitiendo el entrenamiento multi-etiqueta.
@@ -490,6 +493,7 @@ class ChestXray14Dataset(Dataset):
             if label in CHEST_PATHOLOGIES:
                 vec[CHEST_PATHOLOGIES.index(label)] = 1.0
         return vec
+
 
 # Esta es una utilidad de pre-auditoría de splits. Su función es extraer el conjunto único de identificadores 
 # de pacientes (Patient IDs) de un split específico (train o val) basándose en la lista oficial de archivos, 
@@ -703,7 +707,8 @@ class OAKneeDataset(Dataset):
         img = img.resize((self.img_size, self.img_size), Image.BICUBIC)
         img = self.final_transform(img)
         return img, self.expert_id, str(img_path.name)
- 
+
+
 # Esta clase es el procesador de volumen a imagen del sistema. Toma parches 3D de tomografías pulmonares (LUNA16), 
 # normaliza su densidad radiológica, estandariza su tamaño volumétrico y los proyecta como imágenes RGB 2D, 
 # permitiendo que un modelo entrenado en 2D pueda "ver" la estructura tridimensional de los tejidos pulmonares.
@@ -1320,11 +1325,12 @@ def main(args):
 # ──────────────────────────────────────────────────────────
 # 7. ARGPARSE
 # ──────────────────────────────────────────────────────────
-#Este bloque es el "Panel de Control" del pipeline. Utiliza la librería argparse para permitir que tú, como 
+
+
+# Este bloque es el "Panel de Control" del pipeline. Utiliza la librería argparse para permitir que tú, como 
 # investigador, definas los hiperparámetros (como batch_size) y las rutas de los datos (de los 5 datasets) 
 # desde la consola, garantizando que el experimento sea flexible, documentado y fácil de replicar para tu 
 # ablation study.
-
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="FASE 0 — Extracción de embeddings MoE")
  

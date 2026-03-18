@@ -53,6 +53,7 @@ from sklearn.naive_bayes import GaussianNB
 # 0. LOGGING
 # ──────────────────────────────────────────────────────────
  
+ 
 def setup_logging(output_dir: str) -> logging.Logger:
     """
     Escribe simultáneamente a consola (INFO) y a fase1_ablation.log (DEBUG).
@@ -91,6 +92,7 @@ log = logging.getLogger("fase1")
 # 1. CONSTANTES DE ARQUITECTURA
 # ──────────────────────────────────────────────────────────
  
+
 # Número de expertos de dominio (los que tienen dataset → targets del router)
 N_EXPERTS_DOMAIN = 5   # Chest, ISIC, OA, LUNA, Pancreas
  
@@ -143,7 +145,7 @@ def compute_entropy(probs: np.ndarray, eps: float = 1e-9) -> np.ndarray:
     Rango: [0, ln(N_EXPERTS_DOMAIN)]
       H=0   → router completamente seguro (toda la masa en un experto)
       H=max → router completamente inseguro (distribución uniforme)
-
+ 
     Umbral OOD: si H(g) >= ENTROPY_THRESHOLD → Experto 5 (OOD)
     """
     return -(probs * np.log(probs + eps)).sum(axis=1)
@@ -157,8 +159,7 @@ def per_expert_accuracy(y_true: np.ndarray, y_pred: np.ndarray) -> dict:
     """
     Accuracy de routing por experto de dominio.
     Útil para detectar si el router ignora sistemáticamente un experto.
-    Objetivo del proyecto: max
-    (f_i)/min(f_i) < 1.30 en FASE 1 real.
+    Objetivo del proyecto: max(f_i)/min(f_i) < 1.30 en FASE 1 real.
     """
     result = {}
     for exp_id, exp_name in EXPERT_NAMES.items():
@@ -227,21 +228,21 @@ def calibrate_entropy_threshold(probs: np.ndarray, y_true: np.ndarray, tag: str)
     """
     Calibra el umbral de entropía para el Experto 5 (OOD) analizando la
     distribución de H(g) en el set de validación.
-
+ 
     Estrategia: el umbral es el percentil 95 de H(g) sobre muestras bien
     clasificadas. Esto significa que el 5% de las muestras más confusas del
     router (aunque sean dominio conocido) se tratarán como OOD en inferencia.
-
+ 
     El valor se guarda en ablation_results.json para usarlo en FASE 1 real.
     """
     entropies = compute_entropy(probs)
     correct_mask = (probs.argmax(axis=1) == y_true)
-
+ 
     h_correct   = entropies[correct_mask]
     h_incorrect = entropies[~correct_mask]
-
+ 
     threshold = float(np.percentile(entropies, 95))
-
+ 
     log.info(f"  [{tag}] Calibración entropía OOD (Experto 5):")
     log.info(f"    H(g) media (correctas)  : {h_correct.mean():.4f}")
     log.info(f"    H(g) media (incorrectas): {h_incorrect.mean():.4f}")
@@ -250,7 +251,7 @@ def calibrate_entropy_threshold(probs: np.ndarray, y_true: np.ndarray, tag: str)
     log.info(f"    → Muestras que irían a Experto 5 OOD: "
              f"{(entropies >= threshold).sum()}/{len(entropies)} "
              f"({100*(entropies >= threshold).mean():.1f}%)")
-
+ 
     if threshold < 0.3:
         log.warning(f"  [{tag}] Umbral muy bajo ({threshold:.4f}). El router es muy seguro "
                     f"o los embeddings están colapsados. Verifica con otra semilla.")
@@ -280,7 +281,7 @@ class LinearGatingHead(nn.Module):
     def __init__(self, d_model: int, n_experts: int):
         super().__init__()
         self.gate = nn.Linear(d_model, n_experts)
-
+ 
     def forward(self, z: torch.Tensor) -> torch.Tensor:
         return torch.softmax(self.gate(z), dim=-1)   # [B, n_experts]
 
@@ -296,23 +297,23 @@ def train_linear_router(Z_train, y_train, Z_val, y_val, d_model,
     model   = LinearGatingHead(d_model, N_EXPERTS_DOMAIN).to(device)
     opt     = optim.Adam(model.parameters(), lr=lr)
     loss_fn = nn.CrossEntropyLoss()
-
+ 
     Z_t = torch.from_numpy(Z_train).float().to(device)
     y_t = torch.from_numpy(y_train).long().to(device)
-
+ 
     best_acc     = 0.0
     best_weights = None
     no_improve   = 0   # contador de épocas sin mejora (early stopping suave)
-
+ 
     log.info(f"  [Linear] Entrenando en {device} | epochs={epochs} lr={lr} batch={batch_size}")
     log.info(f"  [Linear] n_experts={N_EXPERTS_DOMAIN} (ablation) | "
              f"nota: FASE 1 real usará n_experts={N_EXPERTS_TOTAL} (+OOD slot)")
-
+ 
     for epoch in range(epochs):
         model.train()
         idx        = torch.randperm(len(Z_t))
         epoch_loss = 0.0
-
+ 
         for i in range(0, len(Z_t), batch_size):
             batch_idx = idx[i:i + batch_size]
             z_b, y_b  = Z_t[batch_idx], y_t[batch_idx]
@@ -322,7 +323,7 @@ def train_linear_router(Z_train, y_train, Z_val, y_val, d_model,
             loss.backward()
             opt.step()
             epoch_loss += loss.item()
-
+ 
         if (epoch + 1) % 10 == 0:
             model.eval()
             with torch.no_grad():
@@ -330,7 +331,7 @@ def train_linear_router(Z_train, y_train, Z_val, y_val, d_model,
                 probs = model(Z_v).cpu().numpy()
                 preds = probs.argmax(axis=1)
                 acc   = accuracy_score(y_val, preds)
-
+ 
             improved = acc > best_acc
             if improved:
                 best_acc     = acc
@@ -338,35 +339,35 @@ def train_linear_router(Z_train, y_train, Z_val, y_val, d_model,
                 no_improve   = 0
             else:
                 no_improve += 1
-
+ 
             log.info(f"  [Linear] época {epoch+1:3d}/{epochs} | "
                      f"loss {epoch_loss:.4f} | val acc {acc:.4f}"
                      + (" ✓ mejor" if improved else ""))
-
+ 
             # Detectar colapso: loss cae a 0 rápido o acc estancada desde el inicio
             if epoch_loss < 1e-6:
                 log.warning(f"  [Linear] Loss ≈ 0 en época {epoch+1} — posible overfitting "
                             f"o etiquetas con fuga de información.")
-
+ 
     if best_weights is None:
         log.error("[Linear] best_weights es None — ninguna época de validación mejoró. "
                   "Revisa que y_train tenga las 5 clases representadas.")
         best_weights = model.state_dict()
-
+ 
     model.load_state_dict(best_weights)
-
+ 
     # Métricas finales
     model.eval()
     with torch.no_grad():
         Z_v   = torch.from_numpy(Z_val).float().to(device)
         probs = model(Z_v).cpu().numpy()
         preds = probs.argmax(axis=1)
-
+ 
     per_exp   = per_expert_accuracy(y_val, preds)
     log_per_expert("Linear", per_exp)
     balance   = check_load_balance(preds, "Linear")
     threshold = calibrate_entropy_threshold(probs, y_val, "Linear")
-
+ 
     return model, best_acc, probs, balance, threshold
 # Un consejo pro para el ablation study:
 # Como estás guardando los resultados en best_weights, asegúrate de incluir en tu reporte un gráfico de "Pérdida 
@@ -392,7 +393,7 @@ def train_linear_router(Z_train, y_train, Z_val, y_val, d_model,
 def train_gmm_router(Z_train, y_train, Z_val, y_val):
     log.info(f"  [GMM] Ajustando GaussianMixture "
              f"({N_EXPERTS_DOMAIN} comp., full covariance) ...")
-
+ 
     cov_type = "full"
     try:
         gmm = GaussianMixture(
@@ -418,9 +419,9 @@ def train_gmm_router(Z_train, y_train, Z_val, y_val):
         gmm.fit(Z_train)
         if not gmm.converged_:
             log.warning("  [GMM] EM tampoco convergió con 'diag'. Resultados poco confiables.")
-
+ 
     log.debug(f"  [GMM] covariance_type usado: '{cov_type}'")
-
+ 
     # Mapeo componente → experto de dominio por voto mayoritario
     train_comp     = gmm.predict(Z_train)
     comp_to_expert = {}
@@ -433,7 +434,7 @@ def train_gmm_router(Z_train, y_train, Z_val, y_val):
         labels = y_train[mask]
         winner = int(np.bincount(labels, minlength=N_EXPERTS_DOMAIN).argmax())
         comp_to_expert[comp] = winner
-
+ 
     # Verificar que todos los expertos de dominio tienen al menos una componente asignada
     assigned_experts = set(comp_to_expert.values())
     unassigned = set(range(N_EXPERTS_DOMAIN)) - assigned_experts
@@ -441,22 +442,22 @@ def train_gmm_router(Z_train, y_train, Z_val, y_val):
         log.warning(f"  [GMM] Expertos sin componente asignada: "
                     f"{[EXPERT_NAMES[e] for e in unassigned]}. "
                     f"El GMM nunca rutará a estos expertos.")
-
+ 
     log.info(f"  [GMM] Mapeo componente→experto: "
              + " | ".join(f"C{c}→{EXPERT_NAMES[e]}" for c, e in comp_to_expert.items()))
-
+ 
     val_comp  = gmm.predict(Z_val)
     val_preds = np.array([comp_to_expert[c] for c in val_comp])
     acc       = accuracy_score(y_val, val_preds)
     log.info(f"  [GMM] Routing Accuracy val: {acc:.4f}")
-
+ 
     # Aproximar probabilidades de pertenencia para análisis de entropía
     val_probs    = gmm.predict_proba(Z_val)   # [N_val, N_EXPERTS_DOMAIN]
     per_exp      = per_expert_accuracy(y_val, val_preds)
     log_per_expert("GMM", per_exp)
     balance      = check_load_balance(val_preds, "GMM")
     threshold    = calibrate_entropy_threshold(val_probs, y_val, "GMM")
-
+ 
     return gmm, comp_to_expert, acc, val_probs, balance, threshold
 # Sugerencia de ingeniería:
 # El random_state=42 es una decisión excelente. En un proyecto académico, esto garantiza que cada vez que 
@@ -475,7 +476,7 @@ def train_gmm_router(Z_train, y_train, Z_val, y_val):
 # para cada experto.
 def train_nb_router(Z_train, y_train, Z_val, y_val):
     log.info("  [NB] Ajustando GaussianNB (MLE analítico)...")
-
+ 
     # Verificar que todas las clases de dominio estén representadas en train
     classes_present = np.unique(y_train)
     missing = set(range(N_EXPERTS_DOMAIN)) - set(classes_present.tolist())
@@ -483,20 +484,20 @@ def train_nb_router(Z_train, y_train, Z_val, y_val):
         log.warning(f"  [NB] Clases ausentes en train: "
                     f"{[EXPERT_NAMES[m] for m in missing]}. "
                     f"GaussianNB no podrá aprender estos expertos.")
-
+ 
     nb = GaussianNB()
     nb.fit(Z_train, y_train)
-
+ 
     val_preds = nb.predict(Z_val)
     val_probs = nb.predict_proba(Z_val)   # [N_val, N_EXPERTS_DOMAIN]
     acc       = accuracy_score(y_val, val_preds)
     log.info(f"  [NB] Routing Accuracy val: {acc:.4f}")
-
+ 
     per_exp   = per_expert_accuracy(y_val, val_preds)
     log_per_expert("NB", per_exp)
     balance   = check_load_balance(val_preds, "NB")
     threshold = calibrate_entropy_threshold(val_probs, y_val, "NB")
-
+ 
     return nb, acc, val_probs, balance, threshold
 # Consejo: 
 # Si el Naive Bayes supera en precisión a tu red neuronal Lineal, es una señal clara de que tu red neuronal 
@@ -516,13 +517,13 @@ def train_nb_router(Z_train, y_train, Z_val, y_val):
 def train_knn_router(Z_train, y_train, Z_val, y_val, k=5):
     log.info(f"  [kNN] Construyendo índice FAISS coseno (k={k})...")
     d = Z_train.shape[1]
-
+ 
     # Normalizar para usar Inner Product como coseno
     Z_t_norm = Z_train.copy().astype(np.float32)
     faiss.normalize_L2(Z_t_norm)
     Z_v_norm = Z_val.copy().astype(np.float32)
     faiss.normalize_L2(Z_v_norm)
-
+ 
     # Verificar que los vectores no sean cero (causaría NaN tras normalize_L2)
     zero_train = (np.linalg.norm(Z_train, axis=1) < 1e-9).sum()
     zero_val   = (np.linalg.norm(Z_val,   axis=1) < 1e-9).sum()
@@ -530,41 +531,41 @@ def train_knn_router(Z_train, y_train, Z_val, y_val, k=5):
         log.error(f"  [kNN] Vectores cero detectados: "
                   f"{zero_train} en train, {zero_val} en val. "
                   f"normalize_L2 producirá NaN. Verifica la extracción de embeddings.")
-
+ 
     index = faiss.IndexFlatIP(d)
     index.add(Z_t_norm)
     log.debug(f"  [kNN] Índice construido con {index.ntotal:,} vectores")
-
+ 
     # Buscar k vecinos y hacer voto mayoritario
     distances, I = index.search(Z_v_norm, k)   # [N_val, k]
-
+ 
     # Detectar búsquedas con similitud muy baja (posibles OOD naturales)
     min_sim = distances.max(axis=1)   # similitud con el vecino más cercano
     low_sim_count = (min_sim < 0.5).sum()
     if low_sim_count > 0:
         log.info(f"  [kNN] {low_sim_count} muestras de val con similitud coseno < 0.5 "
                  f"con su vecino más cercano — candidatas naturales a OOD.")
-
+ 
     neighbor_labels = y_train[I]   # [N_val, k]
     val_preds = np.apply_along_axis(
         lambda row: np.bincount(row, minlength=N_EXPERTS_DOMAIN).argmax(),
         axis=1, arr=neighbor_labels
     )
-
+ 
     # Construir probabilidades suaves (fracción de votos por experto) para análisis entropía
     val_probs = np.zeros((len(Z_val), N_EXPERTS_DOMAIN), dtype=np.float32)
     for i, row in enumerate(neighbor_labels):
         counts = np.bincount(row, minlength=N_EXPERTS_DOMAIN)
         val_probs[i] = counts / counts.sum()
-
+ 
     acc = accuracy_score(y_val, val_preds)
     log.info(f"  [kNN] Routing Accuracy val: {acc:.4f}")
-
+ 
     per_exp   = per_expert_accuracy(y_val, val_preds)
     log_per_expert("kNN", per_exp)
     balance   = check_load_balance(val_preds, "kNN")
     threshold = calibrate_entropy_threshold(val_probs, y_val, "kNN")
-
+ 
     return index, y_train, acc, val_probs, balance, threshold
 
 
@@ -596,23 +597,22 @@ def measure_latency(fn, n_runs: int = 10) -> float:
 # ──────────────────────────────────────────────────────────
 
 
-# Este script es el Orquestador Maestro del Estudio de Ablación. Su rol es leer los embeddings pre-calculados, 
-# entrenar y evaluar los cuatro métodos de enrutamiento (Lineal, GMM, Naive Bayes y k-NN) bajo las mismas 
-# condiciones, generar la tabla comparativa requerida por la guía y exportar automáticamente la configuración 
-# ganadora (incluyendo el umbral de entropía para el experto OOD) para que la FASE 1 real sepa exactamente cómo 
-# configurarse.
+# Esta función actúa como el Orquestador Maestro del Experimento. Su rol es ejecutar secuencialmente los cuatro 
+# métodos de enrutamiento (Lineal, GMM, Naive Bayes y k-NN), medir su rendimiento (precisión, latencia y balance), 
+# presentar los resultados en una tabla comparativa técnica y exportar la configuración ganadora en un archivo 
+# JSON para que el entrenamiento del MoE final (FASE 2) sea automático y reproducible.
 def main(args):
     global log
     log = setup_logging(args.embeddings)
-
+ 
     log.info("=" * 65)
     log.info("FASE 1 — Ablation Study del Router")
     log.info(f"Arquitectura: {N_EXPERTS_DOMAIN} expertos de dominio + "
              f"1 OOD (total={N_EXPERTS_TOTAL})")
     log.info("=" * 65)
-
+ 
     emb_dir = Path(args.embeddings)
-
+ 
     # ── Cargar backbone_meta.json (generado por FASE 0) ──────────────────
     meta_path = emb_dir / "backbone_meta.json"
     if meta_path.exists():
@@ -624,28 +624,28 @@ def main(args):
         log.warning("[Setup] backbone_meta.json no encontrado. "
                     "d_model se inferirá de Z_train.shape[1]. "
                     "Ejecuta FASE 0 con la versión actualizada para generarlo.")
-
+ 
     # ── Cargar embeddings ─────────────────────────────────────────────────
     for fname in ["Z_train.npy", "y_train.npy", "Z_val.npy", "y_val.npy"]:
         if not (emb_dir / fname).exists():
             log.error(f"[Setup] Archivo faltante: {emb_dir / fname}. "
                       f"Ejecuta FASE 0 primero.")
             raise FileNotFoundError(emb_dir / fname)
-
+ 
     Z_train = np.load(emb_dir / "Z_train.npy")
     y_train = np.load(emb_dir / "y_train.npy")
     Z_val   = np.load(emb_dir / "Z_val.npy")
     y_val   = np.load(emb_dir / "y_val.npy")
     d_model = Z_train.shape[1]
-
+ 
     log.info(f"[Setup] Z_train: {Z_train.shape}  |  Z_val: {Z_val.shape}")
     log.info(f"[Setup] d_model: {d_model}")
-
+ 
     # Verificar coherencia con backbone_meta
     if backbone_meta.get("d_model") and backbone_meta["d_model"] != d_model:
         log.error(f"[Setup] d_model del archivo ({d_model}) ≠ backbone_meta "
                   f"({backbone_meta['d_model']}). Los embeddings pueden estar mezclados.")
-
+ 
     # ── Distribución de expertos ─────────────────────────────────────────
     log.info("[Setup] Distribución de expertos en train:")
     for exp_id, exp_name in EXPERT_NAMES.items():
@@ -654,22 +654,29 @@ def main(args):
         log.info(f"  Experto {exp_id} ({exp_name:<12}): {count:>6,}  ({pct:.1f}%)")
     log.info(f"  Experto 5 (OOD        ):      0  (0.0%)  "
              f"← sin dataset, activado por entropía en inferencia")
-
+ 
     # Verificar que las 5 clases de dominio estén presentes
     classes_in_train = set(np.unique(y_train).tolist())
     expected = set(range(N_EXPERTS_DOMAIN))
     if classes_in_train != expected:
         log.error(f"[Setup] Clases en y_train: {classes_in_train} — "
                   f"se esperaban {expected}. El ablation study no será válido.")
-
+ 
     # Verificar NaN/Inf en embeddings antes de entrenar
     if np.isnan(Z_train).any() or np.isnan(Z_val).any():
         log.error("[Setup] NaN detectado en embeddings. Regenera con FASE 0.")
     if np.isinf(Z_train).any() or np.isinf(Z_val).any():
         log.error("[Setup] Inf detectado en embeddings. Regenera con FASE 0.")
-
+ 
+    # ── Recordatorios por experto (hallazgos de datasets) ─────────────────
+    log.info("[Setup] Recordatorios de diseño por experto para FASE 2:")
+    for exp_id, note in EXPERT_NOTES.items():
+        log.info(f"  Experto {exp_id} ({EXPERT_NAMES[exp_id]:<12}): {note}")
+    log.info("  [IMPORTANTE] Este ablation study solo evalúa ROUTING (expert_id 0–4). "
+             "Las métricas de patología (AUC, F1, QWK, CPM) se evalúan en FASE 2.")
+ 
     results = {}
-
+ 
     # ── A) LINEAR ────────────────────────────────────────────────────────
     log.info("\n[A] Entrenando Linear + Softmax (baseline DL)...")
     t0 = time.time()
@@ -677,12 +684,12 @@ def main(args):
         train_linear_router(Z_train, y_train, Z_val, y_val, d_model,
                             epochs=args.epochs, lr=1e-3)
     linear_time = time.time() - t0
-
+ 
     # Latencia: batch de 32 muestras
     device = "cuda" if torch.cuda.is_available() else "cpu"
     sample = torch.from_numpy(Z_val[:32]).float().to(device)
     linear_latency = measure_latency(lambda: linear_model(sample))
-
+ 
     results["Linear"] = {
         "acc":            linear_acc,
         "train_time_s":   linear_time,
@@ -693,17 +700,17 @@ def main(args):
         "entropy_thresh": linear_thresh,
         "model":          linear_model,
     }
-
+ 
     # ── B) GMM ───────────────────────────────────────────────────────────
     log.info("\n[B] Entrenando GMM (paramétrico EM)...")
     t0 = time.time()
     gmm_model, gmm_map, gmm_acc, gmm_probs, gmm_balance, gmm_thresh = \
         train_gmm_router(Z_train, y_train, Z_val, y_val)
     gmm_time = time.time() - t0
-
+ 
     sample_np = Z_val[:32].astype(np.float32)
     gmm_latency = measure_latency(lambda: gmm_model.predict_proba(sample_np))
-
+ 
     results["GMM"] = {
         "acc":            gmm_acc,
         "train_time_s":   gmm_time,
@@ -714,16 +721,16 @@ def main(args):
         "entropy_thresh": gmm_thresh,
         "model":          (gmm_model, gmm_map),
     }
-
+ 
     # ── C) NAIVE BAYES ───────────────────────────────────────────────────
     log.info("\n[C] Entrenando Naive Bayes (MLE analítico)...")
     t0 = time.time()
     nb_model, nb_acc, nb_probs, nb_balance, nb_thresh = \
         train_nb_router(Z_train, y_train, Z_val, y_val)
     nb_time = time.time() - t0
-
+ 
     nb_latency = measure_latency(lambda: nb_model.predict_proba(sample_np))
-
+ 
     results["NaiveBayes"] = {
         "acc":            nb_acc,
         "train_time_s":   nb_time,
@@ -734,17 +741,17 @@ def main(args):
         "entropy_thresh": nb_thresh,
         "model":          nb_model,
     }
-
+ 
     # ── D) kNN FAISS ─────────────────────────────────────────────────────
     log.info("\n[D] Construyendo índice kNN-FAISS (no paramétrico)...")
     t0 = time.time()
     knn_index, knn_labels, knn_acc, knn_probs, knn_balance, knn_thresh = \
         train_knn_router(Z_train, y_train, Z_val, y_val, k=args.knn_k)
     knn_time = time.time() - t0
-
+ 
     sample_norm = sample_np.copy(); faiss.normalize_L2(sample_norm)
     knn_latency = measure_latency(lambda: knn_index.search(sample_norm, args.knn_k))
-
+ 
     results["kNN-FAISS"] = {
         "acc":            knn_acc,
         "train_time_s":   knn_time,
@@ -755,7 +762,7 @@ def main(args):
         "entropy_thresh": knn_thresh,
         "model":          (knn_index, knn_labels),
     }
-
+ 
     # ── TABLA COMPARATIVA ────────────────────────────────────────────────
     col = 78
     log.info("\n" + "=" * col)
@@ -764,7 +771,7 @@ def main(args):
     log.info(f"{'Router':<14} {'Tipo':<24} {'Acc':>6} {'Lat(ms)':>8} "
              f"{'Train(s)':>9} {'Bal':>5} {'H_thr':>6} {'GPU':>4}")
     log.info("-" * col)
-
+ 
     ROUTER_TYPE = {
         "Linear":    "Paramétrico (gradiente)",
         "GMM":       "Paramétrico (EM)",
@@ -784,7 +791,7 @@ def main(args):
     log.info("=" * col)
     log.info("  Bal = max(f_i)/min(f_i) objetivo < 1.30 | "
              "H_thr = umbral entropía OOD (p95)")
-
+ 
     # ── GANADOR ──────────────────────────────────────────────────────────
     winner_name, winner = max(results.items(), key=lambda x: x[1]["acc"])
     log.info(f"\nROUTER GANADOR: {winner_name}  "
@@ -798,7 +805,7 @@ def main(args):
     log.info(f"  → El slot OOD (ID=5) se entrena con L_error, "
              f"no con labels de dominio")
     log.info(f"  → Registrar tabla completa en Reporte Técnico (sección 3)")
-
+ 
     # ── GUARDAR RESULTADOS ───────────────────────────────────────────────
     report = {}
     for k, v in results.items():
@@ -811,7 +818,7 @@ def main(args):
             "load_balance":   float(v["load_balance"]),
             "entropy_thresh": float(v["entropy_thresh"]),
         }
-
+ 
     output = {
         "results":          report,
         "winner":           winner_name,
@@ -825,8 +832,9 @@ def main(args):
             f"{winner['entropy_thresh']:.4f}. "
             f"En FASE 1 real usar LinearGatingHead(n_experts={N_EXPERTS_TOTAL})."
         ),
+        "expert_notes_fase2": EXPERT_NOTES,
     }
-
+ 
     out_path = emb_dir / "ablation_results.json"
     with open(out_path, "w") as f:
         json.dump(output, f, indent=2)
@@ -834,11 +842,11 @@ def main(args):
     log.info(f"Siguiente paso: entrenar FASE 1 MoE con router='{winner_name}' "
              f"y n_experts={N_EXPERTS_TOTAL}")
 
+
 # Este bloque es el "Panel de Control de Línea de Comandos". Su función es recibir y validar los parámetros de 
 # configuración necesarios para ejecutar el estudio de ablación, permitiendo al usuario indicar dónde están los 
 # datos (embeddings), qué tan intensivo debe ser el entrenamiento del router neuronal (epochs) y qué 
 # tan sensible debe ser el router estadístico (knn_k) de manera flexible y profesional.
-
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(
         description="FASE 1 — Ablation Study del Router (arquitectura 6 expertos)"
