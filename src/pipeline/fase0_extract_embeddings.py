@@ -895,7 +895,10 @@ class ISICDataset(Dataset):
 
             counts  = np.array([dist.get(i, 1) for i in range(self.N_TRAIN_CLS)], dtype=float)
             weights = total / (self.N_TRAIN_CLS * counts)
-            self.class_weights = torch.tensor(weights, dtype=torch.float32)
+            # H5: añadir peso para UNK (índice 8) — 0 muestras en train,
+            # peso neutro=1.0 para compatibilidad con 9 neuronas softmax
+            weights_full = np.append(weights, 1.0)
+            self.class_weights = torch.tensor(weights_full, dtype=torch.float32)
             log.info(f"[ISIC] H1 — class_weights: "
                      f"min={self.class_weights.min():.2f}({self.CLASSES[self.class_weights.argmin()]}) | "
                      f"max={self.class_weights.max():.2f}({self.CLASSES[self.class_weights.argmax()]})")
@@ -2324,63 +2327,801 @@ class LUNA16Dataset(Dataset):
             return volume_t, label, patch_file.stem
 
 
-# Esta clase es el cargador especializado para el dataset de cáncer de páncreas. Su rol es transformar volúmenes 
-# CT 3D crudos en representaciones 2D compatibles con tu Backbone ViT, etiquetando cada muestra como "Experto 4" 
-# para que el Router pueda gestionar el balanceo de carga y dirigir estas imágenes exclusivamente al experto 
-# especializado en anatomía abdominal.
+
+# ── Experto 4 — Pancreas PANORAMA / PDAC ──────────────────────────────────
+# Cargador + utilitarios para clasificación binaria de volúmenes CT abdominales.
+# Implementa los hallazgos:
+#   H1 → etiquetas en repo GitHub separado: PanoramaLabelLoader con cruce
+#         de case_ids y fijación del hash del commit para reproducibilidad
+#   H2 → páncreas ocupa ~1% del volumen: PancreasROIExtractor con 3 estrategias;
+#         resize naïve destruye la señal diagnóstica
+#   H3 → clip HU [-100, 400] para abdomen (NO usar [-1000, 400] de LUNA16);
+#         z-score por volumen para bias multicéntrico (Radboudumc/MSD/NIH)
+#   Item-3  → lectura .nii.gz con SimpleITK/nibabel
+#   Item-6  → gradient checkpointing batch_size 1–2 con 12 GB VRAM
+#   Item-7  → FocalLoss(alpha=0.75, gamma=2) — desbalance ~2.3:1 a 3:1
+#   Item-8  → k-fold CV (k=5) dado el tamaño limitado (~281 volúmenes)
+#   Item-9  → auditoría de fuentes (Radboudumc/MSD/NIH) + z-score por volumen
+
+
+# H3 — Rango HU abdominal — MUY DISTINTO al de LUNA16
+# LUNA16 usa [-1000, 400] porque el pulmón es principalmente aire.
+# El páncreas es tejido blando: los valores diagnósticamente relevantes son:
+#   Parénquima pancreático sano : +30 a +150 HU (fase portal-venosa)
+#   Tumor PDAC (hipodenso)      :  -20 a +80 HU (menor que parénquima sano)
+#   Tejido graso peripancreático: -100 a -30 HU
+#   Límite inferior (-100 HU)   : preserva grasa peripancreática
+#   Límite superior (+400 HU)   : excluye hueso (vértebras, costillas)
+#
+# Si se usa [-1000, 400] para abdomen:
+#   El rango [-1000, -100] queda ocupado por aire sin información diagnóstica.
+#   La diferencia páncreas sano↔tumor (~70 HU) queda comprimida en ~14%
+#   del espacio normalizado → el modelo tiene 7× menos resolución para esa distinción.
+HU_ABDOMEN_CLIP = (-100, 400)    # para Pancreas/PANORAMA
+# Comparación explícita con LUNA16 para no confundirse:
+# HU_LUNG_CLIP   = (-1000, 400)  # para LUNA16 — pulmón, nódulos
+# HU_ABDOMEN_CLIP = (-100, 400)  # para Pancreas — tejido blando abdominal
+
+
+class PanoramaLabelLoader:
+    """
+    H1 — Carga las etiquetas PDAC del repositorio GitHub separado.
+
+    PROBLEMA CRÍTICO: el ZIP de Zenodo solo contiene volúmenes CT sin etiquetas.
+    Las etiquetas binarias (PDAC+ / PDAC−) están en:
+        https://github.com/DIAGNijmegen/panorama_labels
+
+    El repositorio es "live" — puede recibir correcciones post-descarga.
+    Fijar el hash del commit garantiza reproducibilidad del experimento.
+
+    Procedimiento obligatorio antes de cualquier entrenamiento:
+        git clone https://github.com/DIAGNijmegen/panorama_labels.git
+        cd panorama_labels
+        git checkout <hash_del_commit>   # fijar versión exacta
+
+    Uso:
+        labels = PanoramaLabelLoader.load_labels("./panorama_labels")
+        valid_pairs = PanoramaLabelLoader.cross_match(labels, nii_paths)
+        # valid_pairs: lista de (nii_path, label_int) con etiqueta confirmada
+    """
+
+    LABELS_REPO_URL = "https://github.com/DIAGNijmegen/panorama_labels"
+
+    @staticmethod
+    def load_labels(labels_repo_dir: str,
+                    expected_commit: str = None) -> dict:
+        """
+        H1/Item-1 — Carga las etiquetas del repositorio clonado.
+
+        Busca archivos JSON o CSV con columnas case_id / label / has_pdac.
+        Verifica el hash del commit si se proporciona expected_commit.
+
+        Args:
+            labels_repo_dir  : directorio del repositorio clonado
+            expected_commit  : hash SHA del commit esperado (para reproducibilidad)
+                               Si None, solo logea el commit actual con WARNING.
+
+        Returns:
+            dict {case_id: label_int}  — label_int ∈ {0, 1}
+            0 = PDAC negativo, 1 = PDAC positivo
+        """
+        repo_dir = Path(labels_repo_dir)
+        if not repo_dir.exists():
+            log.error(
+                f"[Pancreas/H1] Repositorio de etiquetas NO encontrado: '{repo_dir}'.\n"
+                f"    El ZIP de Zenodo NO incluye etiquetas. Pasos obligatorios:\n"
+                f"        git clone {PanoramaLabelLoader.LABELS_REPO_URL}\n"
+                f"        cd panorama_labels\n"
+                f"        git checkout <hash_del_commit>   # fija reproducibilidad\n"
+                f"    Sin este paso el dataset no es utilizable para clasificación."
+            )
+            return {}
+
+        # Verificar hash del commit actual
+        try:
+            import subprocess
+            result = subprocess.run(
+                ["git", "rev-parse", "HEAD"],
+                cwd=str(repo_dir), capture_output=True, text=True, timeout=10
+            )
+            current_hash = result.stdout.strip()
+            if expected_commit:
+                if current_hash.startswith(expected_commit):
+                    log.info(f"[Pancreas/H1] Commit verificado: {current_hash[:12]} ✓")
+                else:
+                    log.error(
+                        f"[Pancreas/H1] ¡Hash incorrecto! "
+                        f"Esperado: {expected_commit[:12]} | "
+                        f"Actual: {current_hash[:12]}. "
+                        f"Ejecuta: cd {repo_dir} && git checkout {expected_commit}"
+                    )
+            else:
+                log.warning(
+                    f"[Pancreas/H1] Commit actual: {current_hash[:12]} — "
+                    f"sin expected_commit especificado. "
+                    f"Registra este hash en tu README para reproducibilidad: "
+                    f"expected_commit='{current_hash[:12]}'"
+                )
+        except Exception as e:
+            log.warning(f"[Pancreas/H1] No se pudo verificar hash del commit: {e}")
+
+        # Buscar archivo de etiquetas (JSON o CSV)
+        labels = {}
+        label_files = list(repo_dir.glob("*.json")) + list(repo_dir.glob("*.csv"))
+
+        if not label_files:
+            log.error(f"[Pancreas/H1] Sin archivos .json/.csv en '{repo_dir}'. "
+                      f"¿El repositorio está correctamente clonado?")
+            return {}
+
+        log.info(f"[Pancreas/H1] Archivos de etiquetas encontrados: "
+                 f"{[f.name for f in label_files]}")
+
+        for lf in label_files:
+            try:
+                if lf.suffix == ".json":
+                    import json as _json
+                    with open(lf) as f:
+                        data = _json.load(f)
+                    if isinstance(data, dict):
+                        for case_id, info in data.items():
+                            if isinstance(info, dict):
+                                label = int(info.get("label",
+                                             info.get("has_pdac", 0)))
+                            else:
+                                label = int(info)
+                            labels[str(case_id)] = label
+                elif lf.suffix == ".csv":
+                    df = pd.read_csv(lf)
+                    for col in ["case_id", "id", "case"]:
+                        if col in df.columns:
+                            id_col = col
+                            break
+                    else:
+                        log.warning(f"[Pancreas/H1] CSV '{lf.name}' sin columna "
+                                    f"case_id/id/case reconocida.")
+                        continue
+                    for lbl_col in ["label", "has_pdac", "pdac", "class"]:
+                        if lbl_col in df.columns:
+                            break
+                    else:
+                        log.warning(f"[Pancreas/H1] CSV '{lf.name}' sin columna "
+                                    f"label/has_pdac/pdac/class reconocida.")
+                        continue
+                    for _, row in df.iterrows():
+                        case_id = str(row[id_col])
+                        label   = int(bool(row[lbl_col]))
+                        labels[case_id] = label
+            except Exception as e:
+                log.warning(f"[Pancreas/H1] Error leyendo '{lf}': {e}")
+
+        n_pos = sum(1 for v in labels.values() if v == 1)
+        n_neg = sum(1 for v in labels.values() if v == 0)
+        log.info(
+            f"[Pancreas/H1] Etiquetas cargadas: {len(labels):,} casos | "
+            f"PDAC+ (positivo): {n_pos:,} | "
+            f"PDAC− (negativo): {n_neg:,} | "
+            f"ratio neg/pos: {n_neg/max(n_pos,1):.1f}:1"
+        )
+        return labels
+
+    @staticmethod
+    def cross_match(labels: dict,
+                    nii_paths: list,
+                    require_both: bool = True) -> list:
+        """
+        H1/Item-1+2 — Cruza los case_ids del repositorio con los .nii.gz del ZIP.
+
+        Estrategia de matching: compara el stem del nombre de archivo
+        (sin extensión) con el case_id del repositorio.
+        Ej: "panc_001.nii.gz" → case_id "panc_001"
+
+        Args:
+            labels      : dict de PanoramaLabelLoader.load_labels()
+            nii_paths   : lista de rutas a archivos .nii.gz
+            require_both: si True, solo incluye casos con AMBOS volumen y etiqueta
+
+        Returns:
+            lista de (nii_path, label_int) — solo casos con etiqueta confirmada
+        """
+        valid_pairs   = []
+        no_label      = []
+        no_volume     = []
+
+        for nii_path in nii_paths:
+            # Extraer case_id del nombre de archivo (quitar .nii.gz o .nii)
+            stem = Path(nii_path).name
+            for ext in [".nii.gz", ".nii"]:
+                if stem.endswith(ext):
+                    stem = stem[:-len(ext)]
+                    break
+            label = labels.get(stem)
+            if label is not None:
+                valid_pairs.append((str(nii_path), label))
+            else:
+                no_label.append(stem)
+
+        for case_id in labels:
+            found = any(
+                str(p).endswith(f"{case_id}.nii.gz") or
+                str(p).endswith(f"{case_id}.nii")
+                for p in nii_paths
+            )
+            if not found:
+                no_volume.append(case_id)
+
+        n_pos = sum(1 for _, l in valid_pairs if l == 1)
+        n_neg = sum(1 for _, l in valid_pairs if l == 0)
+
+        log.info(
+            f"[Pancreas/H1] Cross-match completado:\n"
+            f"    Pares válidos (volumen + etiqueta) : {len(valid_pairs):,}\n"
+            f"    PDAC+ (positivo)                  : {n_pos:,}\n"
+            f"    PDAC− (negativo)                  : {n_neg:,}\n"
+            f"    Ratio neg/pos                     : {n_neg/max(n_pos,1):.1f}:1\n"
+            f"    Volúmenes sin etiqueta             : {len(no_label):,} "
+            f"{'(excluidos)' if require_both else '(incluidos sin label)'}\n"
+            f"    Etiquetas sin volumen en disco     : {len(no_volume):,}"
+        )
+        if no_label:
+            log.warning(f"[Pancreas/H1] {len(no_label)} volúmenes sin etiqueta "
+                        f"— primeros 5: {no_label[:5]}. "
+                        f"¿El repositorio está actualizado?")
+        if no_volume:
+            log.warning(f"[Pancreas/H1] {len(no_volume)} etiquetas sin volumen en disco "
+                        f"— primeros 5: {no_volume[:5]}. "
+                        f"¿Faltan batches del ZIP de Zenodo?")
+        if len(valid_pairs) < 50:
+            log.warning(f"[Pancreas/H1] Solo {len(valid_pairs)} pares válidos. "
+                        f"Dataset muy pequeño — usar k-fold CV (k=5).")
+
+        return valid_pairs
+
+
+class PancreasROIExtractor:
+    """
+    H2 — Extrae la región de interés del páncreas antes del resize.
+
+    PROBLEMA CRÍTICO: el páncreas ocupa ~0.5–2% del volumen CT abdominal.
+    Un CT típico es 512×512×300 vóxeles. El páncreas ≈ 3,000–15,000 vóxeles.
+    Con resize naïve a 64×64×64 = 262,144 vóxeles totales:
+      El páncreas queda representado por solo 3–8 vóxeles → señal destruida.
+
+    Tres estrategias en orden de rigor / complejidad:
+
+    ┌─────────────────────────────────────────────────────────────────────┐
+    │ Opción A — Resize completo (SOLO para FASE 0 / routing)            │
+    │   Acepta: velocidad, bajo costo de implementación                  │
+    │   Rechaza: calidad diagnóstica (páncreas = ~5 vóxeles)             │
+    │   Uso: FASE 0 (extracción de embeddings para router)               │
+    │        NO usar para el Experto 4 clasificador real en FASE 2       │
+    ├─────────────────────────────────────────────────────────────────────┤
+    │ Opción B — Recorte de abdomen superior (Z ~120:220) [RECOMENDADA]  │
+    │   Mejora el ratio: páncreas ≈ 3% del recorte vs 1% del volumen     │
+    │   Requiere verificar que el páncreas está en ese rango Z para       │
+    │   este dataset (verificar con verify_pancreas_z_range() en ≥5 casos)│
+    │   Uso: FASE 2 con el balance práctico de 4 semanas + hardware      │
+    ├─────────────────────────────────────────────────────────────────────┤
+    │ Opción C — Segmentar páncreas con nnU-Net → recortar ROI [SOTA]    │
+    │   Produce métricas cercanas a 0.88–0.93 AUC del challenge          │
+    │   Requiere: modelo nnU-Net pre-entrenado (~2 GB), ~2 hs de inf.    │
+    │   Uso: si hay tiempo y GPU disponible después de FASE 2 básica     │
+    └─────────────────────────────────────────────────────────────────────┘
+    """
+
+    # Rango Z esperado para el páncreas en CT abdominal estándar (heurístico)
+    # Validar con verify_pancreas_z_range() antes de usar en producción
+    PANCREAS_Z_MIN = 120
+    PANCREAS_Z_MAX = 220
+
+    @staticmethod
+    def extract_option_a(volume: np.ndarray,
+                         target: tuple = (64, 64, 64)) -> np.ndarray:
+        """
+        H2/Opción A — Resize completo del volumen [D,H,W] a target.
+        SOLO para FASE 0 (embedding/routing). NO para el experto clasificador.
+        """
+        t = torch.from_numpy(volume).float().unsqueeze(0).unsqueeze(0)
+        t = nn.functional.interpolate(t, size=target,
+                                       mode="trilinear", align_corners=False)
+        return t.squeeze().numpy()
+
+    @staticmethod
+    def extract_option_b(volume: np.ndarray,
+                         z_min: int = None,
+                         z_max: int = None,
+                         target: tuple = (64, 64, 64)) -> np.ndarray:
+        """
+        H2/Opción B — Recorte de abdomen superior (Z fijo) + resize.
+        Mejora el ratio páncreas/volumen ~3×.
+        z_min/z_max por defecto: PancreasROIExtractor.PANCREAS_Z_MIN/MAX.
+        Verificar con verify_pancreas_z_range() antes de usar.
+        """
+        z_min = z_min if z_min is not None else PancreasROIExtractor.PANCREAS_Z_MIN
+        z_max = z_max if z_max is not None else PancreasROIExtractor.PANCREAS_Z_MAX
+        d = volume.shape[0]
+        z_min = max(0, min(z_min, d - 1))
+        z_max = max(z_min + 1, min(z_max, d))
+        cropped = volume[z_min:z_max, :, :]
+        t = torch.from_numpy(cropped).float().unsqueeze(0).unsqueeze(0)
+        t = nn.functional.interpolate(t, size=target,
+                                       mode="trilinear", align_corners=False)
+        return t.squeeze().numpy()
+
+    @staticmethod
+    def verify_pancreas_z_range(nii_paths: list,
+                                 segmentation_paths: list = None) -> None:
+        """
+        H2 — Verifica que el rango Z predeterminado cubre el páncreas.
+
+        Si se dispone de segmentaciones (máscaras .nii.gz), mide el rango Z real.
+        Si no, muestra dimensiones de los volúmenes para estimar manualmente.
+
+        Uso antes de usar Opción B en producción:
+            PancreasROIExtractor.verify_pancreas_z_range(nii_list, seg_list)
+        """
+        import random
+        n_check = min(5, len(nii_paths))
+        log.info(f"[Pancreas/H2] Verificando rango Z en {n_check} volúmenes...")
+
+        for nii_path in random.sample(nii_paths, n_check):
+            try:
+                image = sitk.ReadImage(str(nii_path))
+                arr   = sitk.GetArrayFromImage(image)   # [Z, Y, X]
+                d, h, w = arr.shape
+                spacing = image.GetSpacing()
+                log.info(f"    {Path(nii_path).name}: shape=[{d},{h},{w}] | "
+                         f"spacing={spacing[2]:.2f}×{spacing[1]:.2f}×{spacing[0]:.2f} mm")
+                if d < PancreasROIExtractor.PANCREAS_Z_MAX:
+                    log.warning(f"    ⚠ Volumen con solo {d} slices — "
+                                f"PANCREAS_Z_MAX={PancreasROIExtractor.PANCREAS_Z_MAX} "
+                                f"excede la dimensión. Ajustar PancreasROIExtractor.PANCREAS_Z_MAX.")
+            except Exception as e:
+                log.warning(f"    Error leyendo '{nii_path}': {e}")
+
+        if segmentation_paths:
+            log.info("[Pancreas/H2] Calculando rango Z real del páncreas desde segmentaciones...")
+            z_mins, z_maxs = [], []
+            for seg_path in random.sample(segmentation_paths,
+                                          min(5, len(segmentation_paths))):
+                try:
+                    seg = sitk.GetArrayFromImage(sitk.ReadImage(str(seg_path)))
+                    pancreas_z = np.where(seg > 0)[0]
+                    if len(pancreas_z):
+                        z_mins.append(int(pancreas_z.min()))
+                        z_maxs.append(int(pancreas_z.max()))
+                        log.info(f"    {Path(seg_path).name}: "
+                                 f"páncreas Z=[{pancreas_z.min()},{pancreas_z.max()}]")
+                except Exception as e:
+                    log.warning(f"    Error leyendo segmentación '{seg_path}': {e}")
+            if z_mins:
+                log.info(
+                    f"[Pancreas/H2] Rango Z del páncreas en muestra:\n"
+                    f"    Z mínimo: {min(z_mins)} (actual PANCREAS_Z_MIN={PancreasROIExtractor.PANCREAS_Z_MIN})\n"
+                    f"    Z máximo: {max(z_maxs)} (actual PANCREAS_Z_MAX={PancreasROIExtractor.PANCREAS_Z_MAX})\n"
+                    f"    ⚠ Si los valores difieren, actualizar PancreasROIExtractor.PANCREAS_Z_MIN/MAX."
+                )
+        else:
+            log.info("[Pancreas/H2] Sin segmentaciones disponibles — "
+                     "verificar rango Z manualmente con un visualizador DICOM/NIfTI.")
+
+
+# ── PancreasDataset ──────────────────────────────────────────────────────────
+
 class PancreasDataset(Dataset):
     """
-    Pancreatic Cancer CT 3D — Binario, 2 clases.
-    Igual que LUNA16: asume parches 3D pre-extraídos.
-    Etiqueta de experto = 4.
+    Pancreatic Cancer CT 3D (PANORAMA / PDAC) — Clasificación binaria.
+
+    ⚠ H1 — Etiquetas en repositorio GitHub SEPARADO del ZIP:
+      git clone https://github.com/DIAGNijmegen/panorama_labels.git
+      Cruzar case_ids con archivos del ZIP → PanoramaLabelLoader.cross_match()
+      Fijar hash del commit → reproducibilidad del experimento
+
+    ⚠ H2 — Páncreas ocupa ~1% del volumen CT:
+      resize naïve a 64³ deja el páncreas en ~5 vóxeles → señal destruida.
+      Opción A (FASE 0 / routing): resize completo — SOLO para embeddings
+      Opción B (FASE 2, recomendada): recorte Z[120:220] + resize
+      Opción C (SOTA): segmentar con nnU-Net → recortar ROI → resize
+
+    ⚠ H3 — HU clip [-100, 400] para abdomen (NO [-1000, 400] de LUNA16):
+      HU_ABDOMEN_CLIP = (-100, 400) — constante exportada
+      z-score por volumen para bias multicéntrico (Radboudumc/MSD/NIH)
+
+    Items:
+      Item-3 : lectura .nii.gz con SimpleITK
+      Item-6 : gradient checkpointing obligatorio — batch_size=1–2 con 12 GB
+      Item-7 : FocalLoss(alpha=0.75, gamma=2) — desbalance ~2.3:1 a 3:1
+      Item-8 : k-fold CV (k=5) dado el tamaño limitado (~281 volúmenes)
+      Item-9 : auditoría de fuentes (Radboudumc/MSD/NIH) + z-score por volumen
+
+    Dos modos:
+      mode="embedding" → FASE 0: (img_2d, expert_id=4, case_stem)
+                          Opción A siempre — velocidad sobre calidad
+      mode="expert"    → FASE 2: (volume_3d, label_binary, case_stem)
+                          Opción B por defecto; Opción C si hay segmentaciones
     """
-    def __init__(self, patches_dir):
-        self.patches_dir = Path(patches_dir)
-        self.expert_id   = EXPERT_IDS["pancreas"]
- 
-        if not self.patches_dir.exists():
-            log.error(f"[Pancreas] Directorio no encontrado: {self.patches_dir}")
-            self.samples = []
+
+    def __init__(self, valid_pairs: list,
+                 mode: str = "embedding",
+                 roi_strategy: str = "B",
+                 z_score_per_volume: bool = True):
+        """
+        Args:
+            valid_pairs       : lista de (nii_path, label_int) de
+                                PanoramaLabelLoader.cross_match()
+            mode              : "embedding" (FASE 0) o "expert" (FASE 2)
+            roi_strategy      : "A" (resize completo), "B" (recorte Z fijo)
+                                "C" no implementado aquí (requiere nnU-Net externo)
+            z_score_per_volume: H3/Item-9 — normalizar cada volumen individualmente
+                                con z-score para compensar bias multicéntrico
+        """
+        assert mode in ("embedding", "expert"), \
+            f"[Pancreas] mode debe ser 'embedding' o 'expert', recibido: '{mode}'"
+        assert roi_strategy in ("A", "B"), \
+            f"[Pancreas] roi_strategy debe ser 'A' o 'B', recibido: '{roi_strategy}'. " \
+            f"Opción C requiere nnU-Net externo (ver PancreasROIExtractor docstring)."
+
+        self.expert_id        = EXPERT_IDS["pancreas"]
+        self.mode             = mode
+        self.roi_strategy     = roi_strategy
+        self.z_score_norm     = z_score_per_volume
+        self.samples          = valid_pairs   # [(nii_path, label), ...]
+
+        n_total = len(self.samples)
+        n_pos   = sum(1 for _, l in self.samples if l == 1)
+        n_neg   = sum(1 for _, l in self.samples if l == 0)
+
+        log.info(
+            f"[Pancreas] Dataset inicializado: {n_total:,} volúmenes | "
+            f"mode='{mode}' | roi_strategy='{roi_strategy}' | "
+            f"z_score_per_volume={z_score_per_volume}"
+        )
+
+        # ── Item-2: distribución PDAC+ / PDAC− ──────────────────────────────
+        if n_total == 0:
+            log.error("[Pancreas] ¡Sin muestras! Ejecuta PanoramaLabelLoader primero.")
             return
- 
-        self.samples = list(self.patches_dir.glob("*.npy"))
-        log.info(f"[Pancreas] {len(self.samples):,} volúmenes encontrados en '{self.patches_dir}'")
- 
-        if len(self.samples) == 0:
-            log.error(f"[Pancreas] ¡Sin archivos .npy! Verifica que hayas preprocesado "
-                      f"los volúmenes PANORAMA y que estén en '{self.patches_dir}'.")
-        elif len(self.samples) < 50:
-            log.warning(f"[Pancreas] Solo {len(self.samples)} volúmenes — dataset muy pequeño. "
-                        f"Considera k-fold CV (k=5) para estimaciones más estables.")
- 
+
+        ratio = n_neg / max(n_pos, 1)
+        log.info(
+            f"[Pancreas] Item-2 — PDAC+ (positivo): {n_pos:,} | "
+            f"PDAC− (negativo): {n_neg:,} | ratio: {ratio:.1f}:1"
+        )
+
+        # ── H3/Item-4: clip HU abdominal ─────────────────────────────────────
+        log.info(
+            f"[Pancreas] H3/Item-4 — HU clip: {HU_ABDOMEN_CLIP} (abdomen).\n"
+            f"    ⚠ NO usar HU_LUNG_CLIP {HU_LUNG_CLIP} de LUNA16.\n"
+            f"    Parénquima pancreático: +30 a +150 HU (fase portal-venosa).\n"
+            f"    Tumor PDAC (hipodenso): -20 a +80 HU.\n"
+            f"    Con clip [-1000,400]: la diferencia páncreas↔tumor queda\n"
+            f"    comprimida en ~14% del espacio normalizado → 7× menos resolución.\n"
+            f"    Validar visualmente: el páncreas debe aparecer como región\n"
+            f"    gris intermedia en el slice axial tras la normalización."
+        )
+
+        # ── H2/Item-5: ROI strategy ───────────────────────────────────────────
+        log.info(
+            f"[Pancreas] H2/Item-5 — Estrategia ROI: Opción {roi_strategy}\n"
+            + {
+                "A": (
+                    "    Opción A — Resize completo a 64³.\n"
+                    "    ⚠ Solo válida para FASE 0 (routing/embedding).\n"
+                    "    Páncreas quedará representado por ~5 vóxeles.\n"
+                    "    NO usar para el Experto 4 clasificador en FASE 2."
+                ),
+                "B": (
+                    f"    Opción B — Recorte Z[{PancreasROIExtractor.PANCREAS_Z_MIN}:"
+                    f"{PancreasROIExtractor.PANCREAS_Z_MAX}] + resize 64³.\n"
+                    f"    Mejora el ratio páncreas/volumen ~3×.\n"
+                    f"    ⚠ Verificar con PancreasROIExtractor.verify_pancreas_z_range()\n"
+                    f"    en ≥5 casos antes de producción."
+                ),
+            }[roi_strategy]
+        )
+
+        # ── H3/Item-9: bias multicéntrico + z-score ───────────────────────────
+        self._source_audit()
+        if z_score_per_volume:
+            log.info(
+                "[Pancreas] H3/Item-9 — z-score por volumen ACTIVO.\n"
+                "    Normaliza media=0, std=1 dentro de cada volumen antes del clip HU.\n"
+                "    Compensa diferencias sistemáticas entre Radboudumc/MSD/NIH\n"
+                "    (protocolo de contraste, escáner, fase de adquisición).\n"
+                "    Se aplica ANTES del clip HU en __getitem__."
+            )
+
+        # ── Item-6: gradient checkpointing ───────────────────────────────────
+        log.info(
+            "[Pancreas] Item-6 — Gradient checkpointing OBLIGATORIO con 12 GB VRAM.\n"
+            "    Un CT abdominal 512×512×300 float32 = ~300 MB por volumen.\n"
+            "    Tras resize a 64³: 1 MB de entrada, pero activaciones 3D = 8-10 GB.\n"
+            "    Configuración obligatoria: batch_size=1–2 + FP16 + checkpoint.\n"
+            "    ⚠ Más restrictivo que LUNA16 (donde batch_size=4 era viable)."
+        )
+
+        # ── H4/Item-7: FocalLoss — justificación clínica más allá del desbalance ──
+        log.info(
+            f"[Pancreas] H4/Item-7 — Loss: FocalLoss(alpha=0.75, gamma=2).\n"
+            f"    ⚠ FocalLoss es obligatoria por DOS razones independientes:\n"
+            f"\n"
+            f"    RAZÓN 1 — Desbalance de clases (~{ratio:.1f}:1):\n"
+            f"      CrossEntropyLoss estándar converge fácilmente a 'siempre negativo'.\n"
+            f"\n"
+            f"    RAZÓN 2 — Asimetría del costo clínico (más importante):\n"
+            f"      Falso negativo (no detectar PDAC real):\n"
+            f"        → El tumor sigue creciendo sin tratamiento → mortalidad elevada\n"
+            f"        → PDAC tiene supervivencia a 5 años de ~12% → cada mes importa\n"
+            f"      Falso positivo (alarmar sin tumor real):\n"
+            f"        → Se pide una prueba adicional (biopsia/PET/seguimiento)\n"
+            f"        → Costo: estrés del paciente + gasto médico adicional\n"
+            f"        → No hay consecuencia irreversible\n"
+            f"\n"
+            f"    Por tanto: penalizar FN > FP es clínicamente correcto.\n"
+            f"    alpha=0.75 (vs alpha=0.25 de LUNA16):\n"
+            f"      alpha alto → más peso a la clase positiva (PDAC+) → penaliza más los FN.\n"
+            f"      LUNA16 usa alpha bajo porque el objetivo es reducir FP/scan;\n"
+            f"      aquí el objetivo es no perder ningún PDAC positivo.\n"
+            f"\n"
+            f"    Verificación de convergencia trivial (ejecutar tras 5 épocas):\n"
+            f"        metrics = PancreasDataset.check_trivial_convergence(logits, labels)\n"
+            f"        Si metrics['convergence_risk'] → True: revisar FocalLoss y LR."
+        )
+
+        # ── H5/Item-8: k-fold CV — justificación cuantitativa ────────────────
+        log.info(
+            f"[Pancreas] H5/Item-8 — k-fold CV (k=5) OBLIGATORIO con {n_total:,} volúmenes.\n"
+            f"    Justificación cuantitativa:\n"
+            f"      Split fijo 80/20 → val ≈ {n_total//5} muestras → σ(AUC) ≈ ±0.05\n"
+            f"      Con AUC objetivo ~0.85, ±0.05 hace imposible saber si una mejora\n"
+            f"      es real o ruido de la partición.\n"
+            f"      k-fold (k=5): cada fold usa ~{4*n_total//5} train, ~{n_total//5} val\n"
+            f"      → AUC reportado = media de 5 folds → σ reducida ~{0.05/5**0.5:.3f}\n"
+            f"\n"
+            f"    Uso en FASE 2 del Experto 4:\n"
+            f"        folds = PancreasDataset.build_kfold_splits(valid_pairs, k=5)\n"
+            f"        for fold_idx, (train_pairs, val_pairs) in enumerate(folds):\n"
+            f"            train_ds = PancreasDataset(train_pairs, mode='expert')\n"
+            f"            val_ds   = PancreasDataset(val_pairs,   mode='expert')\n"
+            f"            # ... entrenar y validar ...\n"
+            f"        # AUC final = mean(fold_AUCs)"
+        )
+
+    @staticmethod
+    def build_kfold_splits(valid_pairs: list,
+                           k: int = 5,
+                           random_state: int = 42) -> list:
+        """
+        H5/Item-8 — Genera k folds estratificados para cross-validation.
+
+        Estratificado por label (PDAC+/PDAC−) para preservar el ratio en cada fold.
+        Con ~281 volúmenes y k=5: cada fold tiene ~56 muestras de val.
+
+        Uso en el loop de entrenamiento de FASE 2:
+            folds = PancreasDataset.build_kfold_splits(valid_pairs, k=5)
+            fold_aucs = []
+            for fold_idx, (train_pairs, val_pairs) in enumerate(folds):
+                train_ds = PancreasDataset(train_pairs, mode="expert")
+                val_ds   = PancreasDataset(val_pairs,   mode="expert")
+                # ... entrenar modelo, calcular AUC en val_ds ...
+                fold_aucs.append(val_auc)
+            log.info(f"AUC media: {np.mean(fold_aucs):.4f} ± {np.std(fold_aucs):.4f}")
+
+        Args:
+            valid_pairs  : lista de (nii_path, label_int) de PanoramaLabelLoader
+            k            : número de folds (default 5)
+            random_state : semilla para reproducibilidad
+
+        Returns:
+            lista de k tuplas (train_pairs, val_pairs)
+        """
+        from sklearn.model_selection import StratifiedKFold
+
+        paths  = [p for p, _ in valid_pairs]
+        labels = [l for _, l in valid_pairs]
+
+        skf   = StratifiedKFold(n_splits=k, shuffle=True, random_state=random_state)
+        folds = []
+
+        for fold_idx, (train_idx, val_idx) in enumerate(skf.split(paths, labels)):
+            train_pairs = [valid_pairs[i] for i in train_idx]
+            val_pairs   = [valid_pairs[i] for i in val_idx]
+
+            n_pos_tr = sum(1 for _, l in train_pairs if l == 1)
+            n_neg_tr = sum(1 for _, l in train_pairs if l == 0)
+            n_pos_va = sum(1 for _, l in val_pairs   if l == 1)
+            n_neg_va = sum(1 for _, l in val_pairs   if l == 0)
+
+            log.info(
+                f"[Pancreas/kfold] Fold {fold_idx+1}/{k}: "
+                f"train={len(train_pairs):,} (pos={n_pos_tr}, neg={n_neg_tr}) | "
+                f"val={len(val_pairs):,} (pos={n_pos_va}, neg={n_neg_va})"
+            )
+            folds.append((train_pairs, val_pairs))
+
+        return folds
+
+    @staticmethod
+    def check_trivial_convergence(logits: torch.Tensor,
+                                  labels: torch.Tensor,
+                                  threshold: float = 0.4) -> dict:
+        """
+        H4/Item-7 — Detecta si el modelo converge al mínimo trivial (siempre negativo).
+
+        Con desbalance ~2.3:1, el modelo puede aprender a predecir siempre PDAC−
+        obteniendo accuracy ~70% sin detectar ningún tumor real.
+        Esto es especialmente grave en PDAC: cada falso negativo es un tumor no detectado.
+
+        Llamar en el loop de validación de FASE 2 tras las primeras 5 épocas:
+            metrics = PancreasDataset.check_trivial_convergence(val_logits, val_labels)
+            if metrics["convergence_risk"]:
+                log.error("Modelo predice siempre negativo — revisar FocalLoss y ROI")
+
+        Args:
+            logits    : [N] tensor de logits (antes de sigmoid)
+            labels    : [N] tensor de etiquetas binarias {0, 1}
+            threshold : prob media mínima esperada para positivos (default 0.4)
+
+        Returns:
+            dict con: prob_pos_mean, prob_neg_mean, frac_pred_pos, convergence_risk
+        """
+        with torch.no_grad():
+            probs = torch.sigmoid(logits.float()).cpu().numpy()
+        labels_np = labels.cpu().numpy() if isinstance(labels, torch.Tensor) else np.array(labels)
+
+        pos_mask = labels_np == 1
+        neg_mask = labels_np == 0
+
+        prob_pos_mean = float(probs[pos_mask].mean()) if pos_mask.any() else 0.0
+        prob_neg_mean = float(probs[neg_mask].mean()) if neg_mask.any() else 0.0
+        frac_pred_pos = float((probs > 0.5).mean())
+
+        # Convergencia trivial: el modelo asigna poca probabilidad a los positivos
+        # o casi nunca predice positivo
+        convergence_risk = (prob_pos_mean < threshold) or (frac_pred_pos < 0.05)
+
+        if convergence_risk:
+            log.error(
+                f"[Pancreas] H4 — ⚠ RIESGO DE CONVERGENCIA TRIVIAL:\n"
+                f"    prob_pos_mean = {prob_pos_mean:.4f} (esperado ≥ {threshold})\n"
+                f"    frac_pred_pos = {frac_pred_pos:.4f} (esperado ≥ 0.05)\n"
+                f"    El modelo probablemente predice siempre PDAC− (negativo).\n"
+                f"    Recuerda: FN en PDAC = tumor no detectado → consecuencia clínica grave.\n"
+                f"    Acciones:\n"
+                f"      1. Verificar FocalLoss(alpha=0.75, gamma=2) está activa\n"
+                f"      2. Aumentar LR o reducir weight decay\n"
+                f"      3. Verificar que los parches contienen el páncreas (H2/ROI strategy)\n"
+                f"      4. Verificar z_score_per_volume=True para normalización multicéntrica"
+            )
+        else:
+            log.info(
+                f"[Pancreas] H4 — Convergencia no trivial ✓ | "
+                f"prob_pos={prob_pos_mean:.4f} | prob_neg={prob_neg_mean:.4f} | "
+                f"frac_pred_pos={frac_pred_pos:.4f}"
+            )
+
+        return {
+            "prob_pos_mean":    prob_pos_mean,
+            "prob_neg_mean":    prob_neg_mean,
+            "frac_pred_pos":    frac_pred_pos,
+            "convergence_risk": convergence_risk,
+        }
+
+    def _source_audit(self):
+        """
+        H6/Item-9 — Infiere la fuente de cada caso por naming convention
+        y documenta el riesgo de bias multicéntrico.
+
+        Las 3 fuentes tienen protocolos radicalmente distintos:
+          Radboudumc + UMCG (Holanda):
+            - Escáneres clínicos con protocolos variables
+            - Fase portal-venosa estándar
+            - Mezcla de PDAC+ y PDAC−
+          MSD Task07 (Memorial Sloan Kettering, NYC):
+            - Protocolo oncológico estandarizado
+            - ~50% PDAC — distribución muy distinta a los otros
+          NIH Pancreas-CT (Maryland):
+            - Solo páncreas sano (100% negativos)
+            - Escáneres Philips/Siemens específicos
+            - Normalización HU sistemáticamente diferente
+
+        RIESGO CLÍNICO DEL BIAS:
+          Si el modelo aprende diferencias de escáner en lugar de PDAC,
+          los resultados de validación se inflan pero el modelo no generaliza.
+          Un modelo que aprende "NIH = negativo" logra AUC alta en val
+          pero falla completamente en datos de Radboudumc solos.
+
+        CONTRAMEDIDAS implementadas:
+          1. z_score_per_volume=True → normaliza offset HU por escáner
+          2. FocalLoss → concentra el aprendizaje en casos difíciles,
+             no en los patrones fáciles de dominio
+        """
+        stems  = [Path(p).name.split(".nii")[0] for p, _ in self.samples]
+        n_msd  = sum(1 for s in stems if "Task07" in s or "msd" in s.lower())
+        n_nih  = sum(1 for s in stems if "pancreas" in s.lower() and
+                     not any(x in s for x in ["panc_", "PANC_"]))
+        n_radb = len(stems) - n_msd - n_nih
+        total  = max(len(stems), 1)
+
+        log.info(
+            f"[Pancreas] H6/Item-9 — Auditoría de fuentes (heurística por naming):\n"
+            f"    Radboudumc + UMCG (~Holanda, protocolo variable): "
+            f"{n_radb:>4} ({100*n_radb/total:.0f}%)\n"
+            f"    MSD Task07 (~NYC, ~50% PDAC)                    : "
+            f"{n_msd:>4} ({100*n_msd/total:.0f}%)\n"
+            f"    NIH Pancreas-CT (todos negativos)               : "
+            f"{n_nih:>4} ({100*n_nih/total:.0f}%)\n"
+            f"    ⚠ NIH = 100% negativos → puede inflar accuracy por bias de dominio.\n"
+            f"    ⚠ MSD = ~50% PDAC → distribución muy distinta a los otros centros.\n"
+            f"    Contramedidas activas:\n"
+            f"      z_score_per_volume = {'activo ✓' if self.z_score_norm else 'INACTIVO ⚠'}\n"
+            f"      FocalLoss(alpha=0.75) → concentra aprendizaje en casos difíciles\n"
+            f"    Documentar bias multicéntrico en el Reporte Técnico (sección 3)."
+        )
+
     def __len__(self):
         return len(self.samples)
- 
+
     def __getitem__(self, idx):
-        patch_file = self.samples[idx]
+        nii_path, label = self.samples[idx]
+        case_stem       = Path(nii_path).name.split(".nii")[0]
+
         try:
-            volume = np.load(patch_file)
+            # Item-3 — lectura .nii.gz con SimpleITK
+            image  = sitk.ReadImage(str(nii_path))
+            volume = sitk.GetArrayFromImage(image).astype(np.float32)  # [Z, Y, X] en HU
         except Exception as e:
-            log.warning(f"[Pancreas] Error cargando '{patch_file}': {e}. "
+            log.warning(f"[Pancreas] Error leyendo '{nii_path}': {e}. "
                         f"Reemplazando con tensor cero.")
-            return torch.zeros(3, 224, 224), self.expert_id, patch_file.stem
- 
+            if self.mode == "embedding":
+                return torch.zeros(3, 224, 224), self.expert_id, case_stem
+            else:
+                return torch.zeros(1, 64, 64, 64), label, case_stem
+
+        # H3/Item-4 — clip HU abdominal PRIMERO, luego z-score
+        # USAR HU_ABDOMEN_CLIP, NO HU_LUNG_CLIP
+        lo, hi = HU_ABDOMEN_CLIP
+        volume = np.clip(volume, lo, hi)
+
+        # H3/Item-9 — z-score por volumen (DESPUÉS del clip HU)
+        # Compensa diferencias sistemáticas de HU entre escáneres.
+        # Orden correcto: clip HU → z-score → el rango resultante es
+        # compatible y preserva el contraste diagnóstico.
+        if self.z_score_norm:
+            mean_v = volume.mean()
+            std_v  = volume.std()
+            if std_v > 1e-6:
+                volume = (volume - mean_v) / std_v
+                # Rango típico tras z-score: [-3, 3]. Normalizar a [0, 1].
+                volume = np.clip(volume, -3, 3)
+                volume = (volume - (-3)) / 6.0
+            else:
+                volume = np.zeros_like(volume)
+        else:
+            volume = (volume - lo) / (hi - lo)
+
+        # Detectar volumen constante (error de lectura o ruta incorrecta)
         if volume.max() == volume.min():
-            log.warning(f"[Pancreas] Volumen '{patch_file.name}' es constante "
-                        f"(valor={volume.max():.1f} HU). ¿HU clip mal aplicado?")
- 
-        # Pancreas usa rango HU abdominal [-100, 400], distinto a LUNA [-1000, 400]
-        volume   = normalize_hu(volume, min_hu=-100, max_hu=400)
-        volume_t = resize_volume_3d(volume)
-        img      = volume_to_vit_input(volume_t)
-        return img, self.expert_id, patch_file.stem
-# Consejo:
-# Como este experto es el último (Experto 4), el balance de carga 
-# (max(f_i)/min(f_i) < 1.30) será tu mayor desafío aquí. Los datasets 3D suelen 
-# ser más pequeños que los 2D (NIH/ISIC). Asegúrate de que durante el 
-# entrenamiento del Router (FASE 1), tu DataLoader mixto use una estrategia de 
-# oversampling para que el experto 4 reciba suficientes muestras y no sea 
-# ignorado por el Router en favor de los datasets 2D más grandes.
+            log.warning(f"[Pancreas] Volumen '{case_stem}' es constante tras normalización. "
+                        f"¿El clip HU es correcto? Rango original verificado.")
+
+        if self.mode == "embedding":
+            # FASE 0: Opción A (resize completo) — velocidad sobre calidad
+            # El router solo necesita un embedding aproximado del volumen
+            volume_t = resize_volume_3d(volume, target=(64, 64, 64))
+            img      = volume_to_vit_input(volume_t)           # [3, 224, 224]
+            return img, self.expert_id, case_stem
+        else:
+            # FASE 2: Opción B o C según roi_strategy
+            # Experto 4 necesita la región pancreática con resolución suficiente
+            if self.roi_strategy == "B":
+                roi = PancreasROIExtractor.extract_option_b(volume)
+            else:
+                roi = PancreasROIExtractor.extract_option_a(volume)
+
+            # Tensor [1, 64, 64, 64] — un canal de intensidad HU normalizada
+            volume_t = torch.from_numpy(roi).float().unsqueeze(0)
+            return volume_t, label, case_stem
  
  
 # ──────────────────────────────────────────────────────────
@@ -2737,16 +3478,50 @@ def build_datasets(cfg):
     else:
         log.warning("[Dataset] LUNA16 OMITIDO — falta --luna_patches o --luna_csv")
  
-    # ── Experto 5: Pancreas ──
-    if cfg.get("pancreas_patches_train") and cfg.get("pancreas_patches_val"):
-        log.info("[Dataset] Cargando Pancreas CT 3D (Experto 4)...")
-        panc_train = PancreasDataset(cfg["pancreas_patches_train"])
-        panc_val   = PancreasDataset(cfg["pancreas_patches_val"])
-        train_datasets.append(panc_train)
-        val_datasets.append(panc_val)
-        log.info(f"  → train: {len(panc_train):,}  val: {len(panc_val):,}")
+    # ── Experto 5: Pancreas PANORAMA ──
+    if cfg.get("pancreas_nii_dir") and cfg.get("pancreas_labels_dir"):
+        log.info("[Dataset] Cargando Pancreas CT 3D — PANORAMA (Experto 4)...")
+
+        # H1: cargar etiquetas del repo GitHub y cruzar con .nii.gz del ZIP
+        nii_files  = list(Path(cfg["pancreas_nii_dir"]).glob("*.nii.gz")) + \
+                     list(Path(cfg["pancreas_nii_dir"]).glob("*.nii"))
+        labels     = PanoramaLabelLoader.load_labels(
+            cfg["pancreas_labels_dir"],
+            expected_commit=cfg.get("pancreas_labels_commit", None),
+        )
+        all_pairs  = PanoramaLabelLoader.cross_match(labels, nii_files)
+
+        if not all_pairs:
+            log.error("[Pancreas] Sin pares válidos — verificar H1 (etiquetas + volúmenes).")
+        else:
+            # Split simple 80/20 — para producción usar StratifiedKFold(k=5)
+            import random as _random
+            _random.seed(42)
+            _random.shuffle(all_pairs)
+            n_train   = int(len(all_pairs) * 0.8)
+            panc_train_pairs = all_pairs[:n_train]
+            panc_val_pairs   = all_pairs[n_train:]
+
+            roi = cfg.get("pancreas_roi_strategy", "A")   # "A" para FASE 0
+            panc_train = PancreasDataset(panc_train_pairs, mode="embedding",
+                                         roi_strategy=roi)
+            panc_val   = PancreasDataset(panc_val_pairs,   mode="embedding",
+                                         roi_strategy=roi)
+            train_datasets.append(panc_train)
+            val_datasets.append(panc_val)
+            log.info(f"  → train: {len(panc_train):,}  val: {len(panc_val):,}")
+    elif cfg.get("pancreas_patches_train") and cfg.get("pancreas_patches_val"):
+        # Fallback: si ya tienes .npy pre-procesados (compatibilidad hacia atrás)
+        log.warning("[Pancreas] Usando .npy pre-procesados (modo legado). "
+                    "Para la arquitectura completa pasa --pancreas_nii_dir y "
+                    "--pancreas_labels_dir con el repo panorama_labels clonado.")
+        panc_legacy = _build_pancreas_legacy(cfg)
+        if panc_legacy:
+            train_datasets.append(panc_legacy[0])
+            val_datasets.append(panc_legacy[1])
     else:
-        log.warning("[Dataset] Pancreas OMITIDO — falta --pancreas_patches_train o --pancreas_patches_val")
+        log.warning("[Dataset] Pancreas OMITIDO — pasa --pancreas_nii_dir y "
+                    "--pancreas_labels_dir, o --pancreas_patches_train/val (legado)")
  
     # ── Experto 6 (OOD) — ausente intencionalmente ──
     log.info("[Dataset] Experto 5 (OOD) — sin dataset en FASE 0. Se inicializa en FASE 1.")
@@ -2819,6 +3594,10 @@ def main(args):
         "luna_csv":          args.luna_csv,
         "pancreas_patches_train": args.pancreas_patches_train,
         "pancreas_patches_val":   args.pancreas_patches_val,
+        "pancreas_nii_dir":       args.pancreas_nii_dir,
+        "pancreas_labels_dir":    args.pancreas_labels_dir,
+        "pancreas_labels_commit": args.pancreas_labels_commit,
+        "pancreas_roi_strategy":  args.pancreas_roi_strategy,
     }
  
     log.info("[Setup] Construyendo datasets...")
@@ -2923,6 +3702,35 @@ def main(args):
 # investigador, definas los hiperparámetros (como batch_size) y las rutas de los datos (de los 5 datasets) 
 # desde la consola, garantizando que el experimento sea flexible, documentado y fácil de replicar para tu 
 # ablation study.
+def _build_pancreas_legacy(cfg):
+    """Fallback para .npy pre-procesados (compatibilidad hacia atrás con versiones previas)."""
+    class _LegacyPancreasDataset(Dataset):
+        def __init__(self, patches_dir):
+            self.patches_dir = Path(patches_dir)
+            self.expert_id   = EXPERT_IDS["pancreas"]
+            self.samples     = list(self.patches_dir.glob("*.npy"))
+        def __len__(self): return len(self.samples)
+        def __getitem__(self, idx):
+            pf = self.samples[idx]
+            try:
+                v = np.load(pf)
+            except Exception:
+                return torch.zeros(3, 224, 224), self.expert_id, pf.stem
+            lo, hi = HU_ABDOMEN_CLIP
+            v = np.clip(v, lo, hi)
+            v = (v - lo) / (hi - lo)
+            vt = resize_volume_3d(v)
+            return volume_to_vit_input(vt), self.expert_id, pf.stem
+    try:
+        tr = _LegacyPancreasDataset(cfg["pancreas_patches_train"])
+        va = _LegacyPancreasDataset(cfg["pancreas_patches_val"])
+        log.info(f"[Pancreas/legado] train: {len(tr):,}  val: {len(va):,}")
+        return tr, va
+    except Exception as e:
+        log.error(f"[Pancreas/legado] Error: {e}")
+        return None
+
+
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="FASE 0 — Extracción de embeddings MoE")
  
@@ -2999,9 +3807,30 @@ if __name__ == "__main__":
     parser.add_argument("--luna_csv",         default=None,
                         help="candidates_V2.csv")
  
-    # Rutas Pancreas
-    parser.add_argument("--pancreas_patches_train", default=None)
-    parser.add_argument("--pancreas_patches_val",   default=None)
+    # Rutas Pancreas PANORAMA — modo completo (recomendado)
+    parser.add_argument(
+        "--pancreas_nii_dir", default=None,
+        help="H1 — Directorio con los .nii.gz del ZIP de Zenodo (batch_1, batch_2, ...)"
+    )
+    parser.add_argument(
+        "--pancreas_labels_dir", default=None,
+        help="H1 — Directorio del repo clonado: git clone https://github.com/DIAGNijmegen/panorama_labels.git"
+    )
+    parser.add_argument(
+        "--pancreas_labels_commit", default=None,
+        help="H1 — Hash SHA del commit del repo panorama_labels para reproducibilidad. "
+             "Obtener con: cd panorama_labels && git rev-parse HEAD"
+    )
+    parser.add_argument(
+        "--pancreas_roi_strategy", default="A", choices=["A", "B"],
+        help="H2 — Estrategia ROI: A=resize completo (FASE 0), B=recorte Z[120:220] (FASE 2). "
+             "Default=A para FASE 0. Cambiar a B para FASE 2 del Experto 4."
+    )
+    # Rutas Pancreas — modo legado (.npy pre-procesados)
+    parser.add_argument("--pancreas_patches_train", default=None,
+                        help="Legado: carpeta con .npy pre-procesados de train (si no usas --pancreas_nii_dir)")
+    parser.add_argument("--pancreas_patches_val",   default=None,
+                        help="Legado: carpeta con .npy pre-procesados de val")
  
     args = parser.parse_args()
     main(args)

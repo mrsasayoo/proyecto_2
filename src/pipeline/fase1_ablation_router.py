@@ -162,7 +162,17 @@ EXPERT_NOTES = {
         "Item-8: CPM+FROC con noduleCADEvaluationLUNA16.py. "
         "Techo teórico: 94.4% (LUNA16Dataset.SENSITIVITY_CEILING). "
         "Item-9: spacing variable en volúmenes — verificado en __init__."),
-    4: "Pancreas PANORAMA — BINARIO volumen 3D. Loss: FocalLoss(alpha=0.75, gamma=2). Métrica: AUC-ROC.",
+    4: ("Pancreas PANORAMA — BINARIO volumen 3D (PDAC+ / PDAC−). "
+        "H1: etiquetas en repo GitHub SEPARADO — git clone panorama_labels; "
+        "fijar hash commit; cruzar case_ids con .nii.gz del ZIP. "
+        "H2: páncreas ~1% del volumen → resize naïve destruye señal. "
+        "Opción A (FASE 0): resize completo. Opción B (FASE 2): recorte Z[120:220]. "
+        "H3: HU clip HU_ABDOMEN_CLIP=(-100,400) — NO HU_LUNG_CLIP de LUNA16. "
+        "z-score por volumen para bias multicéntrico (Radboudumc/MSD/NIH). "
+        "Loss: FocalLoss(alpha=0.75, gamma=2). "
+        "Item-6: batch_size=1–2 + FP16 + gradient checkpointing (más restrictivo que LUNA16). "
+        "Item-8: k-fold CV k=5 (solo ~281 volúmenes). "
+        "Métrica: AUC-ROC > 0.85 (bueno); baseline nnU-Net ~0.88."),
 }
 
 
