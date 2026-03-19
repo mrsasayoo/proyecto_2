@@ -318,25 +318,42 @@ log_step "FASE 3 — Preparación de datasets"
 
 # -- NIH --
 NIH_DIR="$DATASETS_DIR/nih_chest_xrays"
+# Mínimos esperados (86523 train_val, 25595 test en el dataset completo NIH).
+# Un archivo con menos líneas indica truncamiento por OOM u otro crash previo.
+declare -A NIH_TXT_MIN=( [train_val_list.txt]=80000 [test_list.txt]=20000 )
 for txt in train_val_list.txt test_list.txt; do
+    local_count=0
+    [[ -f "$NIH_DIR/$txt" ]] && local_count=$(wc -l < "$NIH_DIR/$txt")
     if [[ ! -f "$NIH_DIR/$txt" ]]; then
         log_warn "[NIH] $txt no encontrado. Extrayendo de data.zip..."
         unzip -j -q "$NIH_DIR/data.zip" "$txt" -d "$NIH_DIR"
+    elif [[ $local_count -lt ${NIH_TXT_MIN[$txt]} ]]; then
+        log_warn "[NIH] $txt truncado ($local_count líneas < mínimo ${NIH_TXT_MIN[$txt]}). Re-extrayendo de data.zip..."
+        unzip -j -q -o "$NIH_DIR/data.zip" "$txt" -d "$NIH_DIR"
     fi
     log_info "[NIH] $txt ✓ ($(wc -l < "$NIH_DIR/$txt") entradas)"
 done
 
-if [[ ! -d "$NIH_DIR/all_images" ]]; then
+# Verificar all_images/ — detecta corrupción por I/O error (OOM kill previo)
+NIH_ALL="$NIH_DIR/all_images"
+NIH_ALL_OK=false
+if [[ -d "$NIH_ALL" ]]; then
+    n_links=$(find "$NIH_ALL" -maxdepth 1 -type l 2>/dev/null | wc -l)
+    if [[ $n_links -gt 0 ]]; then
+        NIH_ALL_OK=true
+        log_info "[NIH] all_images/ ya existe ($n_links symlinks), saltando."
+    else
+        log_warn "[NIH] all_images/ existe pero está vacío/corrupto (I/O error previo). Eliminando y recreando..."
+        rm -rf "$NIH_ALL" 2>/dev/null || { log_error "[NIH] No se pudo eliminar all_images/ — posible corrupción de filesystem. Ejecuta: sudo rm -rf $NIH_ALL"; }
+    fi
+fi
+if [[ "$NIH_ALL_OK" == false ]]; then
     log_info "[NIH] Creando all_images/ con symlinks..."
-    mkdir -p "$NIH_DIR/all_images"
-    # -P4 -I{} lanzaba 1 proceso por imagen (112 k procesos → OOM).
-    # --target-directory agrupa todos los args en lotes grandes (~ARG_MAX):
-    # ~10-20 invocaciones de ln en total, sin spike de memoria.
+    mkdir -p "$NIH_ALL"
+    # --target-directory agrupa args en lotes (ARG_MAX) → ~10-20 invocaciones de ln en total.
     find "$NIH_DIR" -maxdepth 4 -path "*/images/*.png" -print0 | \
-        xargs -0 ln -sf --target-directory="$NIH_DIR/all_images/"
-    log_info "[NIH] ✓ $(find "$NIH_DIR/all_images" -maxdepth 1 -type l | wc -l) symlinks creados."
-else
-    log_info "[NIH] all_images/ ya existe ($(find "$NIH_DIR/all_images" -maxdepth 1 -type l | wc -l) symlinks), saltando."
+        xargs -0 ln -sf --target-directory="$NIH_ALL/"
+    log_info "[NIH] ✓ $(find "$NIH_ALL" -maxdepth 1 -type l | wc -l) symlinks creados."
 fi
 
 # -- OA Rodilla --

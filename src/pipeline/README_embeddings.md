@@ -375,3 +375,32 @@ usarán arquitecturas 3D reales (R3D-18, Swin3D-Tiny) en FASE 2.
 
 5. **FASE 1 detecta d_model automáticamente** desde `Z_train.shape[1]`, así que
    no necesita saber qué backbone se usó.
+
+
+cd /mnt/hdd/datasets/carlos_andres_ferro/proyecto_2/src/pipeline
+
+```bash
+python3 fase0_extract_embeddings.py \
+  --backbone      vit_tiny_patch16_224 \
+  --batch_size    64 \
+  --workers       4 \
+  --output_dir    ../../embeddings/vit_tiny \
+  \
+  --chest_csv        ../../datasets/nih_chest_xrays/Data_Entry_2017.csv \
+  --chest_imgs       ../../datasets/nih_chest_xrays/all_images \
+  --chest_train_list ../../datasets/nih_chest_xrays/train_val_list.txt \
+  --chest_val_list   ../../datasets/nih_chest_xrays/test_list.txt \
+  --chest_view_filter PA \
+  --chest_bbox_csv   ../../datasets/nih_chest_xrays/BBox_List_2017.csv \
+  \
+  --isic_gt       ../../datasets/isic_2019/ISIC_2019_Training_GroundTruth.csv \
+  --isic_imgs     "../../datasets/isic_2019/ISIC_2019_Training_Input/ISIC_2019_Training_Input" \
+  --isic_metadata ../../datasets/isic_2019/ISIC_2019_Training_Metadata.csv \
+  \
+  --oa_root       ../../datasets/osteoarthritis/oa_splits \
+  \
+  --pancreas_nii_dir    ../../datasets/zenodo_13715870 \
+  --pancreas_labels_dir ../../datasets/panorama_labels \
+  --pancreas_labels_commit "<HASH_DEL_GIT_REV_PARSE>" \
+  --pancreas_roi_strategy A
+```

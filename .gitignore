@@ -43,6 +43,8 @@ datasets/luna_lung_cancer/*
 datasets/zenodo_13715870/*
 !datasets/zenodo_13715870/.gitkeep
 
+datasets/panorama_labels
+!datasets/panorama_labels/.gitkeep
 docs
 # ═══════════════════════════════════════════════════════════════
 # Logs & Temporary Files (in datasets root)
