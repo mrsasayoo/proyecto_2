@@ -57,15 +57,13 @@ if ! command -v kaggle &>/dev/null; then
 fi
 log_info "kaggle ✓ ($(kaggle --version 2>/dev/null || echo 'versión desconocida'))"
 
-if [[ ! -f "$HOME/.kaggle/kaggle.json" ]]; then
-    log_error "~/.kaggle/kaggle.json no encontrado."
-    log_error "  1. Ve a https://www.kaggle.com/settings → API → 'Create New Token'"
-    log_error "  2. Mueve el archivo descargado: mv ~/Downloads/kaggle.json ~/.kaggle/"
-    log_error "  3. chmod 600 ~/.kaggle/kaggle.json"
-    exit 1
+if [[ -f "$HOME/.kaggle/kaggle.json" ]]; then
+    chmod 600 "$HOME/.kaggle/kaggle.json"
+    log_info "~/.kaggle/kaggle.json ✓"
+else
+    log_warn "~/.kaggle/kaggle.json no encontrado — se intentará descargar solo si faltan ZIPs."
+    log_warn "  Para obtenerlo: https://www.kaggle.com/settings → API → 'Create New Token'"
 fi
-chmod 600 "$HOME/.kaggle/kaggle.json"
-log_info "~/.kaggle/kaggle.json ✓"
 
 # ── Crear estructura de directorios ───────────────────────────────────────────
 mkdir -p \
@@ -82,6 +80,13 @@ _kaggle_dl() {
     if [[ -f "$expected_file" ]]; then
         log_info "[$display] Ya existe: $(basename "$expected_file") ($(du -sh "$expected_file" | cut -f1)), saltando."
         return 0
+    fi
+    # Verificar credenciales solo cuando realmente se necesita descargar
+    if [[ ! -f "$HOME/.kaggle/kaggle.json" ]]; then
+        log_error "[$display] Falta ~/.kaggle/kaggle.json para descargar '$dataset'."
+        log_error "  1. Ve a https://www.kaggle.com/settings → API → 'Create New Token'"
+        log_error "  2. cp ~/Downloads/kaggle.json ~/.kaggle/ && chmod 600 ~/.kaggle/kaggle.json"
+        return 1
     fi
     log_info "[$display] → Iniciando descarga: kaggle datasets download -d $dataset"
     kaggle datasets download -d "$dataset" -p "$dest_dir"
@@ -247,14 +252,15 @@ done
 if [[ ! -d "$NIH_DIR/all_images" ]]; then
     log_info "[NIH] Creando all_images/ con symlinks a todos los .png..."
     mkdir -p "$NIH_DIR/all_images"
-    # Usar xargs -P para paralelizar la creación de symlinks (100k+ archivos)
+    # -I{} lanzaba 1 proceso por imagen (112 k → OOM).
+    # --target-directory agrupa args en lotes grandes (ARG_MAX) → ~10-20 llamadas totales.
     find "$NIH_DIR" -maxdepth 4 -path "*/images/*.png" -print0 | \
-        xargs -0 -P4 -I{} ln -sf {} "$NIH_DIR/all_images/"
-    N_LINKS=$(ls -1 "$NIH_DIR/all_images/" | wc -l)
+        xargs -0 ln -sf --target-directory="$NIH_DIR/all_images/"
+    N_LINKS=$(find "$NIH_DIR/all_images" -maxdepth 1 -type l | wc -l)
     log_info "[NIH] ✓ $N_LINKS symlinks creados en all_images/"
 else
-    N_LINKS=$(ls -1 "$NIH_DIR/all_images/" | wc -l)
-    log_info "[NIH] all_images/ ya existe ($N_LINKS imágenes), saltando."
+    N_LINKS=$(find "$NIH_DIR/all_images" -maxdepth 1 -type l | wc -l)
+    log_info "[NIH] all_images/ ya existe ($N_LINKS symlinks), saltando."
 fi
 
 # -- OA Rodilla: splits train/val/test con consolidación KL 0-4 → 3 clases --

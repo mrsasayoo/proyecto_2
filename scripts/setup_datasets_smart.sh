@@ -64,14 +64,13 @@ if ! command -v kaggle &>/dev/null; then
 fi
 log_info "kaggle ✓"
 
-if [[ ! -f "$HOME/.kaggle/kaggle.json" ]]; then
-    log_error "~/.kaggle/kaggle.json no encontrado."
-    log_error "  1. Ve a https://www.kaggle.com/settings → API → 'Create New Token'"
-    log_error "  2. cp ~/Downloads/kaggle.json ~/.kaggle/ && chmod 600 ~/.kaggle/kaggle.json"
-    exit 1
+if [[ -f "$HOME/.kaggle/kaggle.json" ]]; then
+    chmod 600 "$HOME/.kaggle/kaggle.json"
+    log_info "kaggle.json ✓"
+else
+    log_warn "~/.kaggle/kaggle.json no encontrado — se intentará descargar solo si faltan ZIPs."
+    log_warn "  Para obtenerlo: https://www.kaggle.com/settings → API → 'Create New Token'"
 fi
-chmod 600 "$HOME/.kaggle/kaggle.json"
-log_info "kaggle.json ✓"
 
 # ── Crear directorios ─────────────────────────────────────────────────────────
 mkdir -p \
@@ -94,6 +93,13 @@ _kaggle_dl() {
     if [[ -f "$expected_file" ]]; then
         log_info "[$display] Ya existe: $(basename "$expected_file") ($(du -sh "$expected_file" | cut -f1)), saltando."
         return 0
+    fi
+    # Verificar credenciales solo cuando realmente se necesita descargar
+    if [[ ! -f "$HOME/.kaggle/kaggle.json" ]]; then
+        log_error "[$display] Falta ~/.kaggle/kaggle.json para descargar '$dataset'."
+        log_error "  1. Ve a https://www.kaggle.com/settings → API → 'Create New Token'"
+        log_error "  2. cp ~/Downloads/kaggle.json ~/.kaggle/ && chmod 600 ~/.kaggle/kaggle.json"
+        return 1
     fi
     log_info "[$display] → Descargando kaggle dataset '$dataset' ..."
     kaggle datasets download -d "$dataset" -p "$dest_dir"
@@ -323,11 +329,14 @@ done
 if [[ ! -d "$NIH_DIR/all_images" ]]; then
     log_info "[NIH] Creando all_images/ con symlinks..."
     mkdir -p "$NIH_DIR/all_images"
+    # -P4 -I{} lanzaba 1 proceso por imagen (112 k procesos → OOM).
+    # --target-directory agrupa todos los args en lotes grandes (~ARG_MAX):
+    # ~10-20 invocaciones de ln en total, sin spike de memoria.
     find "$NIH_DIR" -maxdepth 4 -path "*/images/*.png" -print0 | \
-        xargs -0 -P4 -I{} ln -sf {} "$NIH_DIR/all_images/"
-    log_info "[NIH] ✓ $(ls -1 "$NIH_DIR/all_images/" | wc -l) symlinks creados."
+        xargs -0 ln -sf --target-directory="$NIH_DIR/all_images/"
+    log_info "[NIH] ✓ $(find "$NIH_DIR/all_images" -maxdepth 1 -type l | wc -l) symlinks creados."
 else
-    log_info "[NIH] all_images/ ya existe ($(ls -1 "$NIH_DIR/all_images/" | wc -l) imágenes), saltando."
+    log_info "[NIH] all_images/ ya existe ($(find "$NIH_DIR/all_images" -maxdepth 1 -type l | wc -l) symlinks), saltando."
 fi
 
 # -- OA Rodilla --
