@@ -19,11 +19,11 @@ from torchvision import transforms
 from PIL import Image
 from pathlib import Path
 
-from config import (
+from ..config import (
     EXPERT_IDS, IMAGENET_MEAN, IMAGENET_STD,
     OA_CLASS_NAMES, OA_N_CLASSES, OA_BASE_IMG_COUNT
 )
-from preprocessing import apply_clahe
+from ..preprocessing import apply_clahe
 
 log = logging.getLogger("fase0")
 

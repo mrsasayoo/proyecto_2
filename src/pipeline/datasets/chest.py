@@ -19,7 +19,7 @@ from PIL import Image
 from pathlib import Path
 import pandas as pd
 
-from config import (
+from ..config import (
     EXPERT_IDS, CHEST_PATHOLOGIES, N_CHEST_CLASSES, CHEST_BBOX_CLASSES
 )
 

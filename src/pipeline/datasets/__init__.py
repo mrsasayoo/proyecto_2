@@ -10,16 +10,16 @@ Uso:
     )
 """
 
-from datasets.chest import ChestXray14Dataset
-from datasets.isic import ISICDataset
-from datasets.osteoarthritis import OAKneeDataset
-from datasets.luna import (
+from .chest import ChestXray14Dataset
+from .isic import ISICDataset
+from .osteoarthritis import OAKneeDataset
+from .luna import (
     LUNA16Dataset,
     LUNA16PatchExtractor,
     LUNA16FROCEvaluator,
     verify_hu_normalization,
 )
-from datasets.pancreas import (
+from .pancreas import (
     PancreasDataset,
     PanoramaLabelLoader,
     PancreasROIExtractor,
