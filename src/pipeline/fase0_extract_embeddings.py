@@ -36,6 +36,7 @@ Uso:
 """
  
 import os
+import re
 import argparse
 import logging
 import time
@@ -45,6 +46,32 @@ import torch
 import torch.nn as nn
 from torch.utils.data import Dataset, DataLoader, ConcatDataset
 import timm
+
+# === PATCH CvT-13 — inyectado por install_cvt_and_run_fase0.py ===
+# timm no tiene cvt_13 en versiones >= 0.9.x. Este patch intercepta la llamada
+# a timm.create_model('cvt_13', ...) y la redirige a CvT13Wrapper (HuggingFace).
+# El resto de fase0_extract_embeddings.py funciona sin ningún otro cambio.
+
+import sys as _sys
+import os as _os
+_sys.path.insert(0, str(_os.path.join(_os.path.dirname(__file__), '..', '..', 'scripts')))
+
+_original_timm_create = timm.create_model
+
+def _patched_create_model(model_name, *args, **kwargs):
+    if model_name == 'cvt_13':
+        import logging as _logging
+        import torch as _torch
+        _log = _logging.getLogger('fase0')
+        _log.info("[Backbone/patch] cvt_13 interceptado → CvT13Wrapper (HuggingFace)")
+        from cvt13_backbone import build_cvt13
+        _device = kwargs.get('device', 'cpu')
+        _pretrained = kwargs.get('pretrained', True)
+        return build_cvt13(pretrained=_pretrained, device=_device)
+    return _original_timm_create(model_name, *args, **kwargs)
+
+timm.create_model = _patched_create_model
+# === FIN PATCH ===
 from torchvision import transforms
 from PIL import Image
 import pandas as pd
@@ -2512,9 +2539,11 @@ class PanoramaLabelLoader:
         """
         H1/Item-1+2 — Cruza los case_ids del repositorio con los .nii.gz del ZIP.
 
-        Estrategia de matching: compara el stem del nombre de archivo
-        (sin extensión) con el case_id del repositorio.
-        Ej: "panc_001.nii.gz" → case_id "panc_001"
+        FIX — sufijo nnU-Net: los archivos extraidos del ZIP de Zenodo tienen
+        el canal codificado al final del nombre, p.ej.:
+            "100298_00001_0000.nii.gz"  ->  canal 0000 (imagen CT)
+        El CSV de etiquetas usa la clave sin el sufijo: "100298_00001".
+        Se normaliza eliminando el sufijo _XXXX (4 digitos) antes del match.
 
         Args:
             labels      : dict de PanoramaLabelLoader.load_labels()
@@ -2528,26 +2557,31 @@ class PanoramaLabelLoader:
         no_label      = []
         no_volume     = []
 
+        # Construir indice normalizado: case_id_sin_sufijo -> nii_path
+        # Solo se queda con el canal _0000 (imagen CT), descarta _0001+ (mascaras)
+        normalized_index: dict = {}
         for nii_path in nii_paths:
-            # Extraer case_id del nombre de archivo (quitar .nii.gz o .nii)
             stem = Path(nii_path).name
             for ext in [".nii.gz", ".nii"]:
                 if stem.endswith(ext):
                     stem = stem[:-len(ext)]
                     break
-            label = labels.get(stem)
-            if label is not None:
-                valid_pairs.append((str(nii_path), label))
-            else:
-                no_label.append(stem)
+            # Eliminar sufijo nnU-Net _XXXX (exactamente 4 digitos al final)
+            normalized = re.sub(r'_\d{4}$', '', stem)
+            # Solo registrar canal _0000 (primer canal = imagen CT).
+            if normalized not in normalized_index:
+                normalized_index[normalized] = str(nii_path)
 
+        for norm_id, nii_path in normalized_index.items():
+            label = labels.get(norm_id)
+            if label is not None:
+                valid_pairs.append((nii_path, label))
+            else:
+                no_label.append(norm_id)
+
+        # Detectar etiquetas que no tienen ningun volumen en disco
         for case_id in labels:
-            found = any(
-                str(p).endswith(f"{case_id}.nii.gz") or
-                str(p).endswith(f"{case_id}.nii")
-                for p in nii_paths
-            )
-            if not found:
+            if case_id not in normalized_index:
                 no_volume.append(case_id)
 
         n_pos = sum(1 for _, l in valid_pairs if l == 1)
@@ -3468,10 +3502,20 @@ def build_datasets(cfg):
     # ── Experto 4: LUNA16 ──
     if cfg.get("luna_patches") and cfg.get("luna_csv"):
         log.info("[Dataset] Cargando LUNA16 parches 3D (Experto 3)...")
-        luna_train = LUNA16Dataset(cfg["luna_patches"] + "/train",
-                                   cfg["luna_csv"], mode="embedding")
-        luna_val   = LUNA16Dataset(cfg["luna_patches"] + "/val",
-                                   cfg["luna_csv"], mode="embedding")
+        # Resolver rutas train/val tolerando dos convenciones:
+        #   A) --luna_patches apunta al PADRE: patches/  -> patches/train + patches/val
+        #   B) --luna_patches apunta al TRAIN: patches/train -> usa directo + sibling val/
+        _luna_base = Path(cfg["luna_patches"])
+        if (_luna_base / "train").exists():
+            _luna_train_dir = str(_luna_base / "train")
+            _luna_val_dir   = str(_luna_base / "val")
+            log.debug(f"[LUNA16] Modo A (padre): train={_luna_train_dir} | val={_luna_val_dir}")
+        else:
+            _luna_train_dir = str(_luna_base)
+            _luna_val_dir   = str(_luna_base.parent / "val")
+            log.debug(f"[LUNA16] Modo B (train directo): train={_luna_train_dir} | val={_luna_val_dir}")
+        luna_train = LUNA16Dataset(_luna_train_dir, cfg["luna_csv"], mode="embedding")
+        luna_val   = LUNA16Dataset(_luna_val_dir,   cfg["luna_csv"], mode="embedding")
         train_datasets.append(luna_train)
         val_datasets.append(luna_val)
         log.info(f"  → train: {len(luna_train):,}  val: {len(luna_val):,}")
@@ -3482,9 +3526,50 @@ def build_datasets(cfg):
     if cfg.get("pancreas_nii_dir") and cfg.get("pancreas_labels_dir"):
         log.info("[Dataset] Cargando Pancreas CT 3D — PANORAMA (Experto 4)...")
 
-        # H1: cargar etiquetas del repo GitHub y cruzar con .nii.gz del ZIP
-        nii_files  = list(Path(cfg["pancreas_nii_dir"]).glob("*.nii.gz")) + \
-                     list(Path(cfg["pancreas_nii_dir"]).glob("*.nii"))
+        # Verificacion de extraccion del ZIP de Zenodo
+        _NII_MIN_EXPECTED = 50
+        nii_dir_path = Path(cfg["pancreas_nii_dir"])
+        batch_zip    = nii_dir_path / "batch_1.zip"
+        _nii_on_disk = list(nii_dir_path.rglob("*.nii.gz")) + \
+                       list(nii_dir_path.rglob("*.nii"))
+        _nii_count   = len(_nii_on_disk)
+
+        if _nii_count >= _NII_MIN_EXPECTED:
+            log.info(
+                f"[Pancreas/ZIP] {_nii_count} archivos NIfTI encontrados en disco — "
+                f"extraccion confirmada (minimo esperado: {_NII_MIN_EXPECTED}) ✓"
+            )
+        elif batch_zip.exists():
+            zip_size_gb = batch_zip.stat().st_size / 1e9
+            log.warning(
+                f"[Pancreas/ZIP] Solo {_nii_count} archivos .nii.gz en disco "
+                f"(minimo esperado: {_NII_MIN_EXPECTED}).\n"
+                f"    batch_1.zip existe ({zip_size_gb:.1f} GB) pero parece no extraido.\n"
+                f"    Extrayendo automaticamente..."
+            )
+            import subprocess as _sp
+            _result = _sp.run(
+                ["unzip", "-n", str(batch_zip)],
+                cwd=str(nii_dir_path),
+                capture_output=False,
+                timeout=3600
+            )
+            if _result.returncode == 0:
+                _nii_on_disk = list(nii_dir_path.rglob("*.nii.gz")) + \
+                               list(nii_dir_path.rglob("*.nii"))
+                _nii_count   = len(_nii_on_disk)
+                log.info(f"[Pancreas/ZIP] Extraccion completada — {_nii_count} archivos NIfTI disponibles.")
+            else:
+                log.error(f"[Pancreas/ZIP] unzip termino con codigo {_result.returncode}.")
+        else:
+            log.error(
+                f"[Pancreas/ZIP] {_nii_count} archivos NIfTI en disco y "
+                f"batch_1.zip NO encontrado en '{nii_dir_path}'."
+            )
+
+        # H1: rglob (recursivo) para cubrir subdirectorios que crea el unzip
+        nii_files  = list(nii_dir_path.rglob("*.nii.gz")) + \
+                     list(nii_dir_path.rglob("*.nii"))
         labels     = PanoramaLabelLoader.load_labels(
             cfg["pancreas_labels_dir"],
             expected_commit=cfg.get("pancreas_labels_commit", None),
@@ -3532,11 +3617,17 @@ def build_datasets(cfg):
     # Advertir si el balance entre expertos es muy desigual (objetivo: max/min < 1.30)
     sizes = [len(d) for d in train_datasets]
     if sizes:
-        ratio = max(sizes) / min(sizes)
         log.info(f"[Dataset] Tamaños train por experto: {sizes}")
-        if ratio > 10:
-            log.warning(f"[Dataset] Balance muy desigual: max/min = {ratio:.1f}x. "
-                        f"Considera WeightedRandomSampler en el DataLoader de FASE 1.")
+        nonzero_sizes = [s for s in sizes if s > 0]
+        if nonzero_sizes and len(nonzero_sizes) > 1:
+            ratio = max(nonzero_sizes) / min(nonzero_sizes)
+            if ratio > 10:
+                log.warning(f"[Dataset] Balance muy desigual: max/min = {ratio:.1f}x. "
+                            f"Considera WeightedRandomSampler en el DataLoader de FASE 1.")
+        zero_datasets = [i for i, s in enumerate(sizes) if s == 0]
+        if zero_datasets:
+            log.warning(f"[Dataset] Expertos con 0 muestras en train (indices): {zero_datasets} "
+                        f"— revisa las rutas de esos datasets.")
  
     return ConcatDataset(train_datasets), ConcatDataset(val_datasets)
 # Sugerencia:

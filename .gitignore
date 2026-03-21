@@ -2,60 +2,30 @@
 # IDE & Editor
 # ═══════════════════════════════════════════════════════════════
 .vscode/
+.idea/
+.DS_Store
+.AppleDouble
+.LSOverride
+Thumbs.db
 *.swp
 *.swo
 *~
-.idea/
-.DS_Store
 
 # ═══════════════════════════════════════════════════════════════
-# Python
+# Python & Environment
 # ═══════════════════════════════════════════════════════════════
 __pycache__/
 *.pyc
 *.pyo
 *.egg-info/
+*.egg
 dist/
 build/
 .pytest_cache/
 .mypy_cache/
-*.egg
 venv/
 env/
-.venv
-
-# ═══════════════════════════════════════════════════════════════
-# Datasets (ignore content but keep directory structure via .gitkeep)
-# ═══════════════════════════════════════════════════════════════
-# Ignore ALL files in datasets subdirectories EXCEPT .gitkeep
-datasets/nih_chest_xrays/*
-!datasets/nih_chest_xrays/.gitkeep
-
-datasets/isic_2019/*
-!datasets/isic_2019/.gitkeep
-
-datasets/osteoarthritis/*
-!datasets/osteoarthritis/.gitkeep
-
-datasets/luna_lung_cancer/*
-!datasets/luna_lung_cancer/.gitkeep
-
-datasets/zenodo_13715870/*
-!datasets/zenodo_13715870/.gitkeep
-
-datasets/panorama_labels
-!datasets/panorama_labels/.gitkeep
-docs
-# ═══════════════════════════════════════════════════════════════
-# Logs & Temporary Files (in datasets root)
-# ═══════════════════════════════════════════════════════════════
-datasets/*.log
-datasets/*.sh
-datasets/monitor.sh
-
-# ═══════════════════════════════════════════════════════════════
-# Environment & Config
-# ═══════════════════════════════════════════════════════════════
+.venv/
 .env
 .env.local
 .env.*.local
@@ -67,9 +37,26 @@ datasets/monitor.sh
 *.ipynb_checkpoints
 
 # ═══════════════════════════════════════════════════════════════
-# OS-specific
+# Datasets & Embeddings (Ignorar contenido, mantener estructura)
 # ═══════════════════════════════════════════════════════════════
-Thumbs.db
-.DS_Store
-.AppleDouble
-.LSOverride
+# Ignorar todos los datasets excepto los archivos .gitkeep
+datasets/*
+!datasets/*/.gitkeep
+
+# Ignorar los embeddings y archivos pesados generados
+embeddings/
+*.npy
+
+# ═══════════════════════════════════════════════════════════════
+# Logs, Scripts temporales y Monitorización
+# ═══════════════════════════════════════════════════════════════
+*.log
+logs/
+src/pipeline/salida_log/
+datasets/*.sh
+datasets/monitor.sh
+
+# ═══════════════════════════════════════════════════════════════
+# Documentación Extra
+# ═══════════════════════════════════════════════════════════════
+docs/
