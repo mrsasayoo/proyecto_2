@@ -73,6 +73,7 @@ CHEST_BBOX_CLASSES = {
 # ── Osteoarthritis Knee ────────────────────────────────────
 OA_CLASS_NAMES   = ["Normal (KL0)", "Leve (KL1-2)", "Severo (KL3-4)"]
 OA_N_CLASSES     = 3
+# Reservado para FASE 2 — WeightedLoss con penalización ordinal
 OA_COST_MATRIX   = np.array([[0, 1, 4],
                               [1, 0, 1],
                               [4, 1, 0]], dtype=np.float32)

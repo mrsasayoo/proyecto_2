@@ -11,6 +11,7 @@ Hallazgos implementados:
 """
 
 import logging
+import os
 import numpy as np
 import torch
 from torch.utils.data import Dataset
@@ -263,6 +264,3 @@ class ChestXray14Dataset(Dataset):
             )
             return img, label_vec, img_name
 
-
-# Needed for the os.listdir call in __init__
-import os

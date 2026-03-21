@@ -29,7 +29,7 @@ from pathlib import Path
 import SimpleITK as sitk
 
 from config import EXPERT_IDS, HU_LUNG_CLIP
-from preprocessing import resize_volume_3d, volume_to_vit_input
+from preprocessing import normalize_hu, resize_volume_3d, volume_to_vit_input
 
 log = logging.getLogger("fase0")
 
@@ -251,9 +251,7 @@ class LUNA16PatchExtractor:
                            ((0, pad_z), (0, pad_y), (0, pad_x)),
                            constant_values=clip_hu[0])
 
-        patch = np.clip(patch, clip_hu[0], clip_hu[1])
-        patch = (patch - clip_hu[0]) / (clip_hu[1] - clip_hu[0])
-        return patch.astype(np.float32)
+        return normalize_hu(patch, clip_hu[0], clip_hu[1])
 
     @staticmethod
     def validate_extraction(mhd_paths: list,

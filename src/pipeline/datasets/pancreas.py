@@ -26,7 +26,7 @@ from pathlib import Path
 import SimpleITK as sitk
 
 from config import EXPERT_IDS, HU_ABDOMEN_CLIP, HU_LUNG_CLIP
-from preprocessing import resize_volume_3d, volume_to_vit_input
+from preprocessing import normalize_hu, resize_volume_3d, volume_to_vit_input
 
 log = logging.getLogger("fase0")
 
@@ -533,9 +533,9 @@ class PancreasDataset(Dataset):
                 return torch.zeros(1, 64, 64, 64), label, case_stem
 
         lo, hi = HU_ABDOMEN_CLIP
-        volume = np.clip(volume, lo, hi)
 
         if self.z_score_norm:
+            volume = np.clip(volume, lo, hi)
             mean_v = volume.mean()
             std_v  = volume.std()
             if std_v > 1e-6:
@@ -545,7 +545,7 @@ class PancreasDataset(Dataset):
             else:
                 volume = np.zeros_like(volume)
         else:
-            volume = (volume - lo) / (hi - lo)
+            volume = normalize_hu(volume, lo, hi)
 
         if volume.max() == volume.min():
             log.warning(f"[Pancreas] Volumen '{case_stem}' es constante tras normalización.")
@@ -561,3 +561,26 @@ class PancreasDataset(Dataset):
                 roi = PancreasROIExtractor.extract_option_a(volume)
             volume_t = torch.from_numpy(roi).float().unsqueeze(0)
             return volume_t, label, case_stem
+
+
+class _LegacyPancreasDataset(Dataset):
+    """Fallback para .npy pre-procesados (compatibilidad hacia atrás)."""
+
+    def __init__(self, patches_dir):
+        self.patches_dir = Path(patches_dir)
+        self.expert_id   = EXPERT_IDS["pancreas"]
+        self.samples     = list(self.patches_dir.glob("*.npy"))
+
+    def __len__(self):
+        return len(self.samples)
+
+    def __getitem__(self, idx):
+        pf = self.samples[idx]
+        try:
+            v = np.load(pf)
+        except Exception:
+            return torch.zeros(3, 224, 224), self.expert_id, pf.stem
+        lo, hi = HU_ABDOMEN_CLIP
+        v = normalize_hu(v, lo, hi)
+        vt = resize_volume_3d(v)
+        return volume_to_vit_input(vt), self.expert_id, pf.stem

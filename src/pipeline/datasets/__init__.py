@@ -23,6 +23,7 @@ from datasets.pancreas import (
     PancreasDataset,
     PanoramaLabelLoader,
     PancreasROIExtractor,
+    _LegacyPancreasDataset,
 )
 
 __all__ = [
