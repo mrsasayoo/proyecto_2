@@ -48,11 +48,12 @@ def train_linear_router(Z_train, y_train, Z_val, y_val, d_model,
 
     best_acc     = 0.0
     best_weights = None
-    no_improve   = 0
 
     log.info(f"  [Linear] Entrenando en {device} | epochs={epochs} lr={lr} batch={batch_size}")
     log.info(f"  [Linear] n_experts={N_EXPERTS_DOMAIN} (ablation) | "
              f"nota: FASE 1 real usará n_experts={N_EXPERTS_TOTAL} (+OOD slot)")
+
+    Z_v = torch.from_numpy(Z_val).float().to(device)
 
     for epoch in range(epochs):
         model.train()
@@ -72,7 +73,6 @@ def train_linear_router(Z_train, y_train, Z_val, y_val, d_model,
         if (epoch + 1) % 10 == 0:
             model.eval()
             with torch.no_grad():
-                Z_v   = torch.from_numpy(Z_val).float().to(device)
                 probs = model(Z_v).cpu().numpy()
                 preds = probs.argmax(axis=1)
                 acc   = accuracy_score(y_val, preds)
@@ -81,9 +81,6 @@ def train_linear_router(Z_train, y_train, Z_val, y_val, d_model,
             if improved:
                 best_acc     = acc
                 best_weights = {k: v.clone() for k, v in model.state_dict().items()}
-                no_improve   = 0
-            else:
-                no_improve += 1
 
             log.info(f"  [Linear] época {epoch+1:3d}/{epochs} | "
                      f"loss {epoch_loss:.4f} | val acc {acc:.4f}"

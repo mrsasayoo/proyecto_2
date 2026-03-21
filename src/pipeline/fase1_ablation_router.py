@@ -42,13 +42,13 @@ import faiss
 import numpy as np
 import torch
 
-from .config import (
+from config import (
     N_EXPERTS_DOMAIN, N_EXPERTS_TOTAL,
     EXPERT_NAMES, EXPERT_NOTES,
 )
-from .logging_utils import setup_logging
-from .router_metrics import measure_latency
-from .routers import (
+from logging_utils import setup_logging
+from router_metrics import measure_latency
+from routers import (
     train_linear_router, train_gmm_router,
     train_nb_router, train_knn_router,
 )
@@ -317,5 +317,4 @@ if __name__ == "__main__":
         help="Número de vecinos para kNN-FAISS (default=5)"
     )
     args = parser.parse_args()
-    main(args)
     main(args)

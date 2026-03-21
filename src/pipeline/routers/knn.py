@@ -42,8 +42,8 @@ def train_knn_router(Z_train, y_train, Z_val, y_val, k=5):
 
     distances, I = index.search(Z_v_norm, k)
 
-    min_sim = distances.max(axis=1)
-    low_sim_count = (min_sim < 0.5).sum()
+    best_sim = distances.max(axis=1)
+    low_sim_count = (best_sim < 0.5).sum()
     if low_sim_count > 0:
         log.info(f"  [kNN] {low_sim_count} muestras de val con similitud coseno < 0.5 "
                  f"con su vecino más cercano — candidatas naturales a OOD.")
