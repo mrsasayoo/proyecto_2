@@ -36,10 +36,8 @@ class ISICDataset(Dataset):
     """
 
     CLASSES       = ["MEL", "NV", "BCC", "AK", "BKL", "DF", "VASC", "SCC"]
-    N_CLASSES     = 9
     N_TRAIN_CLS   = 8
     MINORITY_IDX  = {3, 5, 6, 7}       # AK=3, DF=5, VASC=6, SCC=7
-    MINORITY_NAMES= {"AK", "DF", "VASC", "SCC"}
     KNOWN_DUPLICATES = {"ISIC_0067980", "ISIC_0069013"}
 
     @staticmethod

@@ -108,13 +108,8 @@ EXPERT_NAMES = {
     4: "Pancreas",
     # 5: "OOD" ← activado por entropía, no por routing directo
 }
- 
-# Umbral de entropía para OOD detection (se calibra automáticamente en este script)
-# H(g) = -sum(g_i * log(g_i + eps))
-# Si H(g) >= ENTROPY_THRESHOLD → imagen va al Experto 5 (OOD)
-# Valor inicial conservador; se ajusta en la sección de calibración
-ENTROPY_THRESHOLD_DEFAULT = 1.4   # ln(5) ≈ 1.609 = entropía máxima uniforme en 5 clases
- 
+
+
 # ── Notas por experto para el JSON de resultados ────────────
 # Estas notas se insertan en ablation_results.json para guiar FASE 2.
 EXPERT_NOTES = {
