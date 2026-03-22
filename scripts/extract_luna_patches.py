@@ -1,7 +1,7 @@
 """
 extract_luna_patches.py
 =======================
-Extrae parches 3D de LUNA16 (subset0) y los guarda como .npy para FASE 0.
+Extrae parches 3D de LUNA16 (todos los subsets disponibles) y los guarda como .npy para FASE 0.
 
 Reutiliza LUNA16PatchExtractor de fase0_extract_embeddings.py sin modificarlo.
 Los parches se guardan como candidate_XXXXXX.npy (índice de fila en candidates_V2.csv).
@@ -31,6 +31,9 @@ import numpy as np
 import pandas as pd
 import SimpleITK as sitk
 
+# ── Crear directorio de logs ────────────────────────────────────────────────
+(Path(__file__).resolve().parent.parent / "logs").mkdir(parents=True, exist_ok=True)
+
 # ── Logging ──────────────────────────────────────────────────────────────────
 logging.basicConfig(
     level=logging.INFO,
@@ -38,7 +41,10 @@ logging.basicConfig(
     datefmt="%Y-%m-%d %H:%M:%S",
     handlers=[
         logging.StreamHandler(),
-        logging.FileHandler("logs/extract_luna_patches.log", mode="w"),
+        logging.FileHandler(
+            str(Path(__file__).resolve().parent.parent / "logs" / "extract_luna_patches.log"),
+            mode="w"
+        ),
     ]
 )
 log = logging.getLogger("luna_extract")
@@ -114,7 +120,7 @@ def _worker(args_tuple):
         direc   = np.array(image.GetDirection())
         array   = sitk.GetArrayFromImage(image).astype(np.float32)
     except Exception as e:
-        for row_idx, _, _, label in candidates_batch:
+        for row_idx, _cx, _cy, _cz, label in candidates_batch:
             results.append((row_idx, None, label, f"ERROR_READ:{e}", 0.0))
         return results
 
@@ -189,7 +195,7 @@ def main(args):
     os.chdir(repo_root)
 
     LUNA_DIR    = repo_root / "datasets" / "luna_lung_cancer"
-    SUBSET0_DIR = LUNA_DIR  / "ct_volumes" / "subset0"
+    CT_VOLUMES_DIR = LUNA_DIR  / "ct_volumes"
     CSV_PATH    = LUNA_DIR  / "candidates_V2" / "candidates_V2.csv"
     PATCHES_DIR = LUNA_DIR  / "patches"
     TRAIN_DIR   = PATCHES_DIR / "train"
@@ -201,28 +207,38 @@ def main(args):
     VAL_DIR.mkdir(parents=True, exist_ok=True)
 
     log.info("=" * 65)
-    log.info("LUNA16 — Extracción de parches 3D (subset0)")
+    log.info("LUNA16 — Extracción de parches 3D (todos los subsets)")
     log.info("=" * 65)
 
-    # ── 1. Verificar que subset0 está extraído ────────────────────────────────
-    mhd_files = list(SUBSET0_DIR.rglob("*.mhd"))
-    if len(mhd_files) < 5:
-        zip_path = LUNA_DIR / "ct_volumes" / "subset0.zip"
-        if zip_path.exists():
-            log.warning(f"[Setup] Solo {len(mhd_files)} .mhd en {SUBSET0_DIR}. "
-                        f"Extrayendo subset0.zip (~6 GB, tardará ~5 min)...")
-            import subprocess
-            subprocess.run(
-                ["unzip", "-n", str(zip_path), "-d", str(SUBSET0_DIR)],
-                check=True
-            )
-            mhd_files = list(SUBSET0_DIR.rglob("*.mhd"))
-        else:
-            log.error(f"[Setup] subset0.zip no encontrado en {zip_path}. "
-                      f"Descárgalo desde https://luna16.grand-challenge.org/")
-            sys.exit(1)
+    # ── 1. Descubrir todos los subsets disponibles ───────────────────────────────────────
+    available_subsets = sorted([
+        d for d in CT_VOLUMES_DIR.iterdir()
+        if d.is_dir() and d.name.startswith("subset")
+    ])
 
-    log.info(f"[Setup] {len(mhd_files)} CTs (.mhd) encontrados en subset0")
+    if not available_subsets:
+        log.error(
+            f"[Setup] No se encontró ningún directorio subsetN en {CT_VOLUMES_DIR}. "
+            f"Verifica que los CTs estén extraídos."
+        )
+        sys.exit(1)
+
+    mhd_files = []
+    for subset_dir in available_subsets:
+        found = list(subset_dir.rglob("*.mhd"))
+        log.info(f"[Setup] {subset_dir.name}: {len(found)} CTs (.mhd)")
+        mhd_files.extend(found)
+
+    if not mhd_files:
+        log.error(
+            f"[Setup] Ningún archivo .mhd encontrado en los subsets de {CT_VOLUMES_DIR}. "
+            f"Verifica que los ZIPs estén extraídos."
+        )
+        sys.exit(1)
+
+    log.info(f"[Setup] Total: {len(mhd_files)} CTs (.mhd) en "
+             f"{len(available_subsets)} subsets: "
+             f"{[d.name for d in available_subsets]}")
 
     # Mapa seriesuid → mhd_path
     mhd_map = {p.stem: p for p in mhd_files}
@@ -237,19 +253,20 @@ def main(args):
     log.info(f"[Setup] {len(df):,} candidatos totales en el CSV")
     log.info(f"[Setup] Columnas: {list(df.columns)}")
 
-    # Filtrar solo los candidatos cuyo seriesuid está en subset0
+    # Filtrar candidatos cuyos seriesuid están en los subsets disponibles
     df_sub = df[df["seriesuid"].isin(mhd_map)].copy()
     df_sub = df_sub.reset_index(drop=False)  # conserva el índice original como columna
     df_sub = df_sub.rename(columns={"index": "original_idx"})
 
     n_pos = (df_sub["class"] == 1).sum()
     n_neg = (df_sub["class"] == 0).sum()
-    log.info(f"[Setup] Candidatos en subset0: {len(df_sub):,} "
+    log.info(f"[Setup] Candidatos en subsets disponibles: {len(df_sub):,} "
              f"(pos={n_pos:,}, neg={n_neg:,}, ratio={n_neg//max(n_pos,1)}:1)")
 
     if args.dry_run:
         log.info("[DRY-RUN] Modo simulación — no se escriben archivos.")
-        log.info(f"  CTs a procesar   : {len(mhd_map)}")
+        log.info(f"  Subsets detectados: {[d.name for d in available_subsets]}")
+        log.info(f"  CTs a procesar    : {len(mhd_map)}")
         log.info(f"  Candidatos totales: {len(df_sub):,}")
         log.info(f"  Positivos (class=1): {n_pos:,}")
         log.info(f"  Negativos (class=0): {n_neg:,}")
@@ -359,7 +376,8 @@ def main(args):
     n_val_files   = len(list(VAL_DIR.glob("candidate_*.npy")))
 
     report = {
-        "cts_subset0":      len(mhd_files),
+        "cts_total":   len(mhd_files),
+        "subsets":     [d.name for d in available_subsets],
         "train_cts":        len(train_uid),
         "val_cts":          len(val_uid),
         "train_patches":    n_train_files,
@@ -400,8 +418,8 @@ def main(args):
         f"        --luna_csv datasets/luna_lung_cancer/candidates_V2/candidates_V2.csv \\\n"
         f"        --chest_csv datasets/nih_chest_xrays/Data_Entry_2017.csv \\\n"
         f"        --chest_imgs datasets/nih_chest_xrays/all_images \\\n"
-        f"        --chest_train_list datasets/nih_chest_xrays/splits/nih_train_list.txt \\\n"
-        f"        --chest_val_list datasets/nih_chest_xrays/splits/nih_val_list.txt \\\n"
+        f"        --chest_train_list datasets/nih_chest_xrays/train_val_list.txt \\\n"
+        f"        --chest_val_list datasets/nih_chest_xrays/test_list.txt \\\n"
         f"        --chest_view_filter PA \\\n"
         f"        --chest_bbox_csv datasets/nih_chest_xrays/BBox_List_2017.csv \\\n"
         f"        --isic_gt datasets/isic_2019/ISIC_2019_Training_GroundTruth.csv \\\n"
@@ -418,7 +436,7 @@ def main(args):
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(
-        description="Extrae parches LUNA16 de subset0 → .npy para FASE 0"
+        description="Extrae parches LUNA16 de todos los subsets → .npy para FASE 0"
     )
     parser.add_argument(
         "--workers", type=int, default=6,

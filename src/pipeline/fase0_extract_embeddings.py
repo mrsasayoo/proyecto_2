@@ -73,7 +73,7 @@ from datasets.chest import ChestXray14Dataset
 from datasets.isic import ISICDataset
 from datasets.osteoarthritis import OAKneeDataset
 from datasets.luna import LUNA16Dataset
-from datasets.pancreas import PancreasDataset, PanoramaLabelLoader, _LegacyPancreasDataset
+from datasets.pancreas import PancreasDataset, PanoramaLabelLoader
 
 # Logger global — se inicializa en main()
 log = None
@@ -163,10 +163,19 @@ def extract_embeddings(model, dataloader, device, d_model, desc=""):
 # GUARD CLAUSE: LUNA16 PATCHES
 # ──────────────────────────────────────────────────────────
 
-def _check_luna_patches():
+def _check_luna_patches(luna_patches_arg=None):
     """Verificar que los parches 3D de LUNA16 fueron pre-extraídos."""
-    repo_root = Path(__file__).resolve().parent.parent.parent
-    patches_base = repo_root / "datasets" / "luna_lung_cancer" / "patches"
+    if luna_patches_arg is not None:
+        _base = Path(luna_patches_arg)
+        # Modo A: <ruta>/train/ y <ruta>/val/ bajo el directorio padre
+        if (_base / "train").exists() or (_base / "val").exists():
+            patches_base = _base
+        else:
+            # Modo B: la ruta IS el train dir, val está al lado
+            patches_base = _base.parent
+    else:
+        repo_root = Path(__file__).resolve().parent.parent.parent
+        patches_base = repo_root / "datasets" / "luna_lung_cancer" / "patches"
     missing = []
     for split_name in ("train", "val"):
         split_dir = patches_base / split_name
@@ -199,7 +208,8 @@ def build_datasets(cfg):
       NIH  : Patient-ID level, rebalanceando test_list.txt al 10 %
       ISIC : Lesion-ID level, dividiendo el 20 % restante en val + test
       OA   : Carpetas predefinidas train/val/test (setup_datasets.py)
-      LUNA : 80/10/10 aleatorio sobre todos los parches
+      LUNA : train/ intacto (separación por seriesuid), val/ dividida 50/50
+             determinista → val + test
       Panc : 80/10/10 aleatorio sobre pares NIfTI válidos
     """
     MIN_SAMPLES_FOR_TEST = 30
@@ -233,7 +243,8 @@ def build_datasets(cfg):
                      f"train_val_list: {len(train_val_imgs):,} | "
                      f"test_list: {len(official_test_imgs):,} ({test_frac:.1%})")
 
-            rng_nih = np.random.RandomState(42)
+            rng_nih_test = np.random.RandomState(42)
+            rng_nih_pool = np.random.RandomState(43)
 
             if test_frac > 0.10:
                 desired_test_n = int(total_n * 0.10)
@@ -246,7 +257,7 @@ def build_datasets(cfg):
                     if pid is not None:
                         _test_pid_imgs.setdefault(pid, []).append(img)
                 _test_pids = list(_test_pid_imgs.keys())
-                rng_nih.shuffle(_test_pids)
+                rng_nih_test.shuffle(_test_pids)
                 final_test_imgs, excess_imgs = [], []
                 for pid in _test_pids:
                     if len(final_test_imgs) < desired_test_n:
@@ -268,7 +279,7 @@ def build_datasets(cfg):
                 if pid is not None:
                     _pool_pid_imgs.setdefault(pid, []).append(img)
             _pool_pids = list(_pool_pid_imgs.keys())
-            rng_nih.shuffle(_pool_pids)
+            rng_nih_pool.shuffle(_pool_pids)
             final_val_imgs, final_train_imgs = [], []
             for pid in _pool_pids:
                 if len(final_val_imgs) < val_target:
@@ -451,7 +462,7 @@ def build_datasets(cfg):
     else:
         log.warning("[Dataset] OA Rodilla OMITIDO — falta --oa_root")
 
-    # ── Experto 3: LUNA16 (80/10/10 aleatorio sobre todos los parches) ──
+    # ── Experto 3: LUNA16 (split por seriesuid: train/ intacto, val/ → val+test) ──
     if cfg.get("luna_patches") and cfg.get("luna_csv"):
         log.info("[Dataset] Cargando LUNA16 parches 3D (Experto 3)...")
         _luna_base = Path(cfg["luna_patches"])
@@ -466,8 +477,7 @@ def build_datasets(cfg):
 
         _luna_ds_a = LUNA16Dataset(_luna_train_dir, cfg["luna_csv"], mode="embedding")
         _luna_ds_b = LUNA16Dataset(_luna_val_dir,   cfg["luna_csv"], mode="embedding")
-        _luna_all  = ConcatDataset([_luna_ds_a, _luna_ds_b])
-        _n_luna    = len(_luna_all)
+        _n_luna    = len(_luna_ds_a) + len(_luna_ds_b)
 
         if _n_luna < MIN_SAMPLES_FOR_TEST:
             log.warning(f"[LUNA16] Solo {_n_luna} parches — test omitido.")
@@ -475,17 +485,19 @@ def build_datasets(cfg):
             val_datasets.append(_luna_ds_b)
             log.info(f"  → train: {len(_luna_ds_a):,}  val: {len(_luna_ds_b):,}  test: 0")
         else:
-            _luna_idx = list(range(_n_luna))
-            _rng_luna = np.random.RandomState(42)
-            _rng_luna.shuffle(_luna_idx)
-            _n_ltr = int(_n_luna * 0.8)
-            _n_lva = int(_n_luna * 0.1)
-            luna_train = Subset(_luna_all, _luna_idx[:_n_ltr])
-            luna_val   = Subset(_luna_all, _luna_idx[_n_ltr:_n_ltr + _n_lva])
-            luna_test  = Subset(_luna_all, _luna_idx[_n_ltr + _n_lva:])
+            # Respetar separación original por seriesuid de extract_luna_patches.py:
+            # train/ ya está separado por seriesuid del val/ — no re-mezclar.
+            # La carpeta val/ se divide en dos mitades deterministas: val y test.
+            _n_b = len(_luna_ds_b)
+            _n_half = _n_b // 2
+            luna_train = _luna_ds_a
+            luna_val   = Subset(_luna_ds_b, list(range(_n_half)))
+            luna_test  = Subset(_luna_ds_b, list(range(_n_half, _n_b)))
             train_datasets.append(luna_train)
             val_datasets.append(luna_val)
             test_datasets.append(luna_test)
+            log.info(f"[LUNA16] Split respeta separación original por seriesuid "
+                     f"de extract_luna_patches.py (train/ intacto, val/ → val+test).")
             log.info(f"  → train: {len(luna_train):,}  val: {len(luna_val):,}"
                      f"  test: {len(luna_test):,}")
     else:
@@ -572,15 +584,9 @@ def build_datasets(cfg):
                 test_datasets.append(panc_test)
                 log.info(f"  → train: {len(panc_train):,}  val: {len(panc_val):,}"
                          f"  test: {len(panc_test):,}")
-    elif cfg.get("pancreas_patches_train") and cfg.get("pancreas_patches_val"):
-        log.warning("[Pancreas] Usando .npy pre-procesados (modo legado).")
-        panc_legacy = _build_pancreas_legacy(cfg)
-        if panc_legacy:
-            train_datasets.append(panc_legacy[0])
-            val_datasets.append(panc_legacy[1])
     else:
         log.warning("[Dataset] Pancreas OMITIDO — pasa --pancreas_nii_dir y "
-                    "--pancreas_labels_dir, o --pancreas_patches_train/val (legado)")
+                    "--pancreas_labels_dir")
 
     # ── Experto 5 (OOD) — ausente intencionalmente ──
     log.info("[Dataset] Experto 5 (OOD) — sin dataset en FASE 0. Se inicializa en FASE 1.")
@@ -611,18 +617,6 @@ def build_datasets(cfg):
             ConcatDataset(test_datasets))
 
 
-def _build_pancreas_legacy(cfg):
-    """Fallback para .npy pre-procesados (compatibilidad hacia atrás)."""
-    try:
-        tr = _LegacyPancreasDataset(cfg["pancreas_patches_train"])
-        va = _LegacyPancreasDataset(cfg["pancreas_patches_val"])
-        log.info(f"[Pancreas/legado] train: {len(tr):,}  val: {len(va):,}")
-        return tr, va
-    except Exception as e:
-        log.error(f"[Pancreas/legado] Error: {e}")
-        return None
-
-
 # ──────────────────────────────────────────────────────────
 # PIPELINE PRINCIPAL
 # ──────────────────────────────────────────────────────────
@@ -637,7 +631,7 @@ def main(args):
     log.info(f"Argumentos recibidos: {vars(args)}")
 
     # ── Guard clause: LUNA16 patches deben existir ──
-    _check_luna_patches()
+    _check_luna_patches(args.luna_patches)
 
     # ── Setup de dispositivo ──
     device = "cuda" if torch.cuda.is_available() else "cpu"
@@ -672,8 +666,6 @@ def main(args):
         "oa_root":           args.oa_root,
         "luna_patches":      args.luna_patches,
         "luna_csv":          args.luna_csv,
-        "pancreas_patches_train": args.pancreas_patches_train,
-        "pancreas_patches_val":   args.pancreas_patches_val,
         "pancreas_nii_dir":       args.pancreas_nii_dir,
         "pancreas_labels_dir":    args.pancreas_labels_dir,
         "pancreas_labels_commit": args.pancreas_labels_commit,
@@ -866,12 +858,6 @@ if __name__ == "__main__":
         "--pancreas_roi_strategy", default="A", choices=["A", "B"],
         help="H2 — Estrategia ROI: A=resize completo (FASE 0), B=recorte Z (FASE 2)."
     )
-
-    # ── Rutas Pancreas — modo legado ──
-    parser.add_argument("--pancreas_patches_train", default=None,
-                        help="Legado: carpeta con .npy pre-procesados de train")
-    parser.add_argument("--pancreas_patches_val", default=None,
-                        help="Legado: carpeta con .npy pre-procesados de val")
 
     args = parser.parse_args()
     main(args)
