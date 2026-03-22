@@ -754,6 +754,31 @@ def verify_luna_ct_subset(datasets_dir, subset_idx):
     return {"mhd": mhd_count, "raw": raw_count, "ok": ok, "expected": expected}
 
 
+def _extract_nih_split_txts(data_zip_path, nih_dir):
+    # type: (Path, Path) -> None
+    """
+    Extrae train_val_list.txt y test_list.txt del data.zip de NIH antes de borrarlo.
+    Solo se llama en modo --disco, donde el ZIP se borra después de la extracción.
+    """
+    txt_names = ["train_val_list.txt", "test_list.txt"]
+    try:
+        with zipfile.ZipFile(data_zip_path, "r") as zf:
+            namelist = zf.namelist()
+            for txt_name in txt_names:
+                candidates = [n for n in namelist if n.endswith(txt_name)]
+                if candidates:
+                    data = zf.read(candidates[0])
+                    out_path = nih_dir / txt_name
+                    out_path.write_bytes(data)
+                    line_count = data.count(b"\n")
+                    log.info("[NIH][--disco] %s extraído preventivamente (%d líneas)",
+                             txt_name, line_count)
+                else:
+                    log.warning("[NIH][--disco] %s no encontrado en data.zip", txt_name)
+    except Exception as e:
+        log.warning("[NIH][--disco] No se pudieron extraer txts de splits: %s", e)
+
+
 def download_and_extract_one(ds_id, download_fn, archive_path, dest_path, tag,
                              args, extract_check_fn=None):
     # type: (str, object, Path, Path, str, object, object) -> tuple
@@ -786,6 +811,11 @@ def download_and_extract_one(ds_id, download_fn, archive_path, dest_path, tag,
 
     # Borrar ZIP independientemente del resultado de extracción
     if archive_path.exists():
+        # En modo --disco con NIH, extraer preventivamente los archivos de splits
+        # antes de borrar el ZIP, para que post_nih() los encuentre en FASE 4
+        if ds_id == "nih" and ex_ok:
+            _extract_nih_split_txts(archive_path, dest_path)
+        
         zip_size = file_size_human(archive_path)
         archive_path.unlink()
         if ex_ok:
