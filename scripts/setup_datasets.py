@@ -219,6 +219,22 @@ def check_prerequisites(active):
         else:
             log.info("  kaggle no instalado (no requerido para datasets activos)")
 
+    # 7z — extractor principal para ZIP64
+    if not shutil.which("7z"):
+        log.warning("  7z no encontrado — instalando p7zip-full...")
+        try:
+            subprocess.check_call(
+                ["apt-get", "install", "-y", "p7zip-full"],
+                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+            )
+        except Exception:
+            pass
+    if shutil.which("7z"):
+        log.info("  7z OK (%s)", shutil.which("7z"))
+    else:
+        log.warning(
+            "  7z no disponible — se usará unzip como fallback (puede fallar con ZIP64)")
+
     # Credenciales
     kaggle_json = Path.home() / ".kaggle" / "kaggle.json"
     if not kaggle_json.exists():
@@ -552,7 +568,7 @@ def wait_for_ram(tag, resume_mb):
 
 def smart_extract(archive, dest, tag, pause_mb, resume_mb):
     # type: (Path, Path, str, float, float) -> bool
-    """Extracción con monitor de RAM (SIGSTOP / SIGCONT)."""
+    """Extracción con monitor de RAM (SIGSTOP / SIGCONT). Usa 7z si está disponible."""
     if not archive.exists():
         log.error("[%s] Archivo no encontrado: %s", tag, archive)
         return False
@@ -560,13 +576,21 @@ def smart_extract(archive, dest, tag, pause_mb, resume_mb):
     wait_for_ram(tag, resume_mb)
 
     dest.mkdir(parents=True, exist_ok=True)
+
+    # Seleccionar extractor: 7z para ZIP64; unzip como fallback
+    if shutil.which("7z"):
+        # -o sin espacio antes de la ruta es obligatorio para 7z
+        cmd = ["7z", "x", str(archive), "-o" + str(dest), "-y"]
+        extractor = "7z"
+    else:
+        cmd = ["unzip", "-q", "-o", str(archive), "-d", str(dest)]
+        extractor = "unzip"
+
+    log.debug("[%s] Extractor: %s", tag, extractor)
     log.info("[%s] Extrayendo %s -> %s", tag, archive.name, dest)
     t0 = time.time()
 
-    proc = subprocess.Popen(
-        ["unzip", "-q", "-o", str(archive), "-d", str(dest)],
-        stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-    )
+    proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
     monitor = RAMMonitor(proc.pid, tag, pause_mb, resume_mb)
     monitor.start()
 
@@ -577,17 +601,31 @@ def smart_extract(archive, dest, tag, pause_mb, resume_mb):
         monitor.stop()
 
     elapsed = time.time() - t0
-    if rc != 0:
-        # unzip rc=1 → warning (no es error fatal); rc >= 2 → error real
-        if rc >= 2:
-            log.error("[%s] unzip falló (rc=%d): %s", tag, rc,
-                      stderr.decode(errors="replace")[:300])
-            return False
-        else:
-            log.warning("[%s] unzip terminó con warnings (rc=%d)", tag, rc)
+    stderr_text = stderr.decode(errors="replace")
 
-    log.info("[%s] OK extraído en %.0fs", tag, elapsed)
-    return True
+    if extractor == "7z":
+        # rc=0 OK; rc=1 warning (ZIP64 con errores conocidos en LUNA subsets 7/9); rc=2 error fatal
+        if rc == 0:
+            log.info("[%s] OK extraído en %.0fs", tag, elapsed)
+            return True
+        elif rc == 1:
+            log.warning(
+                "[%s] 7z terminó con warnings (rc=1) — posible ZIP64 con datos "
+                "corruptos en origen (conocido en LUNA16 subsets 7 y 9). "
+                "Verificar conteo de .mhd tras la extracción.", tag)
+            return True  # los archivos válidos sí se extraen
+        else:
+            log.error("[%s] 7z falló (rc=%d): %s", tag, rc, stderr_text[:300])
+            return False
+    else:
+        # unzip: rc=0 OK; rc=1 warning; rc>=2 error real
+        if rc >= 2:
+            log.error("[%s] unzip falló (rc=%d): %s", tag, rc, stderr_text[:300])
+            return False
+        elif rc == 1:
+            log.warning("[%s] unzip terminó con warnings (rc=%d)", tag, rc)
+        log.info("[%s] OK extraído en %.0fs", tag, elapsed)
+        return True
 
 
 def is_extracted(datasets_dir, ds_id, luna_subsets=None):
@@ -684,11 +722,81 @@ def run_extractions(datasets_dir, active, args):
         try:
             ok = smart_extract(archive, dest, tag, pause_mb, resume_mb)
             results[ds_id] = results.get(ds_id, True) and ok
+            if ds_id == "luna_ct":
+                subset_idx = int(archive.stem.replace("subset", ""))
+                verify_luna_ct_subset(datasets_dir, subset_idx)
         except Exception as e:
             log.error("[%s] Error de extracción: %s", tag, e)
             results[ds_id] = False
 
     return results
+
+
+def verify_luna_ct_subset(datasets_dir, subset_idx):
+    # type: (Path, int) -> dict
+    """Verifica un subset CT extraído. Retorna {'mhd': N, 'raw': N, 'ok': bool}."""
+    ct_dir = datasets_dir / "luna_lung_cancer" / "ct_volumes"
+    subset_dir = ct_dir / "subset{}".format(subset_idx)
+    mhd_count = len(list(subset_dir.glob("*.mhd"))) if subset_dir.exists() else 0
+    raw_count = len(list(subset_dir.glob("*.raw"))) if subset_dir.exists() else 0
+    # subset0 tiene 178 archivos por ser doble; los demás ~88-89
+    expected = 178 if subset_idx == 0 else 85
+    ok = mhd_count >= expected and mhd_count == raw_count
+    if ok:
+        log.info("[LUNA-CT%d] Verificación OK: %d .mhd / %d .raw",
+                 subset_idx, mhd_count, raw_count)
+    else:
+        log.warning(
+            "[LUNA-CT%d] Extracción posiblemente parcial: %d .mhd / %d .raw "
+            "(esperados >= %d pares). Puede ser normal para subsets con ZIPs "
+            "corruptos en origen (subset7/9).",
+            subset_idx, mhd_count, raw_count, expected)
+    return {"mhd": mhd_count, "raw": raw_count, "ok": ok, "expected": expected}
+
+
+def download_and_extract_one(ds_id, download_fn, archive_path, dest_path, tag,
+                             args, extract_check_fn=None):
+    # type: (str, object, Path, Path, str, object, object) -> tuple
+    """
+    Modo --disco: descarga, extrae y borra el ZIP en un solo paso.
+
+    Returns:
+        (download_ok: bool, extract_ok: bool)
+    """
+    # Verificar si ya está extraído (idempotencia)
+    if extract_check_fn is not None and extract_check_fn():
+        log.info("[%s] Ya extraído (modo --disco), saltando.", tag)
+        # Si el ZIP también existe, borrarlo (limpieza de corridas anteriores)
+        if archive_path.exists():
+            log.info("[%s] Borrando ZIP residual: %s", tag, archive_path.name)
+            archive_path.unlink()
+        return True, True
+
+    # Descargar
+    dl_ok = download_fn()
+    if not dl_ok:
+        return False, False
+
+    # Extraer inmediatamente
+    log.info("[%s] --disco: extrayendo inmediatamente tras descarga.", tag)
+    ex_ok = smart_extract(
+        archive_path, dest_path, tag,
+        args.ram_pause_mb, args.ram_resume_mb,
+    )
+
+    # Borrar ZIP independientemente del resultado de extracción
+    if archive_path.exists():
+        zip_size = file_size_human(archive_path)
+        archive_path.unlink()
+        if ex_ok:
+            log.info("[%s] --disco: ZIP eliminado (%s liberados).", tag, zip_size)
+        else:
+            log.warning(
+                "[%s] --disco: ZIP eliminado aunque la extracción tuvo errores. "
+                "Si los archivos extraídos son insuficientes, re-ejecutar "
+                "sin --disco para reintentar.", tag)
+
+    return dl_ok, ex_ok
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -1077,6 +1185,16 @@ def main():
         "--dry_run", action="store_true",
         help="Solo verificar estado actual, sin descargar ni extraer",
     )
+    parser.add_argument(
+        "--disco",
+        action="store_true",
+        help=(
+            "Modo ahorro de disco: tras descargar cada ZIP, extraerlo inmediatamente "
+            "y borrarlo antes de descargar el siguiente. Reduce el pico de uso de disco "
+            "a ~1 dataset a la vez en lugar de todos los ZIPs simultáneos. "
+            "Útil cuando el disco libre es < suma de todos los ZIPs (~120 GB)."
+        ),
+    )
     args = parser.parse_args()
 
     repo_root = args.repo_root.resolve()
@@ -1101,6 +1219,14 @@ def main():
     active = resolve_active(args)
     log.info("Datasets activos: %s", ", ".join(sorted(active)))
 
+    # ── Validaciones mutuamente excluyentes ─────────────────────────────
+    if args.disco and args.no_extract:
+        log.error("--disco y --no_extract son mutuamente excluyentes.")
+        sys.exit(1)
+    if args.disco and args.no_download:
+        log.error("--disco y --no_download son mutuamente excluyentes.")
+        sys.exit(1)
+
     # ── FASE 1 — Prerequisitos ───────────────────────────────────────────
     if not check_prerequisites(active):
         log.error("Prerequisitos no cumplidos. Corrige los errores y reintenta.")
@@ -1116,51 +1242,164 @@ def main():
         print_summary(datasets_dir, download_results, extract_results, active, args)
         return
 
-    # ── FASE 2 — Descargas ───────────────────────────────────────────────
-    if not args.no_download:
+    if args.disco:
+        # ── MODO --disco: descarga → extrae → borra ZIP, dataset por dataset ──────
         log.info("")
         log.info("=" * 60)
-        log.info("FASE 2 — Descargas")
+        log.info("[--disco] Modo activo: cada dataset se extrae y borra inmediatamente.")
+        log.info("[--disco] Orden: OA -> LUNA -> ISIC -> NIH -> LUNA-CT (uno a uno) -> PANCREAS")
         log.info("=" * 60)
 
-        download_map = {
-            "nih":      lambda: download_nih(datasets_dir),
-            "isic":     lambda: download_isic(datasets_dir),
-            "oa":       lambda: download_oa(datasets_dir),
-            "luna":     lambda: download_luna_meta(datasets_dir),
-            "luna_ct":  lambda: download_luna_ct(datasets_dir, args.luna_subsets),
-            "pancreas": lambda: download_pancreas(datasets_dir),
-            "panorama": lambda: download_panorama(datasets_dir),
-        }
+        disco_plan = [
+            ("oa",
+             lambda: download_oa(datasets_dir),
+             datasets_dir / "osteoarthritis" / "osteoarthritis.zip",
+             datasets_dir / "osteoarthritis",
+             "OA",
+             lambda: is_extracted(datasets_dir, "oa")),
+            ("luna",
+             lambda: download_luna_meta(datasets_dir),
+             datasets_dir / "luna_lung_cancer" / "luna-lung-cancer-dataset.zip",
+             datasets_dir / "luna_lung_cancer",
+             "LUNA",
+             lambda: is_extracted(datasets_dir, "luna")),
+            ("isic",
+             lambda: download_isic(datasets_dir),
+             datasets_dir / "isic_2019" / "isic-2019.zip",
+             datasets_dir / "isic_2019",
+             "ISIC",
+             lambda: is_extracted(datasets_dir, "isic")),
+            ("nih",
+             lambda: download_nih(datasets_dir),
+             datasets_dir / "nih_chest_xrays" / "data.zip",
+             datasets_dir / "nih_chest_xrays",
+             "NIH",
+             lambda: is_extracted(datasets_dir, "nih")),
+        ]
 
-        # Orden: pequeños primero, grandes después
-        download_order = ["oa", "luna", "isic", "panorama", "nih", "luna_ct", "pancreas"]
-
-        for ds_id in download_order:
+        for ds_id, dl_fn, archive, dest, tag_d, check_fn in disco_plan:
             if ds_id not in active:
                 continue
-            fn = download_map.get(ds_id)
-            if fn is None:
-                continue
             try:
-                ok = fn()
-                download_results[ds_id] = ok
-                if ok:
-                    log.info("[%s] Descarga OK", ds_id.upper())
-                else:
-                    log.warning("[%s] Descarga FALLÓ — continuando.", ds_id.upper())
+                dl_ok, ex_ok = download_and_extract_one(
+                    ds_id, dl_fn, archive, dest, tag_d, args, check_fn)
+                download_results[ds_id] = dl_ok
+                extract_results[ds_id] = ex_ok
             except Exception as e:
-                log.error("[%s] Error inesperado en descarga: %s", ds_id.upper(), e)
+                log.error("[%s] Error inesperado en modo --disco: %s", ds_id.upper(), e)
                 download_results[ds_id] = False
+                extract_results[ds_id] = False
 
-    # ── FASE 3 — Extracción ─────────────────────────────────────────────
-    if not args.no_extract:
+        # LUNA CT subsets uno por uno
+        if "luna_ct" in active:
+            ct_dir = datasets_dir / "luna_lung_cancer" / "ct_volumes"
+            ct_dir.mkdir(parents=True, exist_ok=True)
+            all_ct_dl = True
+            all_ct_ex = True
+            for i in args.luna_subsets:
+                url_template = ZENODO_LUNA_URL_PART1 if i <= 6 else ZENODO_LUNA_URL_PART2
+                archive_ct = ct_dir / "subset{}.zip".format(i)
+                tag_i = "LUNA-CT{}".format(i)
+                check_i = lambda idx=i: _luna_ct_extracted(datasets_dir, [idx])
+                try:
+                    dl_ok, ex_ok = download_and_extract_one(
+                        "luna_ct",
+                        lambda idx=i, url_t=url_template, arch=archive_ct: download_wget(
+                            url_t.format(i=idx), arch, "LUNA-CT{}".format(idx),
+                            min_size_bytes=MIN_ZIP_SIZES["luna_ct"],
+                        ),
+                        archive_ct, ct_dir, tag_i, args, check_i,
+                    )
+                    if ex_ok:
+                        verify_luna_ct_subset(datasets_dir, i)
+                    if not dl_ok:
+                        all_ct_dl = False
+                    if not ex_ok:
+                        all_ct_ex = False
+                except Exception as e:
+                    log.error("[LUNA-CT%d] Error inesperado en modo --disco: %s", i, e)
+                    all_ct_dl = False
+                    all_ct_ex = False
+            download_results["luna_ct"] = all_ct_dl
+            extract_results["luna_ct"] = all_ct_ex
+
+        # PANCREAS
+        if "pancreas" in active:
+            try:
+                dl_ok, ex_ok = download_and_extract_one(
+                    "pancreas",
+                    lambda: download_pancreas(datasets_dir),
+                    datasets_dir / "zenodo_13715870" / "batch_1.zip",
+                    datasets_dir / "zenodo_13715870",
+                    "PANCREAS",
+                    args,
+                    lambda: _pancreas_extracted(datasets_dir),
+                )
+                download_results["pancreas"] = dl_ok
+                extract_results["pancreas"] = ex_ok
+            except Exception as e:
+                log.error("[PANCREAS] Error inesperado en modo --disco: %s", e)
+                download_results["pancreas"] = False
+                extract_results["pancreas"] = False
+
+        # PANORAMA nunca tiene ZIP — lógica idéntica al flujo normal
+        if "panorama" in active:
+            try:
+                ok = download_panorama(datasets_dir)
+                download_results["panorama"] = ok
+            except Exception as e:
+                log.error("[PANORAMA] Error inesperado en descarga: %s", e)
+                download_results["panorama"] = False
+
         log.info("")
-        log.info("=" * 60)
-        log.info("FASE 3 — Extracción (monitor de RAM: pausa=%dMB / reanuda=%dMB)",
-                 args.ram_pause_mb, args.ram_resume_mb)
-        log.info("=" * 60)
-        extract_results = run_extractions(datasets_dir, active, args)
+        log.info("[--disco] Descarga + extracción completada inline — saltando FASE 3.")
+
+    else:
+        # ── FASE 2 — Descargas ───────────────────────────────────────────────
+        if not args.no_download:
+            log.info("")
+            log.info("=" * 60)
+            log.info("FASE 2 — Descargas")
+            log.info("=" * 60)
+
+            download_map = {
+                "nih":      lambda: download_nih(datasets_dir),
+                "isic":     lambda: download_isic(datasets_dir),
+                "oa":       lambda: download_oa(datasets_dir),
+                "luna":     lambda: download_luna_meta(datasets_dir),
+                "luna_ct":  lambda: download_luna_ct(datasets_dir, args.luna_subsets),
+                "pancreas": lambda: download_pancreas(datasets_dir),
+                "panorama": lambda: download_panorama(datasets_dir),
+            }
+
+            # Orden: pequeños primero, grandes después
+            download_order = ["oa", "luna", "isic", "panorama", "nih", "luna_ct", "pancreas"]
+
+            for ds_id in download_order:
+                if ds_id not in active:
+                    continue
+                fn = download_map.get(ds_id)
+                if fn is None:
+                    continue
+                try:
+                    ok = fn()
+                    download_results[ds_id] = ok
+                    if ok:
+                        log.info("[%s] Descarga OK", ds_id.upper())
+                    else:
+                        log.warning("[%s] Descarga FALLÓ — continuando.", ds_id.upper())
+                except Exception as e:
+                    log.error("[%s] Error inesperado en descarga: %s", ds_id.upper(), e)
+                    download_results[ds_id] = False
+
+        # ── FASE 3 — Extracción ─────────────────────────────────────────────
+        if not args.no_extract:
+            log.info("")
+            log.info("=" * 60)
+            log.info("FASE 3 — Extracción (monitor de RAM: pausa=%dMB / reanuda=%dMB)",
+                     args.ram_pause_mb, args.ram_resume_mb)
+            log.info("=" * 60)
+            extract_results = run_extractions(datasets_dir, active, args)
 
     # ── FASE 4 — Post-extracción ────────────────────────────────────────
     if not args.no_extract:
