@@ -60,8 +60,19 @@ DATASET_IDS = ("nih", "isic", "oa", "luna", "luna_ct", "pancreas", "panorama")
 
 KAGGLE_API_URL = "https://www.kaggle.com/api/v1/datasets/download/nih-chest-xrays/data"
 
-ZENODO_LUNA_URL = "https://zenodo.org/records/3723295/files/subset{i}.zip?download=1"
+ZENODO_LUNA_URL_PART1 = "https://zenodo.org/records/3723295/files/subset{i}.zip?download=1"  # subsets 0-6
+ZENODO_LUNA_URL_PART2 = "https://zenodo.org/records/2596479/files/subset{i}.zip?download=1"  # subsets 7-9
 ZENODO_PANCREAS_URL = "https://zenodo.org/records/13715870/files/batch_1.zip?download=1"
+
+# Tamaños mínimos de ZIPs (en bytes) — para detectar archivos corruptos/incompletos
+MIN_ZIP_SIZES = {
+    "nih":       35 * 1024**3,   # 35 GB mínimo (real ~42 GB)
+    "isic":       5 * 1024**3,   # 5 GB mínimo (real ~9 GB)
+    "oa":        200 * 1024**2,  # 200 MB mínimo (real ~400 MB)
+    "luna_meta": 100 * 1024**2,  # 100 MB mínimo (real ~330 MB)
+    "luna_ct":    4 * 1024**3,   # 4 GB mínimo por subset (real ~6 GB)
+    "pancreas":  40 * 1024**3,   # 40 GB mínimo (real ~46 GB)
+}
 
 PANORAMA_REPO = "https://github.com/DIAGNijmegen/panorama_labels.git"
 
@@ -240,13 +251,17 @@ def check_prerequisites(active):
 # FASE 2 — Descargas
 # ─────────────────────────────────────────────────────────────────────────────
 
-def download_wget(url, dest, tag, extra_flags=None):
-    # type: (str, Path, str, list|None) -> bool
-    """Descarga con wget. Idempotente: salta si ya existe."""
+def download_wget(url, dest, tag, extra_flags=None, min_size_bytes=None):
+    # type: (str, Path, str, list|None, int|None) -> bool
+    """Descarga con wget. Idempotente: salta si ya existe con tamaño suficiente."""
     if dest.exists() and dest.stat().st_size > 0:
-        log.info("[%s] Ya existe: %s (%s), saltando.",
-                 tag, dest.name, file_size_human(dest))
-        return True
+        if min_size_bytes is not None and dest.stat().st_size < min_size_bytes:
+            log.warning("[%s] %s existe pero pesa solo %s (< %.0f MB mínimo) — continuando descarga.",
+                        tag, dest.name, file_size_human(dest), min_size_bytes / 1024 ** 2)
+        else:
+            log.info("[%s] Ya existe: %s (%s), saltando.",
+                     tag, dest.name, file_size_human(dest))
+            return True
 
     dest.parent.mkdir(parents=True, exist_ok=True)
     cmd = [
@@ -263,7 +278,10 @@ def download_wget(url, dest, tag, extra_flags=None):
         proc = subprocess.run(cmd, timeout=86400)  # 24h máximo
         if proc.returncode != 0:
             log.error("[%s] wget terminó con código %d.", tag, proc.returncode)
-            if dest.exists():
+            if dest.exists() and dest.stat().st_size == 0:
+                dest.unlink()
+                log.warning("[%s] Archivo de 0 bytes eliminado — la próxima corrida descargará de nuevo.", tag)
+            elif dest.exists():
                 log.warning("[%s] Archivo parcial: %s — reejecutar reanudará.",
                             tag, file_size_human(dest))
             return False
@@ -278,13 +296,18 @@ def download_wget(url, dest, tag, extra_flags=None):
     return True
 
 
-def download_kaggle_cli(dataset_slug, dest_dir, expected_zip, tag):
-    # type: (str, Path, Path, str) -> bool
+def download_kaggle_cli(dataset_slug, dest_dir, expected_zip, tag, min_size_bytes=None):
+    # type: (str, Path, Path, str, int|None) -> bool
     """Descarga con kaggle CLI. Detecta renombres automáticos."""
     if expected_zip.exists() and expected_zip.stat().st_size > 0:
-        log.info("[%s] Ya existe: %s (%s), saltando.",
-                 tag, expected_zip.name, file_size_human(expected_zip))
-        return True
+        if min_size_bytes is not None and expected_zip.stat().st_size < min_size_bytes:
+            log.warning("[%s] %s existe pero pesa solo %s (< %.0f MB mínimo) — re-descargando.",
+                        tag, expected_zip.name, file_size_human(expected_zip), min_size_bytes / 1024 ** 2)
+            expected_zip.unlink()
+        else:
+            log.info("[%s] Ya existe: %s (%s), saltando.",
+                     tag, expected_zip.name, file_size_human(expected_zip))
+            return True
 
     dest_dir.mkdir(parents=True, exist_ok=True)
     before = set(dest_dir.glob("*.zip"))
@@ -309,6 +332,10 @@ def download_kaggle_cli(dataset_slug, dest_dir, expected_zip, tag):
 
     # Si ya está el esperado (quizá kaggle lo nombró bien)
     if expected_zip.exists():
+        if min_size_bytes is not None and expected_zip.stat().st_size < min_size_bytes:
+            log.error("[%s] %s descargado pero pesa solo %s (< %.0f MB mínimo) — corrupto.",
+                      tag, expected_zip.name, file_size_human(expected_zip), min_size_bytes / 1024 ** 2)
+            return False
         elapsed = time.time() - t0
         log.info("[%s] OK %s en %.0fs", tag, file_size_human(expected_zip), elapsed)
         return True
@@ -319,6 +346,10 @@ def download_kaggle_cli(dataset_slug, dest_dir, expected_zip, tag):
         log.warning("[%s] Kaggle descargó '%s' — renombrando a '%s'",
                     tag, new_zip.name, expected_zip.name)
         new_zip.rename(expected_zip)
+        if min_size_bytes is not None and expected_zip.stat().st_size < min_size_bytes:
+            log.error("[%s] %s descargado pero pesa solo %s (< %.0f MB mínimo) — corrupto.",
+                      tag, expected_zip.name, file_size_human(expected_zip), min_size_bytes / 1024 ** 2)
+            return False
         elapsed = time.time() - t0
         log.info("[%s] OK %s en %.0fs", tag, file_size_human(expected_zip), elapsed)
         return True
@@ -344,6 +375,7 @@ def download_nih(datasets_dir):
             "--http-user=" + user,
             "--http-password=" + key,
         ],
+        min_size_bytes=MIN_ZIP_SIZES["nih"],
     )
 
 
@@ -354,6 +386,7 @@ def download_isic(datasets_dir):
         datasets_dir / "isic_2019",
         datasets_dir / "isic_2019" / "isic-2019.zip",
         "ISIC",
+        min_size_bytes=MIN_ZIP_SIZES["isic"],
     )
 
 
@@ -364,6 +397,7 @@ def download_oa(datasets_dir):
         datasets_dir / "osteoarthritis",
         datasets_dir / "osteoarthritis" / "osteoarthritis.zip",
         "OA",
+        min_size_bytes=MIN_ZIP_SIZES["oa"],
     )
 
 
@@ -374,6 +408,7 @@ def download_luna_meta(datasets_dir):
         datasets_dir / "luna_lung_cancer",
         datasets_dir / "luna_lung_cancer" / "luna-lung-cancer-dataset.zip",
         "LUNA",
+        min_size_bytes=MIN_ZIP_SIZES["luna_meta"],
     )
 
 
@@ -383,9 +418,11 @@ def download_luna_ct(datasets_dir, subsets):
     ct_dir.mkdir(parents=True, exist_ok=True)
     all_ok = True
     for i in subsets:
-        url = ZENODO_LUNA_URL.format(i=i)
+        url_template = ZENODO_LUNA_URL_PART1 if i <= 6 else ZENODO_LUNA_URL_PART2
+        url = url_template.format(i=i)
         dest = ct_dir / "subset{}.zip".format(i)
-        ok = download_wget(url, dest, "LUNA-CT{}".format(i))
+        ok = download_wget(url, dest, "LUNA-CT{}".format(i),
+                           min_size_bytes=MIN_ZIP_SIZES["luna_ct"])
         if not ok:
             all_ok = False
     return all_ok
@@ -400,7 +437,23 @@ def download_pancreas(datasets_dir):
             "--tries=5", "--retry-connrefused",
             "--waitretry=30", "--timeout=120",
         ],
+        min_size_bytes=MIN_ZIP_SIZES["pancreas"],
     )
+
+
+def _panorama_is_valid_repo(repo_dir):
+    # type: (Path) -> bool
+    """Verifica que el repo esté en estado válido (no solo que .git exista)."""
+    if not (repo_dir / ".git").is_dir():
+        return False
+    try:
+        r = subprocess.run(
+            ["git", "-C", str(repo_dir), "rev-parse", "HEAD"],
+            capture_output=True, text=True, timeout=10,
+        )
+        return r.returncode == 0
+    except Exception:
+        return False
 
 
 def download_panorama(datasets_dir):
@@ -409,9 +462,12 @@ def download_panorama(datasets_dir):
     repo_dir = datasets_dir / "panorama_labels"
     commit_file = datasets_dir / "panorama_labels_commit.txt"
 
-    if (repo_dir / ".git").is_dir():
-        log.info("[PANORAMA] Ya clonado.")
+    if _panorama_is_valid_repo(repo_dir):
+        log.info("[PANORAMA] Ya clonado y válido.")
     else:
+        if repo_dir.exists():
+            log.warning("[PANORAMA] Repo existente pero inválido — eliminando y re-clonando...")
+            shutil.rmtree(repo_dir)
         log.info("[PANORAMA] Clonando %s ...", PANORAMA_REPO)
         try:
             run_cmd(["git", "clone", PANORAMA_REPO, str(repo_dir)], tag="PANORAMA")
