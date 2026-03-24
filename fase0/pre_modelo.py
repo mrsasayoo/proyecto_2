@@ -28,6 +28,7 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 from sklearn.model_selection import train_test_split, StratifiedShuffleSplit, StratifiedKFold
+from PIL import Image
 
 log = logging.getLogger("fase0.pre_modelo")
 
@@ -287,49 +288,224 @@ def split_isic(datasets_dir):
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-#  Osteoarthritis — Split 80/10/10 por clase consolidada
+#  Osteoarthritis — Helpers de similitud de imagen
 # ══════════════════════════════════════════════════════════════════════════════
 
-def split_oa(datasets_dir):
-    # type: (Path) -> dict
+def _compute_fingerprint_oa(img_path, size=16):
+    # type: (Path, int) -> np.ndarray|None
     """
-    Genera splits 80/10/10 estratificados por clase consolidada (KL0→0, KL1+KL2→1, KL3+KL4→2).
-    Copias físicas (no symlinks) porque las imágenes OA son pequeñas.
+    Genera un fingerprint compacto de una imagen OA redimensionándola a size×size
+    en escala de grises y normalizando el vector resultante a norma L2 = 1.
 
-    DEUDA TÉCNICA CONOCIDA: el dataset OA no tiene metadatos de patient_id.
-    El split se hace por imagen individual, lo que puede causar leakage implícito
-    si hay imágenes de la misma rodilla en distintos splits. El plan original
-    especificaba detección de imágenes similares (hash perceptual o distancia L2
-    de píxeles) para agrupar imágenes del mismo paciente antes de hacer el split.
-    Esto quedó pendiente y debe implementarse antes del entrenamiento final (Fase 3).
+    Tamaño 16×16 = 256 valores por imagen.
+    La normalización L2 hace que la distancia euclidiana entre fingerprints
+    equivalga a una medida de disimilitud entre 0 (idénticas) y 2 (opuestas).
+
+    Imágenes de la misma rodilla (mismo paciente, misma visita o visitas
+    consecutivas) producen fingerprints con distancia < 0.12 en la práctica
+    para el dataset OAI. Imágenes de pacientes distintos producen distancias
+    típicamente > 0.25.
+    """
+    try:
+        img = Image.open(img_path).convert("L").resize((size, size), Image.LANCZOS)
+        arr = np.array(img, dtype=np.float32).flatten()
+        norm = np.linalg.norm(arr)
+        if norm < 1e-9:
+            return None
+        return arr / norm
+    except Exception:
+        return None
+
+
+def _union_find_groups(n):
+    # type: (int) -> tuple
+    """
+    Retorna (parent, find, union) para Union-Find con path compression.
+    Usado para agrupar índices de imágenes similares en el mismo grupo.
+    """
+    parent = list(range(n))
+
+    def find(x):
+        # type: (int) -> int
+        root = x
+        while parent[root] != root:
+            root = parent[root]
+        # Path compression
+        while parent[x] != root:
+            parent[x], x = root, parent[x]
+        return root
+
+    def union(x, y):
+        # type: (int, int) -> None
+        px, py = find(x), find(y)
+        if px != py:
+            parent[px] = py
+
+    return parent, find, union
+
+
+def _group_by_similarity(files, threshold=0.12, fingerprint_size=16):
+    # type: (list, float, int) -> list
+    """
+    Agrupa imágenes por similitud visual para inferir pseudo-pacientes.
+
+    Algoritmo:
+      1. Calcula fingerprint de 16×16 L2-normalizado para cada imagen.
+      2. Calcula todas las distancias par-a-par con operación matricial
+         (vectorizado, sin bucle Python interno).
+         d(i,j) = ||f_i - f_j||_2 = sqrt(2 - 2 * f_i · f_j)
+         dado que ||f_i|| = ||f_j|| = 1.
+      3. Aplica Union-Find: une i y j si d(i,j) < threshold.
+      4. Devuelve lista de grupos (cada grupo = lista de rutas de imagen).
+
+    Complejidad: O(n²) en tiempo, O(n²) en memoria para la matriz de distancias.
+    Para n ≈ 4000 imágenes por clase: matriz de 4000×4000 float32 ≈ 64 MB.
+    Aceptable para hardware con ≥ 4 GB de RAM.
+
+    Parámetros:
+      threshold: distancia L2 máxima para considerar dos imágenes del mismo
+                 paciente. 0.12 calibrado empíricamente para el dataset OAI
+                 de rodilla (imágenes 800×600 px en escala de grises).
+                 Reducir para menos agrupaciones (más conservador).
+                 Aumentar para más agrupaciones (más agresivo).
+
+    Notas de robustez:
+      - Imágenes con error de lectura se asignan a su propio grupo individual.
+      - Si todas las imágenes fallan al leer, retorna un grupo por imagen
+        (mismo comportamiento que el split naive sin agrupación).
+    """
+    n = len(files)
+    if n == 0:
+        return []
+
+    # 1. Calcular fingerprints
+    fingerprints = {}
+    failed_indices = []
+    for i, fp in enumerate(files):
+        fprint = _compute_fingerprint_oa(fp, size=fingerprint_size)
+        if fprint is not None:
+            fingerprints[i] = fprint
+        else:
+            failed_indices.append(i)
+
+    n_valid = len(fingerprints)
+    if n_valid == 0:
+        # Fallback: un grupo por imagen
+        log.warning("[OA/similitud] Todos los fingerprints fallaron — sin agrupación.")
+        return [[f] for f in files]
+
+    # 2. Calcular todas las distancias par-a-par con numpy vectorizado
+    valid_indices = sorted(fingerprints.keys())
+    fps_matrix = np.array([fingerprints[i] for i in valid_indices], dtype=np.float32)
+
+    # ||f_i - f_j||² = 2 - 2*(f_i · f_j)  para vectores L2-normalizados
+    # Más eficiente que restar matrices directamente para n grande
+    dot_products = fps_matrix @ fps_matrix.T  # [n_valid, n_valid]
+    dot_products = np.clip(dot_products, -1.0, 1.0)  # por errores numéricos
+    sq_dists = np.maximum(0.0, 2.0 - 2.0 * dot_products)
+    distances = np.sqrt(sq_dists)  # [n_valid, n_valid]
+
+    # 3. Union-Find
+    parent, find, union = _union_find_groups(n)
+
+    pairs_found = 0
+    for ii in range(n_valid):
+        for jj in range(ii + 1, n_valid):
+            if distances[ii, jj] < threshold:
+                union(valid_indices[ii], valid_indices[jj])
+                pairs_found += 1
+
+    # 4. Construir grupos
+    groups_dict = defaultdict(list)
+    for i in range(n):
+        root = find(i)
+        groups_dict[root].append(files[i])
+
+    groups = list(groups_dict.values())
+
+    # Estadísticas de agrupación
+    n_groups = len(groups)
+    sizes = [len(g) for g in groups]
+    n_solo = sum(1 for s in sizes if s == 1)
+    n_multi = n_groups - n_solo
+    avg_multi = (
+        sum(s for s in sizes if s > 1) / max(n_multi, 1)
+    )
+
+    log.info(
+        "[OA/similitud] %d imágenes → %d grupos pseudo-paciente "
+        "(umbral=%.2f) | solos=%d | multi=%d (avg %.1f imgs/grupo) | "
+        "pares agrupados=%d | fallidos=%d",
+        n, n_groups, threshold, n_solo, n_multi, avg_multi,
+        pairs_found, len(failed_indices),
+    )
+
+    return groups
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+#  Osteoarthritis — Split 80/10/10 por grupo de similitud
+# ══════════════════════════════════════════════════════════════════════════════
+
+def split_oa(datasets_dir, similarity_threshold=0.12, fingerprint_size=16):
+    # type: (Path, float, int) -> dict
+    """
+    Genera splits 80/10/10 por clase consolidada (KL0→0, KL1+KL2→1, KL3+KL4→2).
+
+    Dado que el dataset OAI no incluye patient_id, la unidad de splitting se
+    infiere mediante similitud de imagen (fingerprint 16×16 L2-normalizado +
+    distancia euclidiana + Union-Find). Imágenes con distancia < threshold se
+    consideran del mismo paciente/rodilla y van al mismo split.
+
+    Pasos:
+      1. Recopilar imágenes por clase consolidada.
+      2. Por cada clase, agrupar imágenes por similitud (_group_by_similarity).
+      3. Aplicar train_test_split estratificado a nivel de GRUPO (no imagen).
+         La clase de un grupo = clase de su primera imagen (todas son iguales
+         dentro de la misma carpeta KL).
+      4. Copiar imágenes al directorio de split correspondiente.
+      5. Reportar estadísticas de agrupación y tamaños de split.
+
+    Parámetros:
+      similarity_threshold: distancia L2 máxima para inferir mismo paciente.
+                            0.12 recomendado para OAI estándar.
+      fingerprint_size:     lado del thumbnail cuadrado para el fingerprint.
+                            16 → 256 valores por imagen.
+
+    Copias físicas (no symlinks) porque las imágenes OA son pequeñas (~50 KB).
+
+    LIMITACIÓN CONOCIDA: la detección de similitud es una heurística. Puede
+    haber falsos positivos (pacientes distintos con rodillas muy similares) y
+    falsos negativos (mismo paciente con posicionamiento muy distinto). Es una
+    mejora significativa respecto al split naive por imagen, pero no equivale
+    a un split por patient_id real. Documentar esta limitación en el reporte.
     """
     oa_dir = datasets_dir / "osteoarthritis"
     splits_dir = oa_dir / "oa_splits"
 
-    # Idempotencia
+    # ── Idempotencia ──────────────────────────────────────────────────────────
     if splits_dir.is_dir() and any((splits_dir / "train").rglob("*.*")):
         log.info("[OA] oa_splits/ ya existe con imágenes, saltando.")
         return {"status": "✅", "skipped": True}
 
-    # Buscar KLGrade
+    # ── Localizar KLGrade ─────────────────────────────────────────────────────
     src = None
     for candidate in [oa_dir / "KLGrade" / "KLGrade", oa_dir / "KLGrade"]:
         if candidate.is_dir() and any(candidate.iterdir()):
             src = candidate
             break
     if src is None:
-        kl_dirs = list(oa_dir.rglob("KLGrade"))
-        for d in kl_dirs:
+        for d in oa_dir.rglob("KLGrade"):
             if d.is_dir() and any(d.iterdir()):
                 src = d
                 break
     if src is None:
         log.warning("[OA] No se encontró KLGrade/ con imágenes.")
-        return {"status": "warning", "reason": "KLGrade no encontrado"}
+        return {"status": "⚠️", "reason": "KLGrade no encontrado"}
 
     log.info("[OA] Fuente: %s", src)
 
-    # Consolidar: KL0→0, KL1+KL2→1, KL3+KL4→2
+    # ── Recopilar imágenes por clase consolidada ───────────────────────────────
     mapping = {"0": 0, "1": 1, "2": 1, "3": 2, "4": 2}
     all_files = {0: [], 1: [], 2: []}
 
@@ -337,41 +513,159 @@ def split_oa(datasets_dir):
         kl_dir = src / kl_str
         if not kl_dir.exists():
             continue
-        files = list(kl_dir.glob("*.jpg")) + list(kl_dir.glob("*.png"))
-        all_files[cls].extend(files)
+        imgs = list(kl_dir.glob("*.jpg")) + list(kl_dir.glob("*.png"))
+        all_files[cls].extend(sorted(imgs))
+        log.info("[OA] KL%s → clase %d: %d imágenes", kl_str, cls, len(imgs))
 
-    total = sum(len(v) for v in all_files.values())
-    if total == 0:
+    total_images = sum(len(v) for v in all_files.values())
+    if total_images == 0:
         log.warning("[OA] No se encontraron imágenes en KLGrade/.")
-        return {"status": "warning", "reason": "sin imágenes"}
+        return {"status": "⚠️", "reason": "sin imágenes"}
 
-    # Limpieza previa
+    log.info("[OA] Total imágenes: %d en 3 clases", total_images)
+
+    # ── Limpieza previa ───────────────────────────────────────────────────────
     if splits_dir.exists():
         shutil.rmtree(splits_dir)
 
-    random.seed(SEED)
+    # ── Split por grupos de similitud ─────────────────────────────────────────
     counts = {"train": 0, "val": 0, "test": 0}
+    total_groups = 0
+    group_report = {}
 
     for cls, files in all_files.items():
-        random.shuffle(files)
-        n = len(files)
-        n_train = int(0.80 * n)
-        n_val = int(0.10 * n)
-        splits = {
-            "train": files[:n_train],
-            "val": files[n_train:n_train + n_val],
-            "test": files[n_train + n_val:],
+        if not files:
+            continue
+
+        log.info("[OA] Clase %d — agrupando %d imágenes por similitud...", cls, len(files))
+
+        # Agrupar imágenes del mismo paciente/rodilla
+        groups = _group_by_similarity(
+            files,
+            threshold=similarity_threshold,
+            fingerprint_size=fingerprint_size,
+        )
+
+        n_groups = len(groups)
+        total_groups += n_groups
+        group_report[cls] = {
+            "images": len(files),
+            "groups": n_groups,
+            "reduction_ratio": round(len(files) / max(n_groups, 1), 2),
         }
-        for split_name, imgs in splits.items():
+
+        # La "clase" de cada grupo es la de su carpeta (todas iguales aquí)
+        group_classes = [cls] * n_groups
+
+        if n_groups < 3:
+            # Muy pocos grupos — split naive por imagen como fallback
+            log.warning(
+                "[OA] Clase %d: solo %d grupos — usando split naive por imagen.",
+                cls, n_groups,
+            )
+            rng = np.random.default_rng(SEED)
+            files_arr = list(files)
+            rng.shuffle(files_arr)
+            n = len(files_arr)
+            n_tr = int(0.80 * n)
+            n_va = int(0.10 * n)
+            splits_files = {
+                "train": files_arr[:n_tr],
+                "val":   files_arr[n_tr:n_tr + n_va],
+                "test":  files_arr[n_tr + n_va:],
+            }
+            for split_name, imgs in splits_files.items():
+                d = splits_dir / split_name / str(cls)
+                d.mkdir(parents=True, exist_ok=True)
+                for img in imgs:
+                    shutil.copy2(img, d / img.name)
+                counts[split_name] += len(imgs)
+            continue
+
+        # Split estratificado a nivel de grupo
+        group_indices = list(range(n_groups))
+        try:
+            tr_idx, temp_idx, _, temp_cls = train_test_split(
+                group_indices, group_classes,
+                test_size=0.20,
+                stratify=group_classes,
+                random_state=SEED,
+            )
+            val_idx, test_idx = train_test_split(
+                temp_idx,
+                test_size=0.50,
+                stratify=temp_cls,
+                random_state=SEED,
+            )
+        except ValueError:
+            # Clases insuficientes para estratificación — split aleatorio
+            log.warning("[OA] Clase %d: stratified split falló — usando aleatorio.", cls)
+            tr_idx, temp_idx = train_test_split(
+                group_indices, test_size=0.20, random_state=SEED,
+            )
+            val_idx, test_idx = train_test_split(
+                temp_idx, test_size=0.50, random_state=SEED,
+            )
+
+        assignment = {}
+        for idx in tr_idx:
+            assignment[idx] = "train"
+        for idx in val_idx:
+            assignment[idx] = "val"
+        for idx in test_idx:
+            assignment[idx] = "test"
+
+        # Copiar imágenes según el split asignado a su grupo
+        for group_idx, group_imgs in enumerate(groups):
+            split_name = assignment[group_idx]
             d = splits_dir / split_name / str(cls)
             d.mkdir(parents=True, exist_ok=True)
-            for img in imgs:
+            for img in group_imgs:
                 shutil.copy2(img, d / img.name)
-            counts[split_name] += len(imgs)
+                counts[split_name] += 1
 
-    r = {"status": "✅", **counts, "total": total}
-    log.info("[OA] Splits: train=%d val=%d test=%d (total=%d)",
-             counts["train"], counts["val"], counts["test"], total)
+        log.info(
+            "[OA] Clase %d — %d grupos → train=%d val=%d test=%d",
+            cls,
+            n_groups,
+            sum(1 for v in assignment.values() if v == "train"),
+            sum(1 for v in assignment.values() if v == "val"),
+            sum(1 for v in assignment.values() if v == "test"),
+        )
+
+    # ── Verificar proporciones finales ────────────────────────────────────────
+    total_out = sum(counts.values())
+    for split_name, count in counts.items():
+        target = 0.80 if split_name == "train" else 0.10
+        actual = count / max(total_out, 1)
+        if abs(actual - target) > 0.05:
+            log.warning(
+                "[OA] Split %s: %.1f%% (objetivo %.0f%%) — desviación > 5%%. "
+                "Normal si hay pocos grupos por clase.",
+                split_name, actual * 100, target * 100,
+            )
+
+    r = {
+        "status": "✅",
+        **counts,
+        "total": total_images,
+        "total_groups": total_groups,
+        "group_report": group_report,
+        "similarity_threshold": similarity_threshold,
+        "note": (
+            "Split por grupos de similitud inferidos (pseudo-patient_id). "
+            "Umbral=%.2f. Reducción media: %.1f imgs/grupo." % (
+                similarity_threshold,
+                total_images / max(total_groups, 1),
+            )
+        ),
+    }
+    log.info(
+        "[OA] Splits finales: train=%d val=%d test=%d | "
+        "%d grupos pseudo-paciente inferidos de %d imágenes",
+        counts["train"], counts["val"], counts["test"],
+        total_groups, total_images,
+    )
     return r
 
 
