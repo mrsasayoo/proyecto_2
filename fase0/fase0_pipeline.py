@@ -435,59 +435,13 @@ def paso7_cvt13(dry_run=False):
             log.error("  Error generando cvt13_backbone.py: %s", e)
             return {"status": "❌", "error": str(e)}
 
-    # 7c: Patch en fase1_extract_embeddings.py (idempotente)
-    fase1_path = PROJECT_ROOT / "src" / "pipeline" / "fase1_extract_embeddings.py"
-    if not fase1_path.exists():
-        # Intentar con nombre viejo
-        fase1_path = PROJECT_ROOT / "src" / "pipeline" / "fase0_extract_embeddings.py"
-    if fase1_path.exists():
-        content = fase1_path.read_text(encoding="utf-8")
-        patch_marker = "# === PATCH CvT-13"
-        if patch_marker in content:
-            log.info("  ✓ Patch CvT-13 ya aplicado en %s", fase1_path.name)
-        elif "import timm" in content:
-            lines = content.splitlines()
-            insert_after = -1
-            for i, line in enumerate(lines):
-                if line.strip().startswith("import timm"):
-                    insert_after = i
-            if insert_after >= 0:
-                patch_code = [
-                    "",
-                    "# === PATCH CvT-13 — inyectado por fase0_pipeline.py ===",
-                    "import os as _os",
-                    "_sys_path_scripts = str(_os.path.join("
-                    "_os.path.dirname(__file__), '..', '..', 'scripts'))",
-                    "if _sys_path_scripts not in __import__('sys').path:",
-                    "    __import__('sys').path.insert(0, _sys_path_scripts)",
-                    "",
-                    "_original_timm_create = timm.create_model",
-                    "",
-                    "def _patched_create_model(model_name, *args, **kwargs):",
-                    "    if model_name == 'cvt_13':",
-                    "        from cvt13_backbone import build_cvt13",
-                    "        _device = kwargs.get('device', 'cpu')",
-                    "        _pretrained = kwargs.get('pretrained', True)",
-                    "        return build_cvt13(pretrained=_pretrained, device=_device)",
-                    "    return _original_timm_create(model_name, *args, **kwargs)",
-                    "",
-                    "timm.create_model = _patched_create_model",
-                    "# === FIN PATCH ===",
-                    "",
-                ]
-                patched_lines = (
-                    lines[:insert_after + 1] + patch_code + lines[insert_after + 1:]
-                )
-                # Backup
-                backup = fase1_path.with_suffix(".py.bak_cvt")
-                if not backup.exists():
-                    backup.write_text(content, encoding="utf-8")
-                fase1_path.write_text("\n".join(patched_lines), encoding="utf-8")
-                log.info("  ✓ Patch CvT-13 aplicado en %s", fase1_path.name)
-        else:
-            log.info("  ⚠ No se encontró 'import timm' en %s", fase1_path.name)
+    # 7c: Compatibilidad CvT-13 ahora es código nativo en Fase 1
+    _cvt13_native = PROJECT_ROOT / "src" / "pipeline" / "fase1" / "backbone_cvt13.py"
+    if _cvt13_native.exists():
+        log.info("  ✓ Compatibilidad CvT-13 → src/pipeline/fase1/backbone_cvt13.py (nativo)")
     else:
-        log.info("  ⚠ fase1_extract_embeddings.py no encontrado (patch pendiente)")
+        log.info("  ⚠ backbone_cvt13.py no encontrado en src/pipeline/fase1/ — "
+                 "ejecutar la refactorización de Fase 1")
 
     # 7d: Verificar CvT-13 con test de sanidad
     if dry_run:
@@ -573,13 +527,15 @@ def paso8_reporte(all_results, timings, active):
                 lines.append("")
 
     # Comando de Fase 1
-    fase1_path = PROJECT_ROOT / "src" / "pipeline" / "fase1_extract_embeddings.py"
-    if not fase1_path.exists():
-        fase1_path = PROJECT_ROOT / "src" / "pipeline" / "fase0_extract_embeddings.py"
+    fase1_path = PROJECT_ROOT / "src" / "pipeline" / "fase1" / "fase1_pipeline.py"
 
     lines.extend([
         "",
         "## Comando para Fase 1",
+        "",
+        "> **Nota:** El backbone mostrado es el valor por defecto "
+        "(`vit_tiny_patch16_224`). Editar antes de ejecutar si se desea "
+        "usar `swin_tiny_patch4_window7_224` o `cvt_13`.",
         "",
         "```bash",
         "python3 {} \\".format(fase1_path),
@@ -588,19 +544,21 @@ def paso8_reporte(all_results, timings, active):
         "    --output_dir embeddings/vit_tiny \\",
         "    --chest_csv datasets/nih_chest_xrays/Data_Entry_2017.csv \\",
         "    --chest_imgs datasets/nih_chest_xrays/all_images \\",
-        "    --chest_train_list datasets/nih_chest_xrays/splits/nih_train_list.txt \\",
-        "    --chest_val_list datasets/nih_chest_xrays/splits/nih_val_list.txt \\",
+        "    --nih_train_list datasets/nih_chest_xrays/splits/nih_train_list.txt \\",
+        "    --nih_val_list datasets/nih_chest_xrays/splits/nih_val_list.txt \\",
+        "    --nih_test_list datasets/nih_chest_xrays/splits/nih_test_list.txt \\",
         "    --chest_view_filter PA \\",
         "    --chest_bbox_csv datasets/nih_chest_xrays/BBox_List_2017.csv \\",
-        "    --isic_gt datasets/isic_2019/ISIC_2019_Training_GroundTruth.csv \\",
+        "    --isic_train_csv datasets/isic_2019/splits/isic_train.csv \\",
+        "    --isic_val_csv datasets/isic_2019/splits/isic_val.csv \\",
+        "    --isic_test_csv datasets/isic_2019/splits/isic_test.csv \\",
         "    --isic_imgs datasets/isic_2019/isic_images \\",
-        "    --isic_metadata datasets/isic_2019/ISIC_2019_Training_Metadata.csv \\",
         "    --oa_root datasets/osteoarthritis/oa_splits \\",
-        "    --luna_patches datasets/luna_lung_cancer/patches/train \\",
+        "    --luna_patches_dir datasets/luna_lung_cancer/patches \\",
         "    --luna_csv datasets/luna_lung_cancer/candidates_V2/candidates_V2.csv \\",
+        "    --pancreas_splits_csv datasets/zenodo_13715870/pancreas_splits.csv \\",
         "    --pancreas_nii_dir datasets/zenodo_13715870 \\",
-        "    --pancreas_labels_dir datasets/panorama_labels \\",
-        "    --pancreas_labels_commit bf1d6ba3230f6b093e7ea959a4bf5e2eba2e3665 \\",
+        "    --pancreas_fold 1 \\",
         "    --pancreas_roi_strategy A",
         "```",
         "",
