@@ -127,8 +127,18 @@ def _worker(args_tuple):
     for row_idx, cx, cy, cz, label in candidates_batch:
         out_path = Path(out_dir) / f"candidate_{row_idx:06d}.npy"
         if out_path.exists():
-            results.append((row_idx, str(out_path), label, "SKIPPED", -1.0))
-            continue
+            try:
+                arr = np.load(out_path, mmap_mode="r")
+                if arr.shape == (PATCH_SIZE, PATCH_SIZE, PATCH_SIZE):
+                    results.append((row_idx, str(out_path), label, "SKIPPED", -1.0))
+                    continue
+                else:
+                    out_path.unlink()
+            except Exception:
+                try:
+                    out_path.unlink()
+                except Exception:
+                    pass
         try:
             iz, iy, ix = world_to_voxel([cx, cy, cz], origin, spacing, direc)
             half = PATCH_SIZE // 2
@@ -198,15 +208,26 @@ def main(args):
     CT_VOLUMES_DIR = LUNA_DIR  / "ct_volumes"
     CSV_PATH    = LUNA_DIR  / "candidates_V2" / "candidates_V2.csv"
     PATCHES_DIR = LUNA_DIR  / "patches"
-    TRAIN_DIR   = PATCHES_DIR / "train"
-    VAL_DIR     = PATCHES_DIR / "val"
+    if args.output_dir is not None:
+        PATCHES_DIR = Path(args.output_dir)
+    TRAIN_DIR = PATCHES_DIR / "train"
+    VAL_DIR   = PATCHES_DIR / "val"
     LOG_DIR     = repo_root / "logs"
 
     LOG_DIR.mkdir(exist_ok=True)
     TRAIN_DIR.mkdir(parents=True, exist_ok=True)
     VAL_DIR.mkdir(parents=True, exist_ok=True)
 
-    log.info("=" * 65)
+    import shutil as _shutil
+    _free_gb = _shutil.disk_usage(str(PATCHES_DIR)).free / 1e9
+    log.info(f"[Setup] Espacio libre en disco: {_free_gb:.1f} GB")
+    if args.max_neg is None and _free_gb < 100:
+        log.warning(
+            f"[Setup] Solo {_free_gb:.1f} GB libres y --max_neg no especificado. "
+            f"Extraer todos los parches requiere ~788 GB con 10 subsets. "
+            f"Considera usar: --max_neg 8000 (requiere ~9.3 GB). "
+            f"Continuando de todas formas — el script fallará si se llena el disco."
+        )
     log.info("LUNA16 — Extracción de parches 3D (todos los subsets)")
     log.info("=" * 65)
 
@@ -243,6 +264,26 @@ def main(args):
     # Mapa seriesuid → mhd_path
     mhd_map = {p.stem: p for p in mhd_files}
 
+    if args.single_subset is not None:
+        _target = f"subset{args.single_subset}"
+        _before = len(mhd_map)
+        mhd_map = {
+            uid: path for uid, path in mhd_map.items()
+            if f"{_target}{os.sep}" in str(path) or f"/{_target}/" in str(path)
+        }
+        log.info(
+            f"[Setup] --single_subset={args.single_subset}: filtrando a CTs de "
+            f"'{_target}' \u2014 {len(mhd_map)}/{_before} CTs disponibles."
+        )
+        if not mhd_map:
+            log.error(
+                f"[Setup] Ning\u00fan CT encontrado para subset{args.single_subset}. "
+                f"Verifica que el directorio "
+                f"datasets/luna_lung_cancer/ct_volumes/subset{args.single_subset}/ "
+                f"existe y contiene archivos .mhd."
+            )
+            sys.exit(1)
+
     # ── 2. Cargar candidates_V2.csv ───────────────────────────────────────────
     if not CSV_PATH.exists():
         log.error(f"[Setup] candidates_V2.csv no encontrado en {CSV_PATH}")
@@ -263,15 +304,44 @@ def main(args):
     log.info(f"[Setup] Candidatos en subsets disponibles: {len(df_sub):,} "
              f"(pos={n_pos:,}, neg={n_neg:,}, ratio={n_neg//max(n_pos,1)}:1)")
 
+    if args.max_neg is not None:
+        df_pos = df_sub[df_sub["class"] == 1]
+        df_neg = df_sub[df_sub["class"] == 0]
+        rng_neg = np.random.default_rng(RANDOM_SEED + 1)
+        if len(df_neg) > args.max_neg:
+            neg_idx = rng_neg.choice(len(df_neg), size=args.max_neg, replace=False)
+            df_neg = df_neg.iloc[neg_idx].reset_index(drop=True)
+        df_sub = pd.concat([df_pos, df_neg], ignore_index=True)
+        n_pos = (df_sub["class"] == 1).sum()
+        n_neg = (df_sub["class"] == 0).sum()
+        log.info(
+            f"[Setup] --max_neg aplicado: {n_pos:,} positivos (todos) + "
+            f"{n_neg:,} negativos muestreados = {len(df_sub):,} candidatos totales. "
+            f"Espacio estimado: {len(df_sub) * 64**3 * 4 / 1e9:.2f} GB."
+        )
+
     if args.dry_run:
         log.info("[DRY-RUN] Modo simulación — no se escriben archivos.")
         log.info(f"  Subsets detectados: {[d.name for d in available_subsets]}")
         log.info(f"  CTs a procesar    : {len(mhd_map)}")
         log.info(f"  Candidatos totales: {len(df_sub):,}")
+        if args.neg_ratio > 0:
+            n_pos_total = (df_sub["class"] == 1).sum()
+            n_neg_sampled = n_pos_total * args.neg_ratio
+            n_after_sampling = n_pos_total + min(n_neg_sampled,
+                                                 (df_sub["class"] == 0).sum())
+            log.info(f"  Tras negative sampling ({args.neg_ratio}:1): "
+                     f"~{n_after_sampling:,} parches "
+                     f"(~{n_after_sampling * 64**3 * 4 / 1e9:.2f} GB)")
         log.info(f"  Positivos (class=1): {n_pos:,}")
         log.info(f"  Negativos (class=0): {n_neg:,}")
         log.info(f"  Parches a generar (aprox): {len(df_sub):,}")
-        log.info(f"  Espacio estimado: {len(df_sub) * 64**3 * 4 / 1e9:.1f} GB")
+        _est_gb = len(df_sub) * 64**3 * 4 / 1e9
+        _est_mb = len(df_sub) * 64**3 * 4 / 1e6
+        log.info(f"  Espacio estimado: {_est_gb:.2f} GB ({_est_mb:,.0f} MB)")
+        log.info(f"  Espacio libre actual: {_shutil.disk_usage(str(PATCHES_DIR)).free / 1e9:.1f} GB")
+        _fits = _est_gb < _shutil.disk_usage(str(PATCHES_DIR)).free / 1e9
+        log.info(f"  Cabe en disco: {'✓ SÍ' if _fits else '✗ NO — usar --max_neg para reducir'}")
         log.info("  → Ejecuta sin --dry-run para extraer.")
         return
 
@@ -283,7 +353,8 @@ def main(args):
     train_uid = set(all_uids[:n_train])
     val_uid   = set(all_uids[n_train:])
 
-    log.info(f"[Split] Train: {len(train_uid)} CTs | Val: {len(val_uid)} CTs "
+    _subset_tag = f" [subset{args.single_subset}]" if args.single_subset is not None else ""
+    log.info(f"[Split]{_subset_tag} Train: {len(train_uid)} CTs | Val: {len(val_uid)} CTs "
              f"(split por seriesuid — sin leakage)")
 
     df_sub["split"] = df_sub["seriesuid"].apply(
@@ -292,6 +363,35 @@ def main(args):
     df_train = df_sub[df_sub["split"] == "train"]
     df_val   = df_sub[df_sub["split"] == "val"]
     log.info(f"[Split] Candidatos train: {len(df_train):,} | val: {len(df_val):,}")
+
+    # ── Negative sampling ───────────────────────────────────────────────────────
+    if args.neg_ratio > 0:
+        def apply_neg_sampling(df_split, split_name, neg_ratio, seed=42):
+            n_pos = (df_split["class"] == 1).sum()
+            n_neg_keep = n_pos * neg_ratio
+            df_pos = df_split[df_split["class"] == 1]
+            df_neg = df_split[df_split["class"] == 0]
+            if len(df_neg) > n_neg_keep:
+                df_neg = df_neg.sample(n=n_neg_keep, random_state=seed)
+            df_sampled = pd.concat([df_pos, df_neg]).reset_index(drop=True)
+            log.info(
+                f"[NegSampling/{split_name}] "
+                f"pos={len(df_pos):,} | neg original={int((df_split['class']==0).sum()):,} "
+                f"→ neg_keep={len(df_neg):,} (ratio {neg_ratio}:1) | "
+                f"total={len(df_sampled):,} | "
+                f"espacio estimado: {len(df_sampled) * 64**3 * 4 / 1e9:.2f} GB"
+            )
+            return df_sampled
+
+        df_train = apply_neg_sampling(df_train, "TRAIN", args.neg_ratio, seed=42)
+        df_val   = apply_neg_sampling(df_val,   "VAL",   args.neg_ratio, seed=43)
+    else:
+        log.warning(
+            "[NegSampling] --neg_ratio=0: sin sampling. "
+            f"Se escribirán {len(df_train)+len(df_val):,} parches "
+            f"(~{(len(df_train)+len(df_val)) * 64**3 * 4 / 1e9:.1f} GB). "
+            "Asegúrate de tener suficiente espacio en disco."
+        )
 
     # ── 4. Extraer parches en paralelo (un worker por CT) ────────────────────
     def build_tasks(df_split, out_dir):
@@ -386,6 +486,7 @@ def main(args):
         "train_neg":        int((df_train["class"] == 0).sum()),
         "val_pos":          int((df_val["class"] == 1).sum()),
         "val_neg":          int((df_val["class"] == 0).sum()),
+        "neg_ratio":        args.neg_ratio,
         "patch_size":       PATCH_SIZE,
         "hu_clip":          list(HU_LUNG_CLIP),
         "validation_ok":    ok_train and ok_val,
@@ -444,7 +545,40 @@ if __name__ == "__main__":
              "Máximo recomendado con 32 GB RAM: 8"
     )
     parser.add_argument(
+        "--output_dir", type=str, default=None,
+        help="Directorio de salida para los parches train/ y val/. "
+             "Default: datasets/luna_lung_cancer/patches/ dentro del repo. "
+             "Usa una ruta en el NVMe si el HDD no tiene espacio suficiente."
+    )
+    parser.add_argument(
+        "--neg_ratio", type=int, default=10,
+        help="Número de negativos por positivo (negative sampling). "
+             "Default=10. Con 1,555 positivos → ~15,550 negativos → "
+             "~17,105 parches totales (~4.5 GB). "
+             "Usa 0 para desactivar el sampling y conservar todos los negativos "
+             "(requiere ~197 GB de disco libre)."
+    )
+    parser.add_argument(
         "--dry-run", action="store_true",
         help="Solo muestra estadísticas, no extrae parches"
+    )
+    parser.add_argument(
+        "--max_neg", type=int, default=None,
+        help=(
+            "Máximo número de candidatos negativos (class=0) a extraer en total. "
+            "TODOS los positivos (class=1) se extraen siempre. "
+            "Para FASE 0 (routing embeddings) se recomienda --max_neg 8000. "
+            "Default=None extrae todos los negativos (788 GB para 10 subsets \u2014 "
+            "solo usar si hay suficiente espacio en disco)."
+        )
+    )
+    parser.add_argument(
+        "--single_subset", type=int, default=None,
+        help=(
+            "Si se especifica, procesa solo los CTs del subsetN indicado "
+            "(0-9). Los parches se acumulan en train/ y val/ junto con los "
+            "de ejecuciones anteriores. Usar junto con --max_neg para controlar "
+            "el espacio por subset. Ejemplo: --single_subset 3 --max_neg 800"
+        )
     )
     main(parser.parse_args())
