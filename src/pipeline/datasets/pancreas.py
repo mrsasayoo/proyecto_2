@@ -25,8 +25,8 @@ from torch.utils.data import Dataset
 from pathlib import Path
 import SimpleITK as sitk
 
-from ..config import EXPERT_IDS, HU_ABDOMEN_CLIP, HU_LUNG_CLIP
-from ..preprocessing import normalize_hu, resize_volume_3d, volume_to_vit_input
+from config import EXPERT_IDS, HU_ABDOMEN_CLIP, HU_LUNG_CLIP
+from preprocessing import normalize_hu, resize_volume_3d, volume_to_vit_input
 
 log = logging.getLogger("fase0")
 
@@ -48,8 +48,7 @@ class PanoramaLabelLoader:
     LABELS_REPO_URL = "https://github.com/DIAGNijmegen/panorama_labels"
 
     @staticmethod
-    def load_labels(labels_repo_dir: str,
-                    expected_commit: str = None) -> dict:
+    def load_labels(labels_repo_dir: str, expected_commit: str = None) -> dict:
         """
         H1/Item-1 — Carga las etiquetas del repositorio clonado.
 
@@ -72,9 +71,13 @@ class PanoramaLabelLoader:
         # Verificar hash del commit actual
         try:
             import subprocess
+
             result = subprocess.run(
                 ["git", "rev-parse", "HEAD"],
-                cwd=str(repo_dir), capture_output=True, text=True, timeout=10
+                cwd=str(repo_dir),
+                capture_output=True,
+                text=True,
+                timeout=10,
             )
             current_hash = result.stdout.strip()
             if expected_commit:
@@ -102,24 +105,28 @@ class PanoramaLabelLoader:
         label_files = list(repo_dir.glob("*.json")) + list(repo_dir.glob("*.csv"))
 
         if not label_files:
-            log.error(f"[Pancreas/H1] Sin archivos .json/.csv en '{repo_dir}'. "
-                      f"¿El repositorio está correctamente clonado?")
+            log.error(
+                f"[Pancreas/H1] Sin archivos .json/.csv en '{repo_dir}'. "
+                f"¿El repositorio está correctamente clonado?"
+            )
             return {}
 
-        log.info(f"[Pancreas/H1] Archivos de etiquetas encontrados: "
-                 f"{[f.name for f in label_files]}")
+        log.info(
+            f"[Pancreas/H1] Archivos de etiquetas encontrados: "
+            f"{[f.name for f in label_files]}"
+        )
 
         for lf in label_files:
             try:
                 if lf.suffix == ".json":
                     import json as _json
+
                     with open(lf) as f:
                         data = _json.load(f)
                     if isinstance(data, dict):
                         for case_id, info in data.items():
                             if isinstance(info, dict):
-                                label = int(info.get("label",
-                                             info.get("has_pdac", 0)))
+                                label = int(info.get("label", info.get("has_pdac", 0)))
                             else:
                                 label = int(info)
                             labels[str(case_id)] = label
@@ -130,19 +137,23 @@ class PanoramaLabelLoader:
                             id_col = col
                             break
                     else:
-                        log.warning(f"[Pancreas/H1] CSV '{lf.name}' sin columna "
-                                    f"case_id/id/case reconocida.")
+                        log.warning(
+                            f"[Pancreas/H1] CSV '{lf.name}' sin columna "
+                            f"case_id/id/case reconocida."
+                        )
                         continue
                     for lbl_col in ["label", "has_pdac", "pdac", "class"]:
                         if lbl_col in df.columns:
                             break
                     else:
-                        log.warning(f"[Pancreas/H1] CSV '{lf.name}' sin columna "
-                                    f"label/has_pdac/pdac/class reconocida.")
+                        log.warning(
+                            f"[Pancreas/H1] CSV '{lf.name}' sin columna "
+                            f"label/has_pdac/pdac/class reconocida."
+                        )
                         continue
                     for _, row in df.iterrows():
                         case_id = str(row[id_col])
-                        label   = int(bool(row[lbl_col]))
+                        label = int(bool(row[lbl_col]))
                         labels[case_id] = label
             except Exception as e:
                 log.warning(f"[Pancreas/H1] Error leyendo '{lf}': {e}")
@@ -153,14 +164,12 @@ class PanoramaLabelLoader:
             f"[Pancreas/H1] Etiquetas cargadas: {len(labels):,} casos | "
             f"PDAC+ (positivo): {n_pos:,} | "
             f"PDAC− (negativo): {n_neg:,} | "
-            f"ratio neg/pos: {n_neg/max(n_pos,1):.1f}:1"
+            f"ratio neg/pos: {n_neg / max(n_pos, 1):.1f}:1"
         )
         return labels
 
     @staticmethod
-    def cross_match(labels: dict,
-                    nii_paths: list,
-                    require_both: bool = True) -> list:
+    def cross_match(labels: dict, nii_paths: list, require_both: bool = True) -> list:
         """
         H1/Item-1+2 — Cruza los case_ids del repositorio con los .nii.gz del ZIP.
 
@@ -171,18 +180,18 @@ class PanoramaLabelLoader:
         Returns:
             lista de (nii_path, label_int) — solo casos con etiqueta confirmada
         """
-        valid_pairs   = []
-        no_label      = []
-        no_volume     = []
+        valid_pairs = []
+        no_label = []
+        no_volume = []
 
         normalized_index: dict = {}
         for nii_path in nii_paths:
             stem = Path(nii_path).name
             for ext in [".nii.gz", ".nii"]:
                 if stem.endswith(ext):
-                    stem = stem[:-len(ext)]
+                    stem = stem[: -len(ext)]
                     break
-            normalized = re.sub(r'_\d{4}$', '', stem)
+            normalized = re.sub(r"_\d{4}$", "", stem)
             if normalized not in normalized_index:
                 normalized_index[normalized] = str(nii_path)
 
@@ -205,22 +214,28 @@ class PanoramaLabelLoader:
             f"    Pares válidos (volumen + etiqueta) : {len(valid_pairs):,}\n"
             f"    PDAC+ (positivo)                  : {n_pos:,}\n"
             f"    PDAC− (negativo)                  : {n_neg:,}\n"
-            f"    Ratio neg/pos                     : {n_neg/max(n_pos,1):.1f}:1\n"
+            f"    Ratio neg/pos                     : {n_neg / max(n_pos, 1):.1f}:1\n"
             f"    Volúmenes sin etiqueta             : {len(no_label):,} "
             f"{'(excluidos)' if require_both else '(incluidos sin label)'}\n"
             f"    Etiquetas sin volumen en disco     : {len(no_volume):,}"
         )
         if no_label:
-            log.warning(f"[Pancreas/H1] {len(no_label)} volúmenes sin etiqueta "
-                        f"— primeros 5: {no_label[:5]}. "
-                        f"¿El repositorio está actualizado?")
+            log.warning(
+                f"[Pancreas/H1] {len(no_label)} volúmenes sin etiqueta "
+                f"— primeros 5: {no_label[:5]}. "
+                f"¿El repositorio está actualizado?"
+            )
         if no_volume:
-            log.warning(f"[Pancreas/H1] {len(no_volume)} etiquetas sin volumen en disco "
-                        f"— primeros 5: {no_volume[:5]}. "
-                        f"¿Faltan batches del ZIP de Zenodo?")
+            log.warning(
+                f"[Pancreas/H1] {len(no_volume)} etiquetas sin volumen en disco "
+                f"— primeros 5: {no_volume[:5]}. "
+                f"¿Faltan batches del ZIP de Zenodo?"
+            )
         if len(valid_pairs) < 50:
-            log.warning(f"[Pancreas/H1] Solo {len(valid_pairs)} pares válidos. "
-                        f"Dataset muy pequeño — usar k-fold CV (k=5).")
+            log.warning(
+                f"[Pancreas/H1] Solo {len(valid_pairs)} pares válidos. "
+                f"Dataset muy pequeño — usar k-fold CV (k=5)."
+            )
 
         return valid_pairs
 
@@ -242,19 +257,23 @@ class PancreasROIExtractor:
     PANCREAS_Z_MAX = 220
 
     @staticmethod
-    def extract_option_a(volume: np.ndarray,
-                         target: tuple = (64, 64, 64)) -> np.ndarray:
+    def extract_option_a(
+        volume: np.ndarray, target: tuple = (64, 64, 64)
+    ) -> np.ndarray:
         """H2/Opción A — Resize completo. SOLO para FASE 0 (embedding/routing)."""
         t = torch.from_numpy(volume).float().unsqueeze(0).unsqueeze(0)
-        t = nn.functional.interpolate(t, size=target,
-                                       mode="trilinear", align_corners=False)
+        t = nn.functional.interpolate(
+            t, size=target, mode="trilinear", align_corners=False
+        )
         return t.squeeze().numpy()
 
     @staticmethod
-    def extract_option_b(volume: np.ndarray,
-                         z_min: int = None,
-                         z_max: int = None,
-                         target: tuple = (64, 64, 64)) -> np.ndarray:
+    def extract_option_b(
+        volume: np.ndarray,
+        z_min: int = None,
+        z_max: int = None,
+        target: tuple = (64, 64, 64),
+    ) -> np.ndarray:
         """H2/Opción B — Recorte Z fijo + resize. Mejora ratio páncreas/volumen ~3×."""
         z_min = z_min if z_min is not None else PancreasROIExtractor.PANCREAS_Z_MIN
         z_max = z_max if z_max is not None else PancreasROIExtractor.PANCREAS_Z_MAX
@@ -263,46 +282,58 @@ class PancreasROIExtractor:
         z_max = max(z_min + 1, min(z_max, d))
         cropped = volume[z_min:z_max, :, :]
         t = torch.from_numpy(cropped).float().unsqueeze(0).unsqueeze(0)
-        t = nn.functional.interpolate(t, size=target,
-                                       mode="trilinear", align_corners=False)
+        t = nn.functional.interpolate(
+            t, size=target, mode="trilinear", align_corners=False
+        )
         return t.squeeze().numpy()
 
     @staticmethod
-    def verify_pancreas_z_range(nii_paths: list,
-                                 segmentation_paths: list = None) -> None:
+    def verify_pancreas_z_range(
+        nii_paths: list, segmentation_paths: list = None
+    ) -> None:
         """H2 — Verifica que el rango Z predeterminado cubre el páncreas."""
         import random
+
         n_check = min(5, len(nii_paths))
         log.info(f"[Pancreas/H2] Verificando rango Z en {n_check} volúmenes...")
 
         for nii_path in random.sample(nii_paths, n_check):
             try:
                 image = sitk.ReadImage(str(nii_path))
-                arr   = sitk.GetArrayFromImage(image)
+                arr = sitk.GetArrayFromImage(image)
                 d, h, w = arr.shape
                 spacing = image.GetSpacing()
-                log.info(f"    {Path(nii_path).name}: shape=[{d},{h},{w}] | "
-                         f"spacing={spacing[2]:.2f}×{spacing[1]:.2f}×{spacing[0]:.2f} mm")
+                log.info(
+                    f"    {Path(nii_path).name}: shape=[{d},{h},{w}] | "
+                    f"spacing={spacing[2]:.2f}×{spacing[1]:.2f}×{spacing[0]:.2f} mm"
+                )
                 if d < PancreasROIExtractor.PANCREAS_Z_MAX:
-                    log.warning(f"    ⚠ Volumen con solo {d} slices — "
-                                f"PANCREAS_Z_MAX={PancreasROIExtractor.PANCREAS_Z_MAX} "
-                                f"excede la dimensión. Ajustar PancreasROIExtractor.PANCREAS_Z_MAX.")
+                    log.warning(
+                        f"    ⚠ Volumen con solo {d} slices — "
+                        f"PANCREAS_Z_MAX={PancreasROIExtractor.PANCREAS_Z_MAX} "
+                        f"excede la dimensión. Ajustar PancreasROIExtractor.PANCREAS_Z_MAX."
+                    )
             except Exception as e:
                 log.warning(f"    Error leyendo '{nii_path}': {e}")
 
         if segmentation_paths:
-            log.info("[Pancreas/H2] Calculando rango Z real del páncreas desde segmentaciones...")
+            log.info(
+                "[Pancreas/H2] Calculando rango Z real del páncreas desde segmentaciones..."
+            )
             z_mins, z_maxs = [], []
-            for seg_path in random.sample(segmentation_paths,
-                                          min(5, len(segmentation_paths))):
+            for seg_path in random.sample(
+                segmentation_paths, min(5, len(segmentation_paths))
+            ):
                 try:
                     seg = sitk.GetArrayFromImage(sitk.ReadImage(str(seg_path)))
                     pancreas_z = np.where(seg > 0)[0]
                     if len(pancreas_z):
                         z_mins.append(int(pancreas_z.min()))
                         z_maxs.append(int(pancreas_z.max()))
-                        log.info(f"    {Path(seg_path).name}: "
-                                 f"páncreas Z=[{pancreas_z.min()},{pancreas_z.max()}]")
+                        log.info(
+                            f"    {Path(seg_path).name}: "
+                            f"páncreas Z=[{pancreas_z.min()},{pancreas_z.max()}]"
+                        )
                 except Exception as e:
                     log.warning(f"    Error leyendo segmentación '{seg_path}': {e}")
             if z_mins:
@@ -313,8 +344,10 @@ class PancreasROIExtractor:
                     f"    ⚠ Si los valores difieren, actualizar PancreasROIExtractor.PANCREAS_Z_MIN/MAX."
                 )
         else:
-            log.info("[Pancreas/H2] Sin segmentaciones disponibles — "
-                     "verificar rango Z manualmente con un visualizador DICOM/NIfTI.")
+            log.info(
+                "[Pancreas/H2] Sin segmentaciones disponibles — "
+                "verificar rango Z manualmente con un visualizador DICOM/NIfTI."
+            )
 
 
 class PancreasDataset(Dataset):
@@ -326,24 +359,29 @@ class PancreasDataset(Dataset):
       mode="expert"    → FASE 2: (volume_3d, label_binary, case_stem)
     """
 
-    def __init__(self, valid_pairs: list,
-                 mode: str = "embedding",
-                 roi_strategy: str = "B",
-                 z_score_per_volume: bool = True):
-        assert mode in ("embedding", "expert"), \
+    def __init__(
+        self,
+        valid_pairs: list,
+        mode: str = "embedding",
+        roi_strategy: str = "B",
+        z_score_per_volume: bool = True,
+    ):
+        assert mode in ("embedding", "expert"), (
             f"[Pancreas] mode debe ser 'embedding' o 'expert', recibido: '{mode}'"
-        assert roi_strategy in ("A", "B"), \
+        )
+        assert roi_strategy in ("A", "B"), (
             f"[Pancreas] roi_strategy debe ser 'A' o 'B', recibido: '{roi_strategy}'."
+        )
 
-        self.expert_id        = EXPERT_IDS["pancreas"]
-        self.mode             = mode
-        self.roi_strategy     = roi_strategy
-        self.z_score_norm     = z_score_per_volume
-        self.samples          = valid_pairs
+        self.expert_id = EXPERT_IDS["pancreas"]
+        self.mode = mode
+        self.roi_strategy = roi_strategy
+        self.z_score_norm = z_score_per_volume
+        self.samples = valid_pairs
 
         n_total = len(self.samples)
-        n_pos   = sum(1 for _, l in self.samples if l == 1)
-        n_neg   = sum(1 for _, l in self.samples if l == 0)
+        n_pos = sum(1 for _, l in self.samples if l == 1)
+        n_neg = sum(1 for _, l in self.samples if l == 0)
 
         log.info(
             f"[Pancreas] Dataset inicializado: {n_total:,} volúmenes | "
@@ -412,34 +450,34 @@ class PancreasDataset(Dataset):
         # ── H5/Item-8: k-fold CV ─────────────────────────────────────────────
         log.info(
             f"[Pancreas] H5/Item-8 — k-fold CV (k=5) OBLIGATORIO con {n_total:,} volúmenes.\n"
-            f"    Split fijo 80/20 → val ≈ {n_total//5} muestras → σ(AUC) ≈ ±0.05\n"
-            f"    k-fold (k=5): σ reducida ~{0.05/5**0.5:.3f}"
+            f"    Split fijo 80/20 → val ≈ {n_total // 5} muestras → σ(AUC) ≈ ±0.05\n"
+            f"    k-fold (k=5): σ reducida ~{0.05 / 5**0.5:.3f}"
         )
 
     @staticmethod
-    def build_kfold_splits(valid_pairs: list,
-                           k: int = 5,
-                           random_state: int = 42) -> list:
+    def build_kfold_splits(
+        valid_pairs: list, k: int = 5, random_state: int = 42
+    ) -> list:
         """H5/Item-8 — Genera k folds estratificados para cross-validation."""
         from sklearn.model_selection import StratifiedKFold
 
-        paths  = [p for p, _ in valid_pairs]
+        paths = [p for p, _ in valid_pairs]
         labels = [l for _, l in valid_pairs]
 
-        skf   = StratifiedKFold(n_splits=k, shuffle=True, random_state=random_state)
+        skf = StratifiedKFold(n_splits=k, shuffle=True, random_state=random_state)
         folds = []
 
         for fold_idx, (train_idx, val_idx) in enumerate(skf.split(paths, labels)):
             train_pairs = [valid_pairs[i] for i in train_idx]
-            val_pairs   = [valid_pairs[i] for i in val_idx]
+            val_pairs = [valid_pairs[i] for i in val_idx]
 
             n_pos_tr = sum(1 for _, l in train_pairs if l == 1)
             n_neg_tr = sum(1 for _, l in train_pairs if l == 0)
-            n_pos_va = sum(1 for _, l in val_pairs   if l == 1)
-            n_neg_va = sum(1 for _, l in val_pairs   if l == 0)
+            n_pos_va = sum(1 for _, l in val_pairs if l == 1)
+            n_neg_va = sum(1 for _, l in val_pairs if l == 0)
 
             log.info(
-                f"[Pancreas/kfold] Fold {fold_idx+1}/{k}: "
+                f"[Pancreas/kfold] Fold {fold_idx + 1}/{k}: "
                 f"train={len(train_pairs):,} (pos={n_pos_tr}, neg={n_neg_tr}) | "
                 f"val={len(val_pairs):,} (pos={n_pos_va}, neg={n_neg_va})"
             )
@@ -448,13 +486,17 @@ class PancreasDataset(Dataset):
         return folds
 
     @staticmethod
-    def check_trivial_convergence(logits: torch.Tensor,
-                                  labels: torch.Tensor,
-                                  threshold: float = 0.4) -> dict:
+    def check_trivial_convergence(
+        logits: torch.Tensor, labels: torch.Tensor, threshold: float = 0.4
+    ) -> dict:
         """H4/Item-7 — Detecta si el modelo converge al mínimo trivial (siempre negativo)."""
         with torch.no_grad():
             probs = torch.sigmoid(logits.float()).cpu().numpy()
-        labels_np = labels.cpu().numpy() if isinstance(labels, torch.Tensor) else np.array(labels)
+        labels_np = (
+            labels.cpu().numpy()
+            if isinstance(labels, torch.Tensor)
+            else np.array(labels)
+        )
 
         pos_mask = labels_np == 1
         neg_mask = labels_np == 0
@@ -485,29 +527,32 @@ class PancreasDataset(Dataset):
             )
 
         return {
-            "prob_pos_mean":    prob_pos_mean,
-            "prob_neg_mean":    prob_neg_mean,
-            "frac_pred_pos":    frac_pred_pos,
+            "prob_pos_mean": prob_pos_mean,
+            "prob_neg_mean": prob_neg_mean,
+            "frac_pred_pos": frac_pred_pos,
             "convergence_risk": convergence_risk,
         }
 
     def _source_audit(self):
         """H6/Item-9 — Infiere la fuente de cada caso por naming convention."""
-        stems  = [Path(p).name.split(".nii")[0] for p, _ in self.samples]
-        n_msd  = sum(1 for s in stems if "Task07" in s or "msd" in s.lower())
-        n_nih  = sum(1 for s in stems if "pancreas" in s.lower() and
-                     not any(x in s for x in ["panc_", "PANC_"]))
+        stems = [Path(p).name.split(".nii")[0] for p, _ in self.samples]
+        n_msd = sum(1 for s in stems if "Task07" in s or "msd" in s.lower())
+        n_nih = sum(
+            1
+            for s in stems
+            if "pancreas" in s.lower() and not any(x in s for x in ["panc_", "PANC_"])
+        )
         n_radb = len(stems) - n_msd - n_nih
-        total  = max(len(stems), 1)
+        total = max(len(stems), 1)
 
         log.info(
             f"[Pancreas] H6/Item-9 — Auditoría de fuentes (heurística por naming):\n"
             f"    Radboudumc + UMCG (~Holanda, protocolo variable): "
-            f"{n_radb:>4} ({100*n_radb/total:.0f}%)\n"
+            f"{n_radb:>4} ({100 * n_radb / total:.0f}%)\n"
             f"    MSD Task07 (~NYC, ~50% PDAC)                    : "
-            f"{n_msd:>4} ({100*n_msd/total:.0f}%)\n"
+            f"{n_msd:>4} ({100 * n_msd / total:.0f}%)\n"
             f"    NIH Pancreas-CT (todos negativos)               : "
-            f"{n_nih:>4} ({100*n_nih/total:.0f}%)\n"
+            f"{n_nih:>4} ({100 * n_nih / total:.0f}%)\n"
             f"    ⚠ NIH = 100% negativos → puede inflar accuracy por bias de dominio.\n"
             f"    Contramedidas activas:\n"
             f"      z_score_per_volume = {'activo ✓' if self.z_score_norm else 'INACTIVO ⚠'}\n"
@@ -519,14 +564,16 @@ class PancreasDataset(Dataset):
 
     def __getitem__(self, idx):
         nii_path, label = self.samples[idx]
-        case_stem       = Path(nii_path).name.split(".nii")[0]
+        case_stem = Path(nii_path).name.split(".nii")[0]
 
         try:
-            image  = sitk.ReadImage(str(nii_path))
+            image = sitk.ReadImage(str(nii_path))
             volume = sitk.GetArrayFromImage(image).astype(np.float32)
         except Exception as e:
-            log.warning(f"[Pancreas] Error leyendo '{nii_path}': {e}. "
-                        f"Reemplazando con tensor cero.")
+            log.warning(
+                f"[Pancreas] Error leyendo '{nii_path}': {e}. "
+                f"Reemplazando con tensor cero."
+            )
             if self.mode == "embedding":
                 return torch.zeros(3, 224, 224), self.expert_id, case_stem
             else:
@@ -537,7 +584,7 @@ class PancreasDataset(Dataset):
         if self.z_score_norm:
             volume = np.clip(volume, lo, hi)
             mean_v = volume.mean()
-            std_v  = volume.std()
+            std_v = volume.std()
             if std_v > 1e-6:
                 volume = (volume - mean_v) / std_v
                 volume = np.clip(volume, -3, 3)
@@ -548,11 +595,13 @@ class PancreasDataset(Dataset):
             volume = normalize_hu(volume, lo, hi)
 
         if volume.max() == volume.min():
-            log.warning(f"[Pancreas] Volumen '{case_stem}' es constante tras normalización.")
+            log.warning(
+                f"[Pancreas] Volumen '{case_stem}' es constante tras normalización."
+            )
 
         if self.mode == "embedding":
             volume_t = resize_volume_3d(volume, target=(64, 64, 64))
-            img      = volume_to_vit_input(volume_t)
+            img = volume_to_vit_input(volume_t)
             return img, self.expert_id, case_stem
         else:
             if self.roi_strategy == "B":
@@ -568,8 +617,8 @@ class _LegacyPancreasDataset(Dataset):
 
     def __init__(self, patches_dir):
         self.patches_dir = Path(patches_dir)
-        self.expert_id   = EXPERT_IDS["pancreas"]
-        self.samples     = list(self.patches_dir.glob("*.npy"))
+        self.expert_id = EXPERT_IDS["pancreas"]
+        self.samples = list(self.patches_dir.glob("*.npy"))
 
     def __len__(self):
         return len(self.samples)

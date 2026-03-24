@@ -19,11 +19,15 @@ from torchvision import transforms
 from PIL import Image
 from pathlib import Path
 
-from ..config import (
-    EXPERT_IDS, IMAGENET_MEAN, IMAGENET_STD,
-    OA_CLASS_NAMES, OA_N_CLASSES, OA_BASE_IMG_COUNT
+from config import (
+    EXPERT_IDS,
+    IMAGENET_MEAN,
+    IMAGENET_STD,
+    OA_CLASS_NAMES,
+    OA_N_CLASSES,
+    OA_BASE_IMG_COUNT,
 )
-from ..preprocessing import apply_clahe
+from preprocessing import apply_clahe
 
 log = logging.getLogger("fase0")
 
@@ -41,22 +45,22 @@ class OAKneeDataset(Dataset):
     def compute_qwk(y_true: np.ndarray, y_pred: np.ndarray) -> float:
         """QWK — Métrica principal para evaluación ordinal del Experto 2."""
         from sklearn.metrics import cohen_kappa_score
+
         if len(y_true) == 0 or len(y_pred) == 0:
             return 0.0
-        return float(cohen_kappa_score(y_true, y_pred,
-                                       weights="quadratic",
-                                       labels=[0, 1, 2]))
+        return float(
+            cohen_kappa_score(y_true, y_pred, weights="quadratic", labels=[0, 1, 2])
+        )
 
     @staticmethod
-    def evaluate_boundary_confusion(y_true: np.ndarray,
-                                    y_pred: np.ndarray) -> dict:
+    def evaluate_boundary_confusion(y_true: np.ndarray, y_pred: np.ndarray) -> dict:
         """
         H5/Item-9 — Analiza la matriz de confusión con foco en la frontera
         Clase0↔Clase1 (Normal↔Leve), que es la más difícil por contaminación KL1.
         """
         from sklearn.metrics import cohen_kappa_score, confusion_matrix as sk_cm
 
-        cm  = sk_cm(y_true, y_pred, labels=[0, 1, 2])
+        cm = sk_cm(y_true, y_pred, labels=[0, 1, 2])
         qwk = cohen_kappa_score(y_true, y_pred, weights="quadratic")
 
         n0 = cm[0].sum()
@@ -70,19 +74,19 @@ class OAKneeDataset(Dataset):
         recall = {i: cm[i, i] / max(cm[i].sum(), 1) for i in range(3)}
 
         return {
-            "qwk":                   float(qwk),
-            "confusion_matrix":      cm,
+            "qwk": float(qwk),
+            "confusion_matrix": cm,
             "boundary_01_error_rate": float(b01),
             "boundary_12_error_rate": float(b12),
-            "severe_misclass_rate":  float(severe_miss),
-            "per_class_recall":      {i: float(r) for i, r in recall.items()},
+            "severe_misclass_rate": float(severe_miss),
+            "per_class_recall": {i: float(r) for i, r in recall.items()},
         }
 
     @staticmethod
     def log_boundary_confusion(metrics: dict, epoch: int = -1) -> None:
         """H5/Item-9 — Imprime en el log un resumen de la matriz de confusión."""
         ep_str = f"Época {epoch} — " if epoch >= 0 else ""
-        cm     = metrics["confusion_matrix"]
+        cm = metrics["confusion_matrix"]
         log.info(
             f"[OA] {ep_str}Evaluación Experto 2:\n"
             f"    QWK (métrica principal) : {metrics['qwk']:.4f}\n"
@@ -103,13 +107,14 @@ class OAKneeDataset(Dataset):
         )
 
     def __init__(self, root_dir, split="train", img_size=224, mode="embedding"):
-        assert mode in ("embedding", "expert"), \
+        assert mode in ("embedding", "expert"), (
             f"[OA] mode debe ser 'embedding' o 'expert', recibido: '{mode}'"
+        )
 
         self.expert_id = EXPERT_IDS["oa"]
-        self.img_size  = img_size
-        self.mode      = mode
-        self.samples   = []
+        self.img_size = img_size
+        self.mode = mode
+        self.samples = []
 
         split_dir = Path(root_dir) / split
         if not split_dir.exists():
@@ -117,7 +122,7 @@ class OAKneeDataset(Dataset):
             return
 
         # ── Leer clases desde carpetas ──────────────────────────────────
-        class_counts  = {}
+        class_counts = {}
         found_classes = []
         for class_dir in sorted(split_dir.iterdir()):
             if not class_dir.is_dir():
@@ -125,7 +130,9 @@ class OAKneeDataset(Dataset):
             try:
                 class_id = int(class_dir.name)
             except ValueError:
-                log.warning(f"[OA] Carpeta con nombre no numérico ignorada: '{class_dir.name}'.")
+                log.warning(
+                    f"[OA] Carpeta con nombre no numérico ignorada: '{class_dir.name}'."
+                )
                 continue
             imgs = list(class_dir.glob("*.jpg")) + list(class_dir.glob("*.png"))
             for img_path in imgs:
@@ -168,7 +175,9 @@ class OAKneeDataset(Dataset):
         log.info(f"[OA] Distribución por clase:")
         for i, (name, count) in enumerate(zip(OA_CLASS_NAMES, counts_arr)):
             bar = "█" * max(1, int(30 * count / total))
-            log.info(f"    Clase {i} ({name:<18}): {int(count):>5,} ({100*count/total:.1f}%) {bar}")
+            log.info(
+                f"    Clase {i} ({name:<18}): {int(count):>5,} ({100 * count / total:.1f}%) {bar}"
+            )
 
         counts_safe = np.maximum(counts_arr, 1)
         cw = torch.tensor(total / (OA_N_CLASSES * counts_safe), dtype=torch.float32)
@@ -183,9 +192,7 @@ class OAKneeDataset(Dataset):
             "    Opción B (ordinal): OrdinalLoss(n_classes=3)\n"
             "    Métrica principal: QWK (cohen_kappa_score, weights='quadratic')."
         )
-        log.info(
-            "[OA] H1 — ⚠ Augmentation: NUNCA usar RandomVerticalFlip."
-        )
+        log.info("[OA] H1 — ⚠ Augmentation: NUNCA usar RandomVerticalFlip.")
 
         # ── H2: detectar augmentation offline ────────────────────────────
         self._audit_augmentation_offline(split, total)
@@ -216,22 +223,28 @@ class OAKneeDataset(Dataset):
         )
 
         # ── Transform pipeline ────────────────────────────────────────────
-        self.base_transform = transforms.Compose([
-            transforms.ToTensor(),
-            transforms.Normalize(mean=IMAGENET_MEAN, std=IMAGENET_STD),
-        ])
-        self.aug_transform = transforms.Compose([
-            transforms.RandomHorizontalFlip(p=0.5),
-            transforms.RandomRotation(degrees=10),
-            transforms.ColorJitter(brightness=0.2, contrast=0.15),
-            transforms.ToTensor(),
-            transforms.Normalize(mean=IMAGENET_MEAN, std=IMAGENET_STD),
-        ])
+        self.base_transform = transforms.Compose(
+            [
+                transforms.ToTensor(),
+                transforms.Normalize(mean=IMAGENET_MEAN, std=IMAGENET_STD),
+            ]
+        )
+        self.aug_transform = transforms.Compose(
+            [
+                transforms.RandomHorizontalFlip(p=0.5),
+                transforms.RandomRotation(degrees=10),
+                transforms.ColorJitter(brightness=0.2, contrast=0.15),
+                transforms.ToTensor(),
+                transforms.Normalize(mean=IMAGENET_MEAN, std=IMAGENET_STD),
+            ]
+        )
 
     def _audit_augmentation_offline(self, split: str, total_imgs: int):
         """H2 — Detecta si el ZIP contiene augmentation offline."""
-        expected = {"train": 5778, "val": 826, "test": 1656}.get(split, OA_BASE_IMG_COUNT)
-        ratio    = total_imgs / max(expected, 1)
+        expected = {"train": 5778, "val": 826, "test": 1656}.get(
+            split, OA_BASE_IMG_COUNT
+        )
+        ratio = total_imgs / max(expected, 1)
 
         if ratio > 1.10:
             log.warning(
@@ -269,15 +282,16 @@ class OAKneeDataset(Dataset):
         """Item-4 — Verifica que las imágenes son grises guardadas como RGB."""
         if not self.samples:
             return
-        n_check     = min(5, len(self.samples))
+        n_check = min(5, len(self.samples))
         sample_paths = [p for p, _ in random.sample(self.samples, n_check)]
-        n_gray_rgb  = 0
-        n_true_rgb  = 0
+        n_gray_rgb = 0
+        n_true_rgb = 0
         for p in sample_paths:
             try:
                 arr = np.array(Image.open(p).convert("RGB"))
-                if np.allclose(arr[:, :, 0], arr[:, :, 1], atol=2) and \
-                   np.allclose(arr[:, :, 0], arr[:, :, 2], atol=2):
+                if np.allclose(arr[:, :, 0], arr[:, :, 1], atol=2) and np.allclose(
+                    arr[:, :, 0], arr[:, :, 2], atol=2
+                ):
                     n_gray_rgb += 1
                 else:
                     n_true_rgb += 1
@@ -297,14 +311,16 @@ class OAKneeDataset(Dataset):
         if not self.samples:
             return
         n_check = min(10, len(self.samples))
-        sizes   = set()
+        sizes = set()
         for p, _ in random.sample(self.samples, n_check):
             try:
                 sizes.add(Image.open(p).size)
             except Exception:
                 pass
         if len(sizes) == 1:
-            log.debug(f"[OA] Item-8 — Dimensiones uniformes en muestra: {next(iter(sizes))} ✓")
+            log.debug(
+                f"[OA] Item-8 — Dimensiones uniformes en muestra: {next(iter(sizes))} ✓"
+            )
         else:
             log.info(
                 f"[OA] Item-8 — Dimensiones variables en muestra: {sizes}. "
@@ -319,9 +335,15 @@ class OAKneeDataset(Dataset):
         try:
             img = Image.open(img_path).convert("RGB")
         except Exception as e:
-            log.warning(f"[OA] Error abriendo '{img_path}': {e}. Reemplazando con tensor cero.")
+            log.warning(
+                f"[OA] Error abriendo '{img_path}': {e}. Reemplazando con tensor cero."
+            )
             dummy = torch.zeros(3, self.img_size, self.img_size)
-            return dummy, self.expert_id if self.mode == "embedding" else kl_class, str(img_path.name)
+            return (
+                dummy,
+                self.expert_id if self.mode == "embedding" else kl_class,
+                str(img_path.name),
+            )
 
         # H4 — CLAHE ANTES del resize
         img = apply_clahe(img)
@@ -330,7 +352,9 @@ class OAKneeDataset(Dataset):
         if self.mode == "embedding":
             return self.base_transform(img), self.expert_id, str(img_path.name)
         else:
-            if self.mode == "expert" and not getattr(self, "_aug_offline_detected", False):
+            if self.mode == "expert" and not getattr(
+                self, "_aug_offline_detected", False
+            ):
                 img_tensor = self.aug_transform(img)
             else:
                 img_tensor = self.base_transform(img)
