@@ -301,8 +301,25 @@ def paso4_pancreas_labels(active, dry_run=False):
             return {"status": "✅", "skipped": True, "rows": len(df_check)}
 
     if not labels_dir.is_dir():
-        log.warning("  panorama_labels/automatic_labels/ no encontrado")
-        return {"status": "⚠️", "reason": "sin máscaras"}
+        # Try to restore working tree if repo exists but files are missing
+        repo_dir = DATASETS_DIR / "panorama_labels"
+        if (repo_dir / ".git").is_dir():
+            log.info(
+                "  panorama_labels repo exists but automatic_labels/ missing — restoring working tree..."
+            )
+            try:
+                subprocess.run(
+                    ["git", "-C", str(repo_dir), "checkout", "--", "automatic_labels/"],
+                    check=True,
+                    capture_output=True,
+                    text=True,
+                    timeout=600,
+                )
+            except Exception as e:
+                log.error("  git checkout failed: %s", e)
+        if not labels_dir.is_dir():
+            log.warning("  panorama_labels/automatic_labels/ no encontrado")
+            return {"status": "⚠️", "reason": "sin máscaras"}
 
     # Fix 7: derivar etiquetas binarias desde máscaras
     label_files = sorted(labels_dir.glob("*.nii.gz"))
@@ -452,22 +469,9 @@ def paso7_cvt13(dry_run=False):
     if CVT13_MODULE_PATH.exists():
         log.info("  ✓ cvt13_backbone.py ya existe")
     else:
-        log.info("  → Generando cvt13_backbone.py...")
-        # Delegar a install_cvt_and_run_fase0 como referencia
-        try:
-            install_script = SCRIPTS_DIR / "install_cvt_and_run_fase0.py"
-            if install_script.exists():
-                subprocess.check_call(
-                    [sys.executable, str(install_script), "--no-patch"],
-                    cwd=str(PROJECT_ROOT),
-                )
-                log.info("  ✓ cvt13_backbone.py generado")
-            else:
-                log.warning("  ⚠ install_cvt_and_run_fase0.py no encontrado")
-                return {"status": "⚠️", "reason": "script de instalación no encontrado"}
-        except Exception as e:
-            log.error("  Error generando cvt13_backbone.py: %s", e)
-            return {"status": "❌", "error": str(e)}
+        log.info(
+            "  Paso 7: backbone CvT-13 gestionado nativamente en Fase 1 — script externo no requerido"
+        )
 
     # 7c: Compatibilidad CvT-13 ahora es código nativo en Fase 1
     _cvt13_native = PROJECT_ROOT / "src" / "pipeline" / "fase1" / "backbone_cvt13.py"
@@ -518,7 +522,7 @@ def paso8_reporte(all_results, timings, active):
 
     import datetime
 
-    report_path = PROJECT_ROOT / "fase0_report.md"
+    report_path = Path(__file__).resolve().parent / "fase0_report.md"
     # Copia con timestamp en logs/ para historial de corridas
     ts = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
     log_report_path = LOGS_DIR / "fase0_report_{}.md".format(ts)

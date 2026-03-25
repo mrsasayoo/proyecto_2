@@ -26,7 +26,8 @@ try:
     import psutil
 except ImportError:
     subprocess.check_call(
-        [sys.executable, "-m", "pip", "install", "--quiet", "--user", "psutil"])
+        [sys.executable, "-m", "pip", "install", "--quiet", "--user", "psutil"]
+    )
     import psutil
 
 log = logging.getLogger("fase0.descargar")
@@ -35,20 +36,24 @@ log = logging.getLogger("fase0.descargar")
 
 KAGGLE_API_URL = "https://www.kaggle.com/api/v1/datasets/download/nih-chest-xrays/data"
 
-ZENODO_LUNA_URL_PART1 = "https://zenodo.org/records/3723295/files/subset{i}.zip?download=1"
-ZENODO_LUNA_URL_PART2 = "https://zenodo.org/records/2596479/files/subset{i}.zip?download=1"
+ZENODO_LUNA_URL_PART1 = (
+    "https://zenodo.org/records/3723295/files/subset{i}.zip?download=1"
+)
+ZENODO_LUNA_URL_PART2 = (
+    "https://zenodo.org/records/2596479/files/subset{i}.zip?download=1"
+)
 ZENODO_PANCREAS_URL = "https://zenodo.org/records/13715870/files/batch_1.zip?download=1"
 
 PANORAMA_REPO = "https://github.com/DIAGNijmegen/panorama_labels.git"
 
 # Tamaños mínimos de ZIPs (bytes) — detectar archivos corruptos/incompletos
 MIN_ZIP_SIZES = {
-    "nih":       35 * 1024**3,
-    "isic":       5 * 1024**3,
-    "oa":        200 * 1024**2,
+    "nih": 35 * 1024**3,
+    "isic": 5 * 1024**3,
+    "oa": 200 * 1024**2,
     "luna_meta": 100 * 1024**2,
-    "luna_ct":    4 * 1024**3,
-    "pancreas":  40 * 1024**3,
+    "luna_ct": 4 * 1024**3,
+    "pancreas": 40 * 1024**3,
 }
 
 # Datasets que requieren kaggle CLI
@@ -56,6 +61,7 @@ KAGGLE_DATASETS = {"isic", "oa", "luna"}
 
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
+
 
 def file_size_human(path):
     # type: (Path) -> str
@@ -98,8 +104,9 @@ def check_prerequisites(active):
         if shutil.which(cmd):
             log.info("  %s OK (%s)", cmd, shutil.which(cmd))
         else:
-            log.error("  %s NO encontrado — instalar con: sudo apt-get install %s",
-                      cmd, cmd)
+            log.error(
+                "  %s NO encontrado — instalar con: sudo apt-get install %s", cmd, cmd
+            )
             ok = False
 
     # kaggle CLI
@@ -111,15 +118,19 @@ def check_prerequisites(active):
                 try:
                     subprocess.check_call(
                         [sys.executable, "-m", "pip", "install", "--quiet"]
-                        + pip_extra + ["kaggle"])
+                        + pip_extra
+                        + ["kaggle"]
+                    )
                     break
                 except subprocess.CalledProcessError:
                     continue
         if shutil.which("kaggle"):
             log.info("  kaggle OK")
         else:
-            log.error("  kaggle CLI necesario para %s pero no se pudo instalar.",
-                      ", ".join(sorted(active & KAGGLE_DATASETS)))
+            log.error(
+                "  kaggle CLI necesario para %s pero no se pudo instalar.",
+                ", ".join(sorted(active & KAGGLE_DATASETS)),
+            )
             ok = False
 
     # Credenciales Kaggle
@@ -127,8 +138,12 @@ def check_prerequisites(active):
     if needs_kaggle:
         if not kaggle_json.exists():
             log.error("  ~/.kaggle/kaggle.json NO encontrado.")
-            log.error("  1. https://www.kaggle.com/settings -> API -> 'Create New Token'")
-            log.error("  2. mkdir -p ~/.kaggle && mv ~/Downloads/kaggle.json ~/.kaggle/")
+            log.error(
+                "  1. https://www.kaggle.com/settings -> API -> 'Create New Token'"
+            )
+            log.error(
+                "  2. mkdir -p ~/.kaggle && mv ~/Downloads/kaggle.json ~/.kaggle/"
+            )
             log.error("  3. chmod 600 ~/.kaggle/kaggle.json")
             ok = False
         else:
@@ -145,22 +160,37 @@ def check_prerequisites(active):
 
 # ── Funciones de descarga ─────────────────────────────────────────────────────
 
+
 def download_wget(url, dest, tag, extra_flags=None, min_size_bytes=None):
     # type: (str, Path, str, list|None, int|None) -> bool
     """Descarga con wget. Idempotente: salta si ya existe con tamaño suficiente."""
     if dest.exists() and dest.stat().st_size > 0:
         if min_size_bytes is not None and dest.stat().st_size < min_size_bytes:
-            log.warning("[%s] %s existe pero pesa solo %s (< %.0f MB mínimo) — continuando.",
-                        tag, dest.name, file_size_human(dest), min_size_bytes / 1024 ** 2)
+            log.warning(
+                "[%s] %s existe pero pesa solo %s (< %.0f MB mínimo) — continuando.",
+                tag,
+                dest.name,
+                file_size_human(dest),
+                min_size_bytes / 1024**2,
+            )
         else:
-            log.info("[%s] Ya existe: %s (%s), saltando.",
-                     tag, dest.name, file_size_human(dest))
+            log.info(
+                "[%s] Ya existe: %s (%s), saltando.",
+                tag,
+                dest.name,
+                file_size_human(dest),
+            )
             return True
 
     dest.parent.mkdir(parents=True, exist_ok=True)
     cmd = [
-        "wget", "--continue", "--tries=10", "--retry-connrefused",
-        "--waitretry=60", "--timeout=300", "--progress=dot:giga",
+        "wget",
+        "--continue",
+        "--tries=10",
+        "--retry-connrefused",
+        "--waitretry=60",
+        "--timeout=300",
+        "--progress=dot:giga",
     ]
     if extra_flags:
         cmd.extend(extra_flags)
@@ -190,12 +220,20 @@ def download_kaggle_cli(dataset_slug, dest_dir, expected_zip, tag, min_size_byte
     """Descarga con kaggle CLI. Detecta renombres automáticos."""
     if expected_zip.exists() and expected_zip.stat().st_size > 0:
         if min_size_bytes is not None and expected_zip.stat().st_size < min_size_bytes:
-            log.warning("[%s] %s existe pero pesa solo %s — re-descargando.",
-                        tag, expected_zip.name, file_size_human(expected_zip))
+            log.warning(
+                "[%s] %s existe pero pesa solo %s — re-descargando.",
+                tag,
+                expected_zip.name,
+                file_size_human(expected_zip),
+            )
             expected_zip.unlink()
         else:
-            log.info("[%s] Ya existe: %s (%s), saltando.",
-                     tag, expected_zip.name, file_size_human(expected_zip))
+            log.info(
+                "[%s] Ya existe: %s (%s), saltando.",
+                tag,
+                expected_zip.name,
+                file_size_human(expected_zip),
+            )
             return True
 
     dest_dir.mkdir(parents=True, exist_ok=True)
@@ -221,7 +259,11 @@ def download_kaggle_cli(dataset_slug, dest_dir, expected_zip, tag, min_size_byte
 
     if expected_zip.exists():
         if min_size_bytes is not None and expected_zip.stat().st_size < min_size_bytes:
-            log.error("[%s] %s descargado pero demasiado pequeño — corrupto.", tag, expected_zip.name)
+            log.error(
+                "[%s] %s descargado pero demasiado pequeño — corrupto.",
+                tag,
+                expected_zip.name,
+            )
             return False
         elapsed = time.time() - t0
         log.info("[%s] OK %s en %.0fs", tag, file_size_human(expected_zip), elapsed)
@@ -229,11 +271,19 @@ def download_kaggle_cli(dataset_slug, dest_dir, expected_zip, tag, min_size_byte
 
     if new_zips:
         new_zip = sorted(new_zips)[0]
-        log.warning("[%s] Kaggle descargó '%s' — renombrando a '%s'",
-                    tag, new_zip.name, expected_zip.name)
+        log.warning(
+            "[%s] Kaggle descargó '%s' — renombrando a '%s'",
+            tag,
+            new_zip.name,
+            expected_zip.name,
+        )
         new_zip.rename(expected_zip)
         if min_size_bytes is not None and expected_zip.stat().st_size < min_size_bytes:
-            log.error("[%s] %s descargado pero demasiado pequeño — corrupto.", tag, expected_zip.name)
+            log.error(
+                "[%s] %s descargado pero demasiado pequeño — corrupto.",
+                tag,
+                expected_zip.name,
+            )
             return False
         elapsed = time.time() - t0
         log.info("[%s] OK %s en %.0fs", tag, file_size_human(expected_zip), elapsed)
@@ -253,7 +303,9 @@ def download_nih(datasets_dir):
     dest = datasets_dir / "nih_chest_xrays" / "data.zip"
     log.info("[NIH] Descargando via wget + Kaggle REST API (~42 GB)...")
     return download_wget(
-        KAGGLE_API_URL, dest, "NIH",
+        KAGGLE_API_URL,
+        dest,
+        "NIH",
         extra_flags=[
             "--auth-no-challenge",
             "--http-user=" + user,
@@ -298,6 +350,8 @@ def download_luna_meta(datasets_dir):
 
 def download_luna_ct(datasets_dir, subsets):
     # type: (Path, list) -> bool
+    if subsets is None:
+        subsets = list(range(10))
     ct_dir = datasets_dir / "luna_lung_cancer" / "ct_volumes"
     ct_dir.mkdir(parents=True, exist_ok=True)
     all_ok = True
@@ -305,8 +359,9 @@ def download_luna_ct(datasets_dir, subsets):
         url_template = ZENODO_LUNA_URL_PART1 if i <= 6 else ZENODO_LUNA_URL_PART2
         url = url_template.format(i=i)
         dest = ct_dir / "subset{}.zip".format(i)
-        ok = download_wget(url, dest, "LUNA-CT{}".format(i),
-                           min_size_bytes=MIN_ZIP_SIZES["luna_ct"])
+        ok = download_wget(
+            url, dest, "LUNA-CT{}".format(i), min_size_bytes=MIN_ZIP_SIZES["luna_ct"]
+        )
         if not ok:
             all_ok = False
     return all_ok
@@ -316,10 +371,14 @@ def download_pancreas(datasets_dir):
     # type: (Path) -> bool
     dest = datasets_dir / "zenodo_13715870" / "batch_1.zip"
     return download_wget(
-        ZENODO_PANCREAS_URL, dest, "PANCREAS",
+        ZENODO_PANCREAS_URL,
+        dest,
+        "PANCREAS",
         extra_flags=[
-            "--tries=5", "--retry-connrefused",
-            "--waitretry=30", "--timeout=120",
+            "--tries=5",
+            "--retry-connrefused",
+            "--waitretry=30",
+            "--timeout=120",
         ],
         min_size_bytes=MIN_ZIP_SIZES["pancreas"],
     )
@@ -332,11 +391,21 @@ def _panorama_is_valid_repo(repo_dir):
     try:
         r = subprocess.run(
             ["git", "-C", str(repo_dir), "rev-parse", "HEAD"],
-            capture_output=True, text=True, timeout=10,
+            capture_output=True,
+            text=True,
+            timeout=10,
         )
-        return r.returncode == 0
+        if r.returncode != 0:
+            return False
     except Exception:
         return False
+    # Verify working tree has actual label files (not just .git metadata)
+    labels_dir = repo_dir / "automatic_labels"
+    if not labels_dir.is_dir():
+        return False
+    if not any(labels_dir.glob("*.nii.gz")):
+        return False
+    return True
 
 
 def download_panorama(datasets_dir):
@@ -355,7 +424,9 @@ def download_panorama(datasets_dir):
         try:
             subprocess.run(
                 ["git", "clone", PANORAMA_REPO, str(repo_dir)],
-                check=True, capture_output=True, text=True,
+                check=True,
+                capture_output=True,
+                text=True,
             )
         except subprocess.CalledProcessError:
             log.error("[PANORAMA] git clone falló.")
@@ -364,7 +435,9 @@ def download_panorama(datasets_dir):
     try:
         r = subprocess.run(
             ["git", "-C", str(repo_dir), "rev-parse", "HEAD"],
-            capture_output=True, text=True, check=True,
+            capture_output=True,
+            text=True,
+            check=True,
         )
         commit = r.stdout.strip()
         commit_file.write_text(commit + "\n")
@@ -376,17 +449,18 @@ def download_panorama(datasets_dir):
 
 # ── Orquestador de descargas ──────────────────────────────────────────────────
 
+
 def run_downloads(datasets_dir, active, luna_subsets=None, dry_run=False):
     # type: (Path, set, list|None, bool) -> dict
     """Ejecuta descargas para los datasets activos. Retorna {ds_id: bool}."""
     results = {}
 
     download_map = {
-        "nih":      lambda: download_nih(datasets_dir),
-        "isic":     lambda: download_isic(datasets_dir),
-        "oa":       lambda: download_oa(datasets_dir),
-        "luna":     lambda: download_luna_meta(datasets_dir),
-        "luna_ct":  lambda: download_luna_ct(datasets_dir, luna_subsets),
+        "nih": lambda: download_nih(datasets_dir),
+        "isic": lambda: download_isic(datasets_dir),
+        "oa": lambda: download_oa(datasets_dir),
+        "luna": lambda: download_luna_meta(datasets_dir),
+        "luna_ct": lambda: download_luna_ct(datasets_dir, luna_subsets),
         "pancreas": lambda: download_pancreas(datasets_dir),
         "panorama": lambda: download_panorama(datasets_dir),
     }
