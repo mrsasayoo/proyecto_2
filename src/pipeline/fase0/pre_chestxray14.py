@@ -33,32 +33,44 @@ def crear_symlinks_all_images(nih_dir):
     """
     all_imgs = nih_dir / "all_images"
 
+    # Count available PNGs in extracted image folders
+    available_pngs = sorted(nih_dir.glob("images_*/images/*.png"))
+
     if all_imgs.is_dir():
         n_links = sum(1 for p in all_imgs.iterdir() if p.is_symlink())
-        if n_links > 0:
-            log.info("[NIH] all_images/ ya existe (%d symlinks), saltando.", n_links)
+        if n_links >= len(available_pngs) and n_links > 0:
+            log.info(
+                "[NIH] all_images/ completo (%d/%d symlinks), saltando.",
+                n_links,
+                len(available_pngs),
+            )
             return n_links
+        elif n_links > 0:
+            log.info(
+                "[NIH] all_images/ incompleto (%d symlinks, %d PNGs disponibles) — completando...",
+                n_links,
+                len(available_pngs),
+            )
+            # Fall through to add missing symlinks
 
-    # Buscar PNGs en images_001..012
-    png_files = sorted(nih_dir.glob("images_*/images/*.png"))
-    if not png_files:
+    if not available_pngs:
         log.warning("[NIH] No se encontraron .png — all_images pendiente.")
         return 0
 
-    if all_imgs.exists():
-        shutil.rmtree(all_imgs)
-
     all_imgs.mkdir(parents=True, exist_ok=True)
     created = 0
-    for png in png_files:
+    for png in available_pngs:
         link = all_imgs / png.name
         if not link.exists():
             # Symlink relativo para portabilidad
             target = os.path.relpath(png, all_imgs)
             link.symlink_to(target)
             created += 1
-    log.info("[NIH] %d symlinks creados en all_images/", created)
-    return created
+    total = sum(1 for p in all_imgs.iterdir() if p.is_symlink())
+    log.info(
+        "[NIH] %d symlinks nuevos creados en all_images/ (total: %d)", created, total
+    )
+    return total
 
 
 def verificar_split_txts(nih_dir):
@@ -124,8 +136,13 @@ def auditar_csv(nih_dir):
         return None
 
     df = pd.read_csv(csv_path)
-    required_cols = ["Image Index", "Finding Labels", "Patient ID",
-                     "View Position", "Follow-up #"]
+    required_cols = [
+        "Image Index",
+        "Finding Labels",
+        "Patient ID",
+        "View Position",
+        "Follow-up #",
+    ]
     missing = [c for c in required_cols if c not in df.columns]
     if missing:
         log.error("[NIH] Columnas faltantes en CSV: %s", missing)
@@ -134,8 +151,12 @@ def auditar_csv(nih_dir):
     # Prevalencia por patología
     all_labels = df["Finding Labels"].str.split("|").explode().str.strip()
     prevalence = all_labels.value_counts().to_dict()
-    log.info("[NIH] CSV OK — %d imágenes, %d pacientes, %d patologías",
-             len(df), df["Patient ID"].nunique(), len(prevalence))
+    log.info(
+        "[NIH] CSV OK — %d imágenes, %d pacientes, %d patologías",
+        len(df),
+        df["Patient ID"].nunique(),
+        len(prevalence),
+    )
     for label, count in sorted(prevalence.items(), key=lambda x: -x[1])[:5]:
         log.info("[NIH]   %s: %d (%.1f%%)", label, count, 100 * count / len(df))
 

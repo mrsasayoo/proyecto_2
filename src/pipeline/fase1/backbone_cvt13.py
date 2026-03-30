@@ -12,10 +12,12 @@ es la implementación canónica en Fase 1.
 Al importar este módulo, el registro se activa automáticamente
 (idempotente — seguro para múltiples importaciones).
 
+El modelo se construye siempre desde cero con pesos aleatorios
+(requisito del proyecto: sin pesos preentrenados).
+
 Referencia:
     Wu et al., "CvT: Introducing Convolutions to Vision Transformers",
     ICCV 2021. https://arxiv.org/abs/2103.14899
-    HuggingFace: https://huggingface.co/microsoft/cvt-13
 """
 
 import logging
@@ -55,10 +57,13 @@ class CvT13Wrapper(nn.Module):
         outputs = self.cvt(pixel_values=x)
         # CvT-13 solo tiene CLS token en la etapa 3 (última).
         if hasattr(outputs, "cls_token_value") and outputs.cls_token_value is not None:
-            cls = outputs.cls_token_value.squeeze(1)   # [B, 384]
+            cls = outputs.cls_token_value.squeeze(1)  # [B, 384]
         else:
-            cls = outputs.last_hidden_state[:, 0, :]   # fallback: primer token
-        return self.proj(cls)                           # [B, 384]
+            log.warning(
+                "[CvT-13] cls_token_value is None — fallback a last_hidden_state[:, 0]"
+            )
+            cls = outputs.last_hidden_state[:, 0, :]  # fallback: primer token
+        return self.proj(cls)  # [B, 384]
 
 
 def build_cvt13(
@@ -67,29 +72,51 @@ def build_cvt13(
     hf_model_name: str = "microsoft/cvt-13",
 ) -> CvT13Wrapper:
     """
-    Construye CvT-13 listo para extracción de embeddings (congelado, eval).
+    Construye CvT-13 desde cero para extracción de embeddings (congelado, eval).
+
+    NOTA: El argumento `pretrained` se mantiene por compatibilidad de interfaz
+    pero se ignora. El modelo SIEMPRE se inicializa con pesos aleatorios
+    (requisito del proyecto: sin pesos preentrenados).
 
     Args:
-        pretrained   : si True, descarga pesos oficiales de microsoft/cvt-13.
+        pretrained   : ignorado — se conserva solo por compatibilidad de interfaz.
         device       : "cuda" o "cpu".
-        hf_model_name: nombre del modelo en HuggingFace Hub.
+        hf_model_name: ignorado — la arquitectura se define localmente.
 
     Returns:
         CvT13Wrapper en modo eval, todos los parámetros congelados.
     """
-    from transformers import CvtModel
-
-    log.info("[CvT-13] Cargando desde HuggingFace: %s", hf_model_name)
-    log.info("[CvT-13] pretrained=%s | device=%s", pretrained, device)
+    from transformers import CvtConfig, CvtModel
 
     if pretrained:
-        hf_model = CvtModel.from_pretrained(hf_model_name)
-        log.info("[CvT-13] Pesos oficiales descargados ✓")
-    else:
-        from transformers import CvtConfig
-        config = CvtConfig.from_pretrained(hf_model_name)
-        hf_model = CvtModel(config)
-        log.info("[CvT-13] Modelo aleatorio (pretrained=False)")
+        log.warning(
+            "[CvT-13] pretrained=True fue solicitado pero se ignora. "
+            "El modelo se construye desde cero (requisito del proyecto)."
+        )
+
+    log.info("[CvT-13] Construyendo desde cero con pesos aleatorios")
+    log.info("[CvT-13] device=%s", device)
+
+    # Arquitectura CvT-13 definida localmente — sin descargar nada
+    config = CvtConfig(
+        num_channels=3,
+        patch_sizes=[7, 3, 3],
+        patch_stride=[4, 2, 2],
+        patch_padding=[2, 1, 1],
+        embed_dim=[64, 192, 384],
+        num_heads=[1, 3, 6],
+        depth=[1, 2, 10],
+        mlp_ratio=[4.0, 4.0, 4.0],
+        attention_drop_rate=[0.0, 0.0, 0.0],
+        drop_rate=[0.0, 0.0, 0.0],
+        drop_path_rate=[0.0, 0.0, 0.1],
+        qkv_bias=[True, True, True],
+        cls_token=[False, False, True],
+    )
+
+    # Inicialización con pesos aleatorios — sin checkpoint externo
+    hf_model = CvtModel(config)
+    log.info("[CvT-13] Modelo construido con pesos aleatorios ✓")
 
     wrapper = CvT13Wrapper(hf_model)
 
@@ -110,7 +137,7 @@ def build_cvt13(
     )
 
     total_params = sum(p.numel() for p in wrapper.parameters())
-    trainable    = sum(p.numel() for p in wrapper.parameters() if p.requires_grad)
+    trainable = sum(p.numel() for p in wrapper.parameters() if p.requires_grad)
     log.info("[CvT-13] d_model verificado: %d ✓", CvT13Wrapper.D_MODEL)
     log.info("[CvT-13] Parámetros totales  : %s", f"{total_params:,}")
     log.info("[CvT-13] Parámetros entrenab.: %d (debe ser 0 en Fase 1)", trainable)
@@ -135,7 +162,7 @@ def _register_cvt13_interceptor():
     def _patched_create_model(model_name, *args, **kwargs):
         if model_name == "cvt_13":
             log.info("[CvT-13/patch] cvt_13 interceptado → CvT13Wrapper (HuggingFace)")
-            _device    = kwargs.get("device", "cpu")
+            _device = kwargs.get("device", "cpu")
             _pretrained = kwargs.get("pretrained", True)
             return build_cvt13(pretrained=_pretrained, device=_device)
         return _original_create(model_name, *args, **kwargs)

@@ -13,21 +13,21 @@ import numpy as np
 
 # ── Expertos del sistema MoE ────────────────────────────────
 EXPERT_IDS = {
-    "chest":    0,   # NIH ChestXray14      — radiografía tórax 2D
-    "isic":     1,   # ISIC 2019            — dermatoscopía 2D
-    "oa":       2,   # Osteoarthritis Knee  — radiografía rodilla 2D
-    "luna":     3,   # LUNA16 / LIDC-IDRI   — CT pulmón 3D (parches)
-    "pancreas": 4,   # Pancreatic Cancer CT — CT abdomen 3D (volumen)
+    "chest": 0,  # NIH ChestXray14      — radiografía tórax 2D
+    "isic": 1,  # ISIC 2019            — dermatoscopía 2D
+    "oa": 2,  # Osteoarthritis Knee  — radiografía rodilla 2D
+    "luna": 3,  # LUNA16 / LIDC-IDRI   — CT pulmón 3D (parches)
+    "pancreas": 4,  # Pancreatic Cancer CT — CT abdomen 3D (volumen)
     # "ood": 5   ← se activa en FASE 1, no en FASE 0
 }
 
-N_EXPERTS_TOTAL  = 6   # Expertos 0–4 de dominio + Experto 5 OOD
-N_EXPERTS_DOMAIN = 5   # Solo los expertos con dataset propio (FASE 0)
+N_EXPERTS_TOTAL = 6  # Expertos 0–4 de dominio + Experto 5 OOD
+N_EXPERTS_DOMAIN = 5  # Solo los expertos con dataset propio (FASE 0)
 
 
 # ── Normalización ImageNet ──────────────────────────────────
 IMAGENET_MEAN = [0.485, 0.456, 0.406]
-IMAGENET_STD  = [0.229, 0.224, 0.225]
+IMAGENET_STD = [0.229, 0.224, 0.225]
 
 
 # ── Configuración de backbones disponibles ──────────────────
@@ -39,44 +39,49 @@ IMAGENET_STD  = [0.229, 0.224, 0.225]
 # │ cvt_13                           │   384   │  ~3GB │ Balance intermedio          │
 # └──────────────────────────────────┴─────────┴───────┴─────────────────────────────┘
 BACKBONE_CONFIGS = {
-    "vit_tiny_patch16_224":        {"d_model": 192,  "vram_gb": 2.0},
-    "swin_tiny_patch4_window7_224":{"d_model": 768,  "vram_gb": 4.0},
-    "cvt_13":                      {"d_model": 384,  "vram_gb": 3.0},
+    "vit_tiny_patch16_224": {"d_model": 192, "vram_gb": 2.0},
+    "swin_tiny_patch4_window7_224": {"d_model": 768, "vram_gb": 4.0},
+    "cvt_13": {"d_model": 384, "vram_gb": 3.0},
+    "densenet121_custom": {"d_model": 1024, "vram_gb": 3.0},
 }
 
 
 # ── NIH ChestXray14 ────────────────────────────────────────
 CHEST_PATHOLOGIES = [
-    "Atelectasis",        # 0
-    "Cardiomegaly",       # 1
-    "Effusion",           # 2
-    "Infiltration",       # 3
-    "Mass",               # 4
-    "Nodule",             # 5
-    "Pneumonia",          # 6
-    "Pneumothorax",       # 7
-    "Consolidation",      # 8
-    "Edema",              # 9
-    "Emphysema",          # 10
-    "Fibrosis",           # 11
-    "Pleural_Thickening", # 12
-    "Hernia",             # 13
+    "Atelectasis",  # 0
+    "Cardiomegaly",  # 1
+    "Effusion",  # 2
+    "Infiltration",  # 3
+    "Mass",  # 4
+    "Nodule",  # 5
+    "Pneumonia",  # 6
+    "Pneumothorax",  # 7
+    "Consolidation",  # 8
+    "Edema",  # 9
+    "Emphysema",  # 10
+    "Fibrosis",  # 11
+    "Pleural_Thickening",  # 12
+    "Hernia",  # 13
 ]
-N_CHEST_CLASSES = len(CHEST_PATHOLOGIES)   # = 14
+N_CHEST_CLASSES = len(CHEST_PATHOLOGIES)  # = 14
 
 CHEST_BBOX_CLASSES = {
-    "Atelectasis", "Cardiomegaly", "Effusion", "Infiltration",
-    "Mass", "Nodule", "Pneumonia", "Pneumothorax"
+    "Atelectasis",
+    "Cardiomegaly",
+    "Effusion",
+    "Infiltration",
+    "Mass",
+    "Nodule",
+    "Pneumonia",
+    "Pneumothorax",
 }
 
 
 # ── Osteoarthritis Knee ────────────────────────────────────
-OA_CLASS_NAMES   = ["Normal (KL0)", "Leve (KL1-2)", "Severo (KL3-4)"]
-OA_N_CLASSES     = 3
+OA_CLASS_NAMES = ["Normal (KL0)", "Leve (KL1-2)", "Severo (KL3-4)"]
+OA_N_CLASSES = 3
 # Reservado para FASE 2 — WeightedLoss con penalización ordinal
-OA_COST_MATRIX   = np.array([[0, 1, 4],
-                              [1, 0, 1],
-                              [4, 1, 0]], dtype=np.float32)
+OA_COST_MATRIX = np.array([[0, 1, 4], [1, 0, 1], [4, 1, 0]], dtype=np.float32)
 OA_BASE_IMG_COUNT = 8260
 
 
@@ -114,14 +119,17 @@ EXPERT_NOTES = {
         "Métricas: AUC-ROC por clase + F1 Macro + AUPRC. "
         "FocalLossMultiLabel(gamma=2) disponible como alternativa a BCEWithLogitsLoss."
     ),
-    1: ("ISIC 2019 — MULTICLASE (8 clases en train, UNK solo en test). "
+    1: (
+        "ISIC 2019 — MULTICLASE (8 clases en train, UNK solo en test). "
         "H1: Loss: CrossEntropyLoss con pesos class_weights. NO BCEWithLogitsLoss. "
         "Capa de salida: 9 neuronas softmax (incluye slot UNK para inferencia). "
         "H2: Split por lesion_id (build_lesion_split). Sin metadata_csv → riesgo de leakage. "
         "H3: 3 fuentes (HAM10000/BCN_20000/MSK) con bias de dominio — ColorJitter agresivo. "
         "Métricas: BMCA (oficial) + AUC-ROC por clase. "
-        "UNK en inferencia → H(g) alta → Experto 5 OOD la captura."),
-    2: ("OA Rodilla — ORDINAL (3 clases: Normal/Leve/Severo, consolidadas de KL 0-4). "
+        "UNK en inferencia → H(g) alta → Experto 5 OOD la captura."
+    ),
+    2: (
+        "OA Rodilla — ORDINAL (3 clases: Normal/Leve/Severo, consolidadas de KL 0-4). "
         "H1: Opción A (pragmática): CrossEntropyLoss con class_weights. "
         "Opción B: OrdinalLoss(n_classes=3) — salida [B,2] logits. "
         "Métrica principal: QWK — llamar OAKneeDataset.compute_qwk(y_true, y_pred) "
@@ -131,8 +139,10 @@ EXPERT_NOTES = {
         "H4: CLAHE SIEMPRE antes del resize (apply_clahe() → resize(224×224)). "
         "H5: KL1 contamina Clase1 — frontera 0↔1 será la más difícil. "
         "Usar OAKneeDataset.evaluate_boundary_confusion() + log_boundary_confusion() "
-        "en cada época de validación. ⚠ NUNCA RandomVerticalFlip."),
-    3: ("LUNA16 — BINARIO parches 3D (NO volúmenes completos). "
+        "en cada época de validación. ⚠ NUNCA RandomVerticalFlip."
+    ),
+    3: (
+        "LUNA16 — BINARIO parches 3D (NO volúmenes completos). "
         "H1: Tarea = clasificar parche 64×64×64 centrado en candidato (x,y,z). "
         "Tensor FASE 2: [B, 1, 64, 64, 64] — arquitectura 3D (R3D-18, Swin3D). "
         "H2: Desbalance ~490:1 — FocalLoss(gamma=2, alpha=0.25) obligatoria. "
@@ -144,8 +154,10 @@ EXPERT_NOTES = {
         "Item-7: gradient checkpointing obligatorio (batch=4, FP16, 12GB VRAM). "
         "Item-8: CPM+FROC con noduleCADEvaluationLUNA16.py. "
         "Techo teórico: 94.4% (LUNA16Dataset.SENSITIVITY_CEILING). "
-        "Item-9: spacing variable en volúmenes — verificado en __init__."),
-    4: ("Pancreas PANORAMA — BINARIO volumen 3D (PDAC+ / PDAC−). "
+        "Item-9: spacing variable en volúmenes — verificado en __init__."
+    ),
+    4: (
+        "Pancreas PANORAMA — BINARIO volumen 3D (PDAC+ / PDAC−). "
         "H1: etiquetas en repo GitHub SEPARADO — git clone panorama_labels; "
         "fijar hash commit; cruzar case_ids con .nii.gz del ZIP. "
         "H2: páncreas ~1% del volumen → resize naïve destruye señal. "
@@ -155,5 +167,6 @@ EXPERT_NOTES = {
         "Loss: FocalLoss(alpha=0.75, gamma=2). "
         "Item-6: batch_size=1–2 + FP16 + gradient checkpointing (más restrictivo que LUNA16). "
         "Item-8: k-fold CV k=5 (solo ~281 volúmenes). "
-        "Métrica: AUC-ROC > 0.85 (bueno); baseline nnU-Net ~0.88."),
+        "Métrica: AUC-ROC > 0.85 (bueno); baseline nnU-Net ~0.88."
+    ),
 }

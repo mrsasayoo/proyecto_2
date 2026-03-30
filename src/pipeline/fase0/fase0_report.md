@@ -5,13 +5,13 @@
 | Paso | Descripción | Estado | Tiempo |
 |------|-------------|--------|--------|
 | 0 | Prerequisites | ✅ | 0.0s |
-| 1 | Descargar datasets | ✅ | 8773.7s |
-| 2 | Extraer archivos | ✅ | 0.4s |
-| 3 | Post-procesado NIH | ✅ | 6.1s |
-| 4 | Etiquetas páncreas | ✅ | 679.7s |
-| 5 | Splits 80/10/10 | — | 3.0s |
-| 6 | Datos 3D | — | 162.2s |
-| 7 | CvT-13 | ⚠️ | 7.3s |
+| 1 | Descargar datasets | ✅ | 0.1s |
+| 2 | Extraer archivos | ✅ | 0.5s |
+| 3 | Post-procesado NIH | ✅ | 23.4s |
+| 4 | Etiquetas páncreas | ✅ | 0.0s |
+| 5 | Splits 80/10/10 | — | 2.1s |
+| 6 | Datos 3D | — | 3421.6s |
+| 7 | CvT-13 | ✅ | 2.7s |
 | 8 | Reporte | — | — |
 
 ## Datasets activos
@@ -42,12 +42,12 @@
 - skipped: True
 
 ### LUNA
-- status: warning
-- reason: sin CTs
+- status: ✅
+- skipped: True
 
 ### PANCREAS
-- status: error
-- error: only integer scalar arrays can be converted to a scalar index
+- status: ✅
+- skipped: True
 
 ### CAE
 - status: ✅

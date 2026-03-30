@@ -25,8 +25,8 @@ from datasets.pancreas import PancreasDataset, PanoramaLabelLoader
 
 # Transforms de este paquete (importados via sys.path → src/pipeline/fase1/)
 from transform_2d import build_2d_transform
-from transform_domain import apply_circular_crop, apply_clahe          # noqa: F401
-from transform_3d import full_3d_pipeline, volume_to_vit_input        # noqa: F401
+from transform_domain import apply_circular_crop, apply_clahe  # noqa: F401
+from transform_3d import full_3d_pipeline, volume_to_vit_input  # noqa: F401
 from fase1_config import MAX_IMBALANCE, PANCREAS_FOLD, IMG_SIZE
 
 # ── Implementaciones canónicas de transform por dominio ─────────────────────
@@ -55,12 +55,16 @@ def _make_isic_transform(img_size: int):
     """
     from torchvision import transforms as T
     from fase1_config import IMAGENET_MEAN, IMAGENET_STD
-    return T.Compose([
-        _BCNCrop(),
-        T.Resize((img_size, img_size)),
-        T.ToTensor(),
-        T.Normalize(mean=IMAGENET_MEAN, std=IMAGENET_STD),
-    ])
+
+    return T.Compose(
+        [
+            _BCNCrop(),
+            T.Resize((img_size, img_size)),
+            T.ToTensor(),
+            T.Normalize(mean=IMAGENET_MEAN, std=IMAGENET_STD),
+        ]
+    )
+
 
 log = logging.getLogger("fase1")
 
@@ -76,13 +80,13 @@ def build_datasets(cfg):
         cfg: dict con paths a artefactos de Fase 0 y opciones.
              Claves requeridas dependen de datasets activos.
     """
-    img_size      = cfg.get("img_size", IMG_SIZE)
-    transform_2d  = build_2d_transform(img_size=img_size)
+    img_size = cfg.get("img_size", IMG_SIZE)
+    transform_2d = build_2d_transform(img_size=img_size)
     isic_transform = _make_isic_transform(img_size)
 
     train_datasets = []
-    val_datasets   = []
-    test_datasets  = []
+    val_datasets = []
+    test_datasets = []
 
     # ── Experto 0: NIH ChestXray14 ──────────────────────────
     if cfg.get("nih_train_list") and cfg.get("chest_csv") and cfg.get("chest_imgs"):
@@ -116,9 +120,12 @@ def build_datasets(cfg):
         train_datasets.append(chest_train)
         val_datasets.append(chest_val)
         test_datasets.append(chest_test)
-        log.info("  → train: %s  val: %s  test: %s",
-                 f"{len(chest_train):,}", f"{len(chest_val):,}",
-                 f"{len(chest_test):,}")
+        log.info(
+            "  → train: %s  val: %s  test: %s",
+            f"{len(chest_train):,}",
+            f"{len(chest_val):,}",
+            f"{len(chest_test):,}",
+        )
 
         if cfg.get("chest_bbox_csv"):
             try:
@@ -134,27 +141,61 @@ def build_datasets(cfg):
         log.info("[Dataset] Cargando ISIC 2019 (Experto 1)...")
 
         isic_train_df = pd.read_csv(cfg["isic_train_csv"])
-        isic_val_df   = pd.read_csv(cfg["isic_val_csv"])
-        isic_test_df  = pd.read_csv(cfg["isic_test_csv"])
+        isic_val_df = pd.read_csv(cfg["isic_val_csv"])
+        isic_test_df = pd.read_csv(cfg["isic_test_csv"])
+
+        # Filtrar imágenes MSK _downsampled: no están en disco como archivos independientes
+        # (solo existen como parte de las imágenes originales). Sin este filtro, el Dataset
+        # retorna tensores de ceros para estas entradas, contaminando los embeddings.
+        for split_name, split_df in [
+            ("train", isic_train_df),
+            ("val", isic_val_df),
+            ("test", isic_test_df),
+        ]:
+            antes = len(split_df)
+            filtrado = split_df[
+                ~split_df["image"].str.contains("_downsampled", na=False)
+            ]
+            eliminadas = antes - len(filtrado)
+            if eliminadas > 0:
+                log.info(
+                    f"[ISIC/{split_name}] Filtradas {eliminadas} imágenes _downsampled no disponibles en disco"
+                )
+            # Reasignar al DataFrame correspondiente
+            if split_name == "train":
+                isic_train_df = filtrado
+            elif split_name == "val":
+                isic_val_df = filtrado
+            else:
+                isic_test_df = filtrado
 
         isic_train = ISICDataset(
-            img_dir=cfg["isic_imgs"], split_df=isic_train_df, mode="embedding",
+            img_dir=cfg["isic_imgs"],
+            split_df=isic_train_df,
+            mode="embedding",
             transform_standard=isic_transform,
         )
         isic_val = ISICDataset(
-            img_dir=cfg["isic_imgs"], split_df=isic_val_df, mode="embedding",
+            img_dir=cfg["isic_imgs"],
+            split_df=isic_val_df,
+            mode="embedding",
             transform_standard=isic_transform,
         )
         isic_test = ISICDataset(
-            img_dir=cfg["isic_imgs"], split_df=isic_test_df, mode="embedding",
+            img_dir=cfg["isic_imgs"],
+            split_df=isic_test_df,
+            mode="embedding",
             transform_standard=isic_transform,
         )
         train_datasets.append(isic_train)
         val_datasets.append(isic_val)
         test_datasets.append(isic_test)
-        log.info("  → train: %s  val: %s  test: %s",
-                 f"{len(isic_train):,}", f"{len(isic_val):,}",
-                 f"{len(isic_test):,}")
+        log.info(
+            "  → train: %s  val: %s  test: %s",
+            f"{len(isic_train):,}",
+            f"{len(isic_val):,}",
+            f"{len(isic_test):,}",
+        )
     else:
         log.warning("[Dataset] ISIC 2019 OMITIDO — faltan rutas")
 
@@ -162,16 +203,25 @@ def build_datasets(cfg):
     if cfg.get("oa_root"):
         log.info("[Dataset] Cargando OA Rodilla (Experto 2)...")
 
-        oa_train = OAKneeDataset(cfg["oa_root"], split="train", img_size=img_size, mode="embedding")
-        oa_val   = OAKneeDataset(cfg["oa_root"], split="val",   img_size=img_size, mode="embedding")
-        oa_test  = OAKneeDataset(cfg["oa_root"], split="test",  img_size=img_size, mode="embedding")
+        oa_train = OAKneeDataset(
+            cfg["oa_root"], split="train", img_size=img_size, mode="embedding"
+        )
+        oa_val = OAKneeDataset(
+            cfg["oa_root"], split="val", img_size=img_size, mode="embedding"
+        )
+        oa_test = OAKneeDataset(
+            cfg["oa_root"], split="test", img_size=img_size, mode="embedding"
+        )
 
         train_datasets.append(oa_train)
         val_datasets.append(oa_val)
         test_datasets.append(oa_test)
-        log.info("  → train: %s  val: %s  test: %s",
-                 f"{len(oa_train):,}", f"{len(oa_val):,}",
-                 f"{len(oa_test):,}")
+        log.info(
+            "  → train: %s  val: %s  test: %s",
+            f"{len(oa_train):,}",
+            f"{len(oa_val):,}",
+            f"{len(oa_test):,}",
+        )
     else:
         log.warning("[Dataset] OA Rodilla OMITIDO — falta --oa_root")
 
@@ -182,22 +232,33 @@ def build_datasets(cfg):
 
         # Lee los tres directorios directamente — sin re-dividir
         luna_train = LUNA16Dataset(
-            str(_base / "train"), cfg["luna_csv"], mode="embedding",
+            str(_base / "train"),
+            cfg["luna_csv"],
+            mode="embedding",
         )
         luna_val = LUNA16Dataset(
-            str(_base / "val"), cfg["luna_csv"], mode="embedding",
+            str(_base / "val"),
+            cfg["luna_csv"],
+            mode="embedding",
         )
         luna_test = LUNA16Dataset(
-            str(_base / "test"), cfg["luna_csv"], mode="embedding",
+            str(_base / "test"),
+            cfg["luna_csv"],
+            mode="embedding",
         )
         train_datasets.append(luna_train)
         val_datasets.append(luna_val)
         test_datasets.append(luna_test)
-        log.info("[LUNA16] Splits respetan separación por seriesuid de Fase 0 "
-                 "(tres directorios leídos directamente, sin re-dividir).")
-        log.info("  → train: %s  val: %s  test: %s",
-                 f"{len(luna_train):,}", f"{len(luna_val):,}",
-                 f"{len(luna_test):,}")
+        log.info(
+            "[LUNA16] Splits respetan separación por seriesuid de Fase 0 "
+            "(tres directorios leídos directamente, sin re-dividir)."
+        )
+        log.info(
+            "  → train: %s  val: %s  test: %s",
+            f"{len(luna_train):,}",
+            f"{len(luna_val):,}",
+            f"{len(luna_test):,}",
+        )
     else:
         log.warning("[Dataset] LUNA16 OMITIDO — faltan rutas")
 
@@ -209,8 +270,8 @@ def build_datasets(cfg):
         splits_df = pd.read_csv(cfg["pancreas_splits_csv"])
 
         train_mask = splits_df["split"] == "fold{}_train".format(fold)
-        val_mask   = splits_df["split"] == "fold{}_val".format(fold)
-        test_mask  = splits_df["split"] == "test"
+        val_mask = splits_df["split"] == "fold{}_val".format(fold)
+        test_mask = splits_df["split"] == "test"
 
         nii_dir = Path(cfg["pancreas_nii_dir"])
 
@@ -219,7 +280,7 @@ def build_datasets(cfg):
             pairs = []
             for _, row in splits_df[mask].iterrows():
                 case_id = row["case_id"]
-                label   = int(row["label"])
+                label = int(row["label"])
                 candidates = list(nii_dir.rglob("*{}*.nii.gz".format(case_id)))
                 if not candidates:
                     candidates = list(nii_dir.rglob("*{}*.nii".format(case_id)))
@@ -229,38 +290,50 @@ def build_datasets(cfg):
 
         roi = cfg.get("pancreas_roi_strategy", "A")
         panc_train_pairs = _build_pairs(train_mask)
-        panc_val_pairs   = _build_pairs(val_mask)
-        panc_test_pairs  = _build_pairs(test_mask)
+        panc_val_pairs = _build_pairs(val_mask)
+        panc_test_pairs = _build_pairs(test_mask)
 
         if panc_train_pairs:
             panc_train = PancreasDataset(
-                panc_train_pairs, mode="embedding", roi_strategy=roi,
+                panc_train_pairs,
+                mode="embedding",
+                roi_strategy=roi,
             )
             panc_val = PancreasDataset(
-                panc_val_pairs, mode="embedding", roi_strategy=roi,
+                panc_val_pairs,
+                mode="embedding",
+                roi_strategy=roi,
             )
             panc_test = PancreasDataset(
-                panc_test_pairs, mode="embedding", roi_strategy=roi,
+                panc_test_pairs,
+                mode="embedding",
+                roi_strategy=roi,
             )
             train_datasets.append(panc_train)
             val_datasets.append(panc_val)
             test_datasets.append(panc_test)
-            log.info("  → train: %s  val: %s  test: %s",
-                     f"{len(panc_train):,}", f"{len(panc_val):,}",
-                     f"{len(panc_test):,}")
+            log.info(
+                "  → train: %s  val: %s  test: %s",
+                f"{len(panc_train):,}",
+                f"{len(panc_val):,}",
+                f"{len(panc_test):,}",
+            )
         else:
             log.error("[Pancreas] Sin pares válidos — verificar splits y NIfTIs")
     else:
         log.warning("[Dataset] Páncreas OMITIDO — faltan rutas")
 
     # ── Experto 5 (OOD) — sin dataset ───────────────────────
-    log.info("[Dataset] Experto 5 (OOD) — sin dataset en Fase 1. "
-             "Se inicializa en Fase 2.")
+    log.info(
+        "[Dataset] Experto 5 (OOD) — sin dataset en Fase 1. Se inicializa en Fase 2."
+    )
 
     # ── Verificaciones transversales ────────────────────────
-    for split_name, ds_list in [("train", train_datasets),
-                                 ("val", val_datasets),
-                                 ("test", test_datasets)]:
+    for split_name, ds_list in [
+        ("train", train_datasets),
+        ("val", val_datasets),
+        ("test", test_datasets),
+    ]:
         sizes = [len(d) for d in ds_list]
         if sizes:
             log.info("[Dataset] Tamaños %s por experto: %s", split_name, sizes)
@@ -270,19 +343,22 @@ def build_datasets(cfg):
                 if ratio > MAX_IMBALANCE:
                     log.warning(
                         "[Dataset/%s] Balance desigual: max/min = %.1fx",
-                        split_name, ratio,
+                        split_name,
+                        ratio,
                     )
                 else:
-                    log.info("[Dataset/%s] ratio max/min = %.1fx",
-                             split_name, ratio)
+                    log.info("[Dataset/%s] ratio max/min = %.1fx", split_name, ratio)
             zero_idx = [i for i, s in enumerate(sizes) if s == 0]
             if zero_idx:
-                log.warning("[Dataset/%s] Expertos con 0 muestras: %s",
-                            split_name, zero_idx)
+                log.warning(
+                    "[Dataset/%s] Expertos con 0 muestras: %s", split_name, zero_idx
+                )
 
     if not train_datasets:
-        log.error("[Dataset] ¡Ningún dataset cargado! "
-                  "Verifica que al menos una ruta sea válida.")
+        log.error(
+            "[Dataset] ¡Ningún dataset cargado! "
+            "Verifica que al menos una ruta sea válida."
+        )
 
     return (
         ConcatDataset(train_datasets),

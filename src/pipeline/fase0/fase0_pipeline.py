@@ -479,6 +479,7 @@ def paso7_cvt13(dry_run=False):
         log.info(
             "  ✓ Compatibilidad CvT-13 → src/pipeline/fase1/backbone_cvt13.py (nativo)"
         )
+        return {"status": "✅", "native": True}
     else:
         log.info(
             "  ⚠ backbone_cvt13.py no encontrado en src/pipeline/fase1/ — "

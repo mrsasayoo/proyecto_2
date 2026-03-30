@@ -458,16 +458,39 @@ class PancreasDataset(Dataset):
     def build_kfold_splits(
         valid_pairs: list, k: int = 5, random_state: int = 42
     ) -> list:
-        """H5/Item-8 — Genera k folds estratificados para cross-validation."""
-        from sklearn.model_selection import StratifiedKFold
+        """
+        H5/Item-8 — Genera k folds estratificados para cross-validation.
+
+        CORRECCIÓN CRÍTICA (2026-03-26):
+          Antes: StratifiedKFold sin agrupación por paciente → leakage por patient_id
+          Ahora: StratifiedGroupKFold agrupa todos los volúmenes de un paciente juntos
+
+        Ejemplo de riesgo prevenido:
+          Paciente 100047 tiene 5 volúmenes (todos PDAC+). Con StratifiedKFold,
+          algunos podrían caer en train, otros en val → modelo ve "mismo paciente"
+          dos veces → métricas infladas. StratifiedGroupKFold previene esto.
+        """
+        from sklearn.model_selection import StratifiedGroupKFold
+        from pathlib import Path
 
         paths = [p for p, _ in valid_pairs]
         labels = [l for _, l in valid_pairs]
 
-        skf = StratifiedKFold(n_splits=k, shuffle=True, random_state=random_state)
+        # Extraer patient_id del nombre del archivo (primeros 6 dígitos antes de primer _)
+        # Formato: {patient_id}_{study_id}_{channel_id}.nii.gz
+        # Ej: 100047_00001_0000.nii.gz → patient_id = 100047
+        patient_ids = []
+        for path in paths:
+            filename = Path(path).name.split(".nii")[0]  # Elimina .nii.gz
+            patient_id = filename.split("_")[0]  # Toma primer componente
+            patient_ids.append(patient_id)
+
+        sgkf = StratifiedGroupKFold(n_splits=k, shuffle=True, random_state=random_state)
         folds = []
 
-        for fold_idx, (train_idx, val_idx) in enumerate(skf.split(paths, labels)):
+        for fold_idx, (train_idx, val_idx) in enumerate(
+            sgkf.split(paths, labels, groups=patient_ids)
+        ):
             train_pairs = [valid_pairs[i] for i in train_idx]
             val_pairs = [valid_pairs[i] for i in val_idx]
 
@@ -476,11 +499,27 @@ class PancreasDataset(Dataset):
             n_pos_va = sum(1 for _, l in val_pairs if l == 1)
             n_neg_va = sum(1 for _, l in val_pairs if l == 0)
 
-            log.info(
-                f"[Pancreas/kfold] Fold {fold_idx + 1}/{k}: "
-                f"train={len(train_pairs):,} (pos={n_pos_tr}, neg={n_neg_tr}) | "
-                f"val={len(val_pairs):,} (pos={n_pos_va}, neg={n_neg_va})"
+            # Contar pacientes únicos en cada fold para verificar no hay leakage
+            train_patients = set(
+                Path(p).name.split(".nii")[0].split("_")[0] for p, _ in train_pairs
             )
+            val_patients = set(
+                Path(p).name.split(".nii")[0].split("_")[0] for p, _ in val_pairs
+            )
+            patient_intersection = train_patients & val_patients
+
+            if patient_intersection:
+                log.error(
+                    f"[Pancreas/kfold] ⚠ LEAKAGE DETECTADO en Fold {fold_idx + 1}: "
+                    f"Pacientes en ambos train y val: {patient_intersection}. "
+                    f"Esto indica un error en StratifiedGroupKFold."
+                )
+            else:
+                log.info(
+                    f"[Pancreas/kfold] Fold {fold_idx + 1}/{k}: "
+                    f"train={len(train_pairs):,} ({len(train_patients)} pacientes, pos={n_pos_tr}, neg={n_neg_tr}) | "
+                    f"val={len(val_pairs):,} ({len(val_patients)} pacientes, pos={n_pos_va}, neg={n_neg_va})"
+                )
             folds.append((train_pairs, val_pairs))
 
         return folds

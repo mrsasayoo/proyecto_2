@@ -18,14 +18,15 @@ src/pipeline/config.py global.
 # │ cvt_13                           │   384   │  ~3GB │ Balance intermedio          │
 # └──────────────────────────────────┴─────────┴───────┴─────────────────────────────┘
 BACKBONE_CONFIGS = {
-    "vit_tiny_patch16_224":         {"d_model": 192, "vram_gb": 2.0},
+    "vit_tiny_patch16_224": {"d_model": 192, "vram_gb": 2.0},
     "swin_tiny_patch4_window7_224": {"d_model": 768, "vram_gb": 4.0},
-    "cvt_13":                       {"d_model": 384, "vram_gb": 3.0},
+    "cvt_13": {"d_model": 384, "vram_gb": 3.0},
+    "densenet121_custom": {"d_model": 1024, "vram_gb": 3.0},
 }
 
 # ── Normalización ImageNet ──────────────────────────────────
 IMAGENET_MEAN = [0.485, 0.456, 0.406]
-IMAGENET_STD  = [0.229, 0.224, 0.225]
+IMAGENET_STD = [0.229, 0.224, 0.225]
 
 # ── Ventanas HU por tipo de CT ──────────────────────────────
 # LUNA16: aire puro (-1000) hasta límite óseo (+400)
@@ -36,9 +37,9 @@ HU_ABDOMEN_CLIP = (-100, 400)
 
 # ── Parámetros por defecto del extractor ────────────────────
 DEFAULT_BATCH_SIZE = 64
-DEFAULT_WORKERS    = 4
-IMG_SIZE           = 224
-PATCH_3D_SIZE      = (64, 64, 64)
+DEFAULT_WORKERS = 4
+IMG_SIZE = 224
+PATCH_3D_SIZE = (64, 64, 64)
 
 # ── Umbrales de sanidad ────────────────────────────────────
 # Norma L2 media mínima antes de emitir alerta sobre CLS token
@@ -46,9 +47,15 @@ MIN_L2_NORM = 1.0
 # Ratio max/min de muestras entre expertos antes de advertencia
 MAX_IMBALANCE = 10.0
 
-# ── CLAHE (OA Rodilla) ─────────────────────────────────────
+# ── Preprocesamiento 2D (§6.2) ─────────────────────────────
+# Total Variation Filter: intensidad del suavizado (λ en la formulación TV)
+TVF_WEIGHT = 10.0
+TVF_N_ITER = 30
+# Corrección gamma: rango clínico 0.8–1.2, 1.0 = identidad
+DEFAULT_GAMMA = 1.0
+# CLAHE (Contrast Limited Adaptive Histogram Equalization)
 CLAHE_CLIP_LIMIT = 2.0
-CLAHE_TILE_GRID  = (8, 8)
+CLAHE_TILE_GRID = (8, 8)
 
 # ── Páncreas k-fold ────────────────────────────────────────
 # Fold del k-fold CV (generado por Fase 0) usado para train/val en Fase 1
@@ -56,6 +63,13 @@ PANCREAS_FOLD = 1
 
 # ── Claves esperadas en backbone_meta.json ──────────────────
 # Contrato de interfaz entre Fase 1 (escritor) y Fase 2 (lector)
-BACKBONE_META_KEYS = frozenset({
-    "backbone", "d_model", "n_train", "n_val", "n_test", "vram_gb",
-})
+BACKBONE_META_KEYS = frozenset(
+    {
+        "backbone",
+        "d_model",
+        "n_train",
+        "n_val",
+        "n_test",
+        "vram_gb",
+    }
+)

@@ -27,7 +27,11 @@ from pathlib import Path
 
 import numpy as np
 import pandas as pd
-from sklearn.model_selection import train_test_split, StratifiedShuffleSplit, StratifiedKFold
+from sklearn.model_selection import (
+    train_test_split,
+    StratifiedShuffleSplit,
+    StratifiedKFold,
+)
 from PIL import Image
 
 log = logging.getLogger("fase0.pre_modelo")
@@ -38,6 +42,7 @@ SEED = 42
 # ══════════════════════════════════════════════════════════════════════════════
 #  NIH ChestXray14 — Split 80/10/10 por patient_id
 # ══════════════════════════════════════════════════════════════════════════════
+
 
 def split_nih(datasets_dir):
     # type: (Path) -> dict
@@ -59,14 +64,22 @@ def split_nih(datasets_dir):
         return {"status": "✅", "skipped": True, **counts}
 
     df = pd.read_csv(nih / "Data_Entry_2017.csv")
-    tv_imgs = [l.strip() for l in
-               (nih / "train_val_list.txt").read_text().split("\n") if l.strip()]
-    te_imgs = [l.strip() for l in
-               (nih / "test_list.txt").read_text().split("\n") if l.strip()]
+    tv_imgs = [
+        l.strip()
+        for l in (nih / "train_val_list.txt").read_text().split("\n")
+        if l.strip()
+    ]
+    te_imgs = [
+        l.strip() for l in (nih / "test_list.txt").read_text().split("\n") if l.strip()
+    ]
 
     total = len(tv_imgs) + len(te_imgs)
-    log.info("[NIH] train_val: %d imgs | test oficial: %d imgs | total: %d",
-             len(tv_imgs), len(te_imgs), total)
+    log.info(
+        "[NIH] train_val: %d imgs | test oficial: %d imgs | total: %d",
+        len(tv_imgs),
+        len(te_imgs),
+        total,
+    )
 
     img2pid = dict(zip(df["Image Index"], df["Patient ID"]))
     img2labels = dict(zip(df["Image Index"], df["Finding Labels"]))
@@ -74,7 +87,9 @@ def split_nih(datasets_dir):
     # Verificar si el test oficial excede 12% del total
     test_pct = len(te_imgs) / total
     if test_pct > 0.12:
-        log.info("[NIH] Test oficial = %.1f%% > 12%% — reduciendo a 10%%.", test_pct * 100)
+        log.info(
+            "[NIH] Test oficial = %.1f%% > 12%% — reduciendo a 10%%.", test_pct * 100
+        )
         # Agrupar test por patient_id
         test_pid_imgs = defaultdict(list)
         for img in te_imgs:
@@ -103,8 +118,11 @@ def split_nih(datasets_dir):
 
         te_imgs = [img for img in te_imgs if img2pid.get(img) in keep_test_pids]
         tv_imgs = tv_imgs + overflow_imgs
-        log.info("[NIH] Test reducido: %d imgs | Pool train_val: %d imgs",
-                 len(te_imgs), len(tv_imgs))
+        log.info(
+            "[NIH] Test reducido: %d imgs | Pool train_val: %d imgs",
+            len(te_imgs),
+            len(tv_imgs),
+        )
 
     # Agrupar train_val por patient_id
     pid_imgs = defaultdict(list)
@@ -166,7 +184,12 @@ def split_nih(datasets_dir):
         "test": len(te_imgs),
         "total": len(train_list) + len(val_list) + len(te_imgs),
     }
-    log.info("[NIH] Splits: train=%d val=%d test=%d (overlap=0)", r["train"], r["val"], r["test"])
+    log.info(
+        "[NIH] Splits: train=%d val=%d test=%d (overlap=0)",
+        r["train"],
+        r["val"],
+        r["test"],
+    )
     return r
 
 
@@ -174,12 +197,19 @@ def split_nih(datasets_dir):
 #  ISIC 2019 — Split 80/10/10 por lesion_id
 # ══════════════════════════════════════════════════════════════════════════════
 
+
 def split_isic(datasets_dir):
     # type: (Path) -> dict
     """Genera splits 80/10/10 por lesion_id con estratificación por clase."""
     CLASS_TO_IDX = {
-        "MEL": 0, "NV": 1, "BCC": 2, "AK": 3,
-        "BKL": 4, "DF": 5, "VASC": 6, "SCC": 7,
+        "MEL": 0,
+        "NV": 1,
+        "BCC": 2,
+        "AK": 3,
+        "BKL": 4,
+        "DF": 5,
+        "VASC": 6,
+        "SCC": 7,
     }
 
     isic = datasets_dir / "isic_2019"
@@ -211,8 +241,11 @@ def split_isic(datasets_dir):
         lambda x: "SOLO_{}".format(x)
     )
 
-    log.info("[ISIC] Total imágenes: %d | Lesiones únicas: %d",
-             len(merged), merged["lesion_id"].nunique())
+    log.info(
+        "[ISIC] Total imágenes: %d | Lesiones únicas: %d",
+        len(merged),
+        merged["lesion_id"].nunique(),
+    )
 
     # Clase por lesión (moda)
     lesion_class = (
@@ -228,20 +261,29 @@ def split_isic(datasets_dir):
     # 80/10/10
     try:
         train_les, temp_les, _, temp_cls = train_test_split(
-            les_ids, les_cls, test_size=0.20,
-            stratify=les_cls, random_state=SEED,
+            les_ids,
+            les_cls,
+            test_size=0.20,
+            stratify=les_cls,
+            random_state=SEED,
         )
         val_les, test_les = train_test_split(
-            temp_les, test_size=0.50,
-            stratify=temp_cls, random_state=SEED,
+            temp_les,
+            test_size=0.50,
+            stratify=temp_cls,
+            random_state=SEED,
         )
     except ValueError:
         log.warning("[ISIC] Stratified split falló — usando split aleatorio")
         train_les, temp_les = train_test_split(
-            les_ids, test_size=0.20, random_state=SEED,
+            les_ids,
+            test_size=0.20,
+            random_state=SEED,
         )
         val_les, test_les = train_test_split(
-            temp_les, test_size=0.50, random_state=SEED,
+            temp_les,
+            test_size=0.50,
+            random_state=SEED,
         )
 
     sets = {
@@ -270,26 +312,39 @@ def split_isic(datasets_dir):
         sub = merged[merged["lesion_id"].isin(ids)]
         n_classes = sub["label_name"].nunique()
         if n_classes < len(CLASS_TO_IDX):
-            log.warning("[ISIC] Split %s solo tiene %d de %d clases.",
-                        name, n_classes, len(CLASS_TO_IDX))
+            log.warning(
+                "[ISIC] Split %s solo tiene %d de %d clases.",
+                name,
+                n_classes,
+                len(CLASS_TO_IDX),
+            )
 
     # Verificar proporciones ±2%
     for name, count in counts.items():
         target = 0.80 if name == "train" else 0.10
         actual = count / total
         if abs(actual - target) > 0.02:
-            log.warning("[ISIC] Split %s: %.1f%% (objetivo: %.0f%%)",
-                        name, actual * 100, target * 100)
+            log.warning(
+                "[ISIC] Split %s: %.1f%% (objetivo: %.0f%%)",
+                name,
+                actual * 100,
+                target * 100,
+            )
 
     r = {"status": "✅", **counts, "total": total, "classes": active_classes}
-    log.info("[ISIC] Splits: train=%d val=%d test=%d (overlap=0)",
-             counts["train"], counts["val"], counts["test"])
+    log.info(
+        "[ISIC] Splits: train=%d val=%d test=%d (overlap=0)",
+        counts["train"],
+        counts["val"],
+        counts["test"],
+    )
     return r
 
 
 # ══════════════════════════════════════════════════════════════════════════════
 #  Osteoarthritis — Helpers de similitud de imagen
 # ══════════════════════════════════════════════════════════════════════════════
+
 
 def _compute_fingerprint_oa(img_path, size=16):
     # type: (Path, int) -> np.ndarray|None
@@ -428,16 +483,20 @@ def _group_by_similarity(files, threshold=0.12, fingerprint_size=16):
     sizes = [len(g) for g in groups]
     n_solo = sum(1 for s in sizes if s == 1)
     n_multi = n_groups - n_solo
-    avg_multi = (
-        sum(s for s in sizes if s > 1) / max(n_multi, 1)
-    )
+    avg_multi = sum(s for s in sizes if s > 1) / max(n_multi, 1)
 
     log.info(
         "[OA/similitud] %d imágenes → %d grupos pseudo-paciente "
         "(umbral=%.2f) | solos=%d | multi=%d (avg %.1f imgs/grupo) | "
         "pares agrupados=%d | fallidos=%d",
-        n, n_groups, threshold, n_solo, n_multi, avg_multi,
-        pairs_found, len(failed_indices),
+        n,
+        n_groups,
+        threshold,
+        n_solo,
+        n_multi,
+        avg_multi,
+        pairs_found,
+        len(failed_indices),
     )
 
     return groups
@@ -446,6 +505,7 @@ def _group_by_similarity(files, threshold=0.12, fingerprint_size=16):
 # ══════════════════════════════════════════════════════════════════════════════
 #  Osteoarthritis — Split 80/10/10 por grupo de similitud
 # ══════════════════════════════════════════════════════════════════════════════
+
 
 def split_oa(datasets_dir, similarity_threshold=0.12, fingerprint_size=16):
     # type: (Path, float, int) -> dict
@@ -537,7 +597,9 @@ def split_oa(datasets_dir, similarity_threshold=0.12, fingerprint_size=16):
         if not files:
             continue
 
-        log.info("[OA] Clase %d — agrupando %d imágenes por similitud...", cls, len(files))
+        log.info(
+            "[OA] Clase %d — agrupando %d imágenes por similitud...", cls, len(files)
+        )
 
         # Agrupar imágenes del mismo paciente/rodilla
         groups = _group_by_similarity(
@@ -561,7 +623,8 @@ def split_oa(datasets_dir, similarity_threshold=0.12, fingerprint_size=16):
             # Muy pocos grupos — split naive por imagen como fallback
             log.warning(
                 "[OA] Clase %d: solo %d grupos — usando split naive por imagen.",
-                cls, n_groups,
+                cls,
+                n_groups,
             )
             rng = np.random.default_rng(SEED)
             files_arr = list(files)
@@ -571,8 +634,8 @@ def split_oa(datasets_dir, similarity_threshold=0.12, fingerprint_size=16):
             n_va = int(0.10 * n)
             splits_files = {
                 "train": files_arr[:n_tr],
-                "val":   files_arr[n_tr:n_tr + n_va],
-                "test":  files_arr[n_tr + n_va:],
+                "val": files_arr[n_tr : n_tr + n_va],
+                "test": files_arr[n_tr + n_va :],
             }
             for split_name, imgs in splits_files.items():
                 d = splits_dir / split_name / str(cls)
@@ -582,38 +645,31 @@ def split_oa(datasets_dir, similarity_threshold=0.12, fingerprint_size=16):
                 counts[split_name] += len(imgs)
             continue
 
-        # Split estratificado a nivel de grupo
-        group_indices = list(range(n_groups))
-        try:
-            tr_idx, temp_idx, _, temp_cls = train_test_split(
-                group_indices, group_classes,
-                test_size=0.20,
-                stratify=group_classes,
-                random_state=SEED,
-            )
-            val_idx, test_idx = train_test_split(
-                temp_idx,
-                test_size=0.50,
-                stratify=temp_cls,
-                random_state=SEED,
-            )
-        except ValueError:
-            # Clases insuficientes para estratificación — split aleatorio
-            log.warning("[OA] Clase %d: stratified split falló — usando aleatorio.", cls)
-            tr_idx, temp_idx = train_test_split(
-                group_indices, test_size=0.20, random_state=SEED,
-            )
-            val_idx, test_idx = train_test_split(
-                temp_idx, test_size=0.50, random_state=SEED,
-            )
+        # Split ponderado por tamaño de grupo para alcanzar 80/10/10
+        # en imágenes (no solo en grupos). Se barajan los grupos y se
+        # asignan greedily al split que más lejos esté de su objetivo.
+        total_cls_imgs = sum(len(g) for g in groups)
+        targets = {
+            "train": 0.80 * total_cls_imgs,
+            "val": 0.10 * total_cls_imgs,
+            "test": 0.10 * total_cls_imgs,
+        }
+        filled = {"train": 0, "val": 0, "test": 0}
+
+        rng = np.random.default_rng(SEED)
+        order = list(range(n_groups))
+        rng.shuffle(order)
 
         assignment = {}
-        for idx in tr_idx:
-            assignment[idx] = "train"
-        for idx in val_idx:
-            assignment[idx] = "val"
-        for idx in test_idx:
-            assignment[idx] = "test"
+        for idx in order:
+            g_size = len(groups[idx])
+            # Elegir el split con mayor déficit relativo
+            best = max(
+                targets,
+                key=lambda s: targets[s] - filled[s],
+            )
+            assignment[idx] = best
+            filled[best] += g_size
 
         # Copiar imágenes según el split asignado a su grupo
         for group_idx, group_imgs in enumerate(groups):
@@ -642,7 +698,9 @@ def split_oa(datasets_dir, similarity_threshold=0.12, fingerprint_size=16):
             log.warning(
                 "[OA] Split %s: %.1f%% (objetivo %.0f%%) — desviación > 5%%. "
                 "Normal si hay pocos grupos por clase.",
-                split_name, actual * 100, target * 100,
+                split_name,
+                actual * 100,
+                target * 100,
             )
 
     r = {
@@ -654,7 +712,8 @@ def split_oa(datasets_dir, similarity_threshold=0.12, fingerprint_size=16):
         "similarity_threshold": similarity_threshold,
         "note": (
             "Split por grupos de similitud inferidos (pseudo-patient_id). "
-            "Umbral=%.2f. Reducción media: %.1f imgs/grupo." % (
+            "Umbral=%.2f. Reducción media: %.1f imgs/grupo."
+            % (
                 similarity_threshold,
                 total_images / max(total_groups, 1),
             )
@@ -663,8 +722,11 @@ def split_oa(datasets_dir, similarity_threshold=0.12, fingerprint_size=16):
     log.info(
         "[OA] Splits finales: train=%d val=%d test=%d | "
         "%d grupos pseudo-paciente inferidos de %d imágenes",
-        counts["train"], counts["val"], counts["test"],
-        total_groups, total_images,
+        counts["train"],
+        counts["val"],
+        counts["test"],
+        total_groups,
+        total_images,
     )
     return r
 
@@ -672,6 +734,7 @@ def split_oa(datasets_dir, similarity_threshold=0.12, fingerprint_size=16):
 # ══════════════════════════════════════════════════════════════════════════════
 #  LUNA16 — Split 80/10/10 por seriesuid
 # ══════════════════════════════════════════════════════════════════════════════
+
 
 def split_luna(datasets_dir):
     # type: (Path) -> dict
@@ -691,8 +754,11 @@ def split_luna(datasets_dir):
         return {"status": "warning", "reason": "sin CTs"}
 
     all_uids = sorted(set(p.stem for p in mhd_files))
-    log.info("[LUNA] %d seriesuids encontrados en %d archivos .mhd",
-             len(all_uids), len(mhd_files))
+    log.info(
+        "[LUNA] %d seriesuids encontrados en %d archivos .mhd",
+        len(all_uids),
+        len(mhd_files),
+    )
 
     rng = np.random.default_rng(SEED)
     uids_arr = np.array(all_uids)
@@ -703,8 +769,8 @@ def split_luna(datasets_dir):
     n_val = int(0.10 * n_total)
 
     test_uids = uids_arr[:n_test].tolist()
-    val_uids = uids_arr[n_test:n_test + n_val].tolist()
-    train_uids = uids_arr[n_test + n_val:].tolist()
+    val_uids = uids_arr[n_test : n_test + n_val].tolist()
+    train_uids = uids_arr[n_test + n_val :].tolist()
 
     # Verificar no-overlap
     assert not (set(train_uids) & set(val_uids)), "Overlap LUNA train/val!"
@@ -726,14 +792,20 @@ def split_luna(datasets_dir):
         "test": len(test_uids),
         "total": n_total,
     }
-    log.info("[LUNA] Splits: train=%d val=%d test=%d (total=%d)",
-             r["train"], r["val"], r["test"], r["total"])
+    log.info(
+        "[LUNA] Splits: train=%d val=%d test=%d (total=%d)",
+        r["train"],
+        r["val"],
+        r["test"],
+        r["total"],
+    )
     return r
 
 
 # ══════════════════════════════════════════════════════════════════════════════
 #  Pancreas PANORAMA — 10% test fijo + k-fold (k=5) sobre 90%
 # ══════════════════════════════════════════════════════════════════════════════
+
 
 def split_pancreas(datasets_dir):
     # type: (Path) -> dict
@@ -750,34 +822,51 @@ def split_pancreas(datasets_dir):
         return {"status": "✅", "skipped": True}
 
     if not csv_path.exists():
-        log.warning("[PANCREAS] pancreas_labels_binary.csv no existe — split pendiente.")
+        log.warning(
+            "[PANCREAS] pancreas_labels_binary.csv no existe — split pendiente."
+        )
         return {"status": "warning", "reason": "sin etiquetas binarias"}
 
     df = pd.read_csv(csv_path)
     # Filtrar solo los que tienen etiqueta válida
     df_valid = df[df["label"] >= 0].copy()
-    log.info("[PANCREAS] %d volúmenes con etiqueta válida (de %d total)",
-             len(df_valid), len(df))
+    log.info(
+        "[PANCREAS] %d volúmenes con etiqueta válida (de %d total)",
+        len(df_valid),
+        len(df),
+    )
 
-    case_ids = df_valid["case_id"].values
-    labels = df_valid["label"].values
+    case_ids = df_valid["case_id"].astype(str).tolist()
+    labels = df_valid["label"].astype(int).tolist()
 
     # 10% test fijo
     try:
         remain_ids, test_ids, remain_labels, _ = train_test_split(
-            case_ids, labels, test_size=0.10,
-            stratify=labels, random_state=SEED,
+            case_ids,
+            labels,
+            test_size=0.10,
+            stratify=labels,
+            random_state=SEED,
         )
     except ValueError:
         remain_ids, test_ids, remain_labels, _ = train_test_split(
-            case_ids, labels, test_size=0.10, random_state=SEED,
+            case_ids,
+            labels,
+            test_size=0.10,
+            random_state=SEED,
         )
+
+    remain_ids = list(remain_ids)
+    test_ids = list(test_ids)
+    remain_labels = list(remain_labels)
 
     # k-fold (k=5) sobre el 90% restante
     skf = StratifiedKFold(n_splits=5, shuffle=True, random_state=SEED)
     fold_assignments = {}
 
-    for fold_idx, (train_idx, val_idx) in enumerate(skf.split(remain_ids, remain_labels), 1):
+    for fold_idx, (train_idx, val_idx) in enumerate(
+        skf.split(remain_ids, remain_labels), 1
+    ):
         for i in train_idx:
             cid = remain_ids[i]
             if cid not in fold_assignments:
@@ -808,8 +897,11 @@ def split_pancreas(datasets_dir):
 
     n_test = len(test_ids)
     n_remain = len(remain_ids)
-    log.info("[PANCREAS] Splits: test=%d (fijo) | train/val=5-fold sobre %d",
-             n_test, n_remain)
+    log.info(
+        "[PANCREAS] Splits: test=%d (fijo) | train/val=5-fold sobre %d",
+        n_test,
+        n_remain,
+    )
     return {
         "status": "✅",
         "test": n_test,
@@ -821,6 +913,7 @@ def split_pancreas(datasets_dir):
 # ══════════════════════════════════════════════════════════════════════════════
 #  CAE — Agregado de todos los datasets
 # ══════════════════════════════════════════════════════════════════════════════
+
 
 def build_cae_splits(datasets_dir):
     # type: (Path) -> dict
@@ -840,21 +933,25 @@ def build_cae_splits(datasets_dir):
     luna_dir = datasets_dir / "luna_lung_cancer"
 
     # NIH
-    for split_name, fname in [("train", "nih_train_list.txt"),
-                               ("val", "nih_val_list.txt"),
-                               ("test", "nih_test_list.txt")]:
+    for split_name, fname in [
+        ("train", "nih_train_list.txt"),
+        ("val", "nih_val_list.txt"),
+        ("test", "nih_test_list.txt"),
+    ]:
         fpath = nih_dir / "splits" / fname
         if fpath.exists():
             for line in fpath.read_text().strip().split("\n"):
                 img = line.strip()
                 if img:
-                    rows.append({
-                        "ruta_imagen": str(nih_dir / "all_images" / img),
-                        "dataset_origen": "nih",
-                        "split": split_name,
-                        "expert_id": 0,
-                        "tipo_dato": "2d_image",
-                    })
+                    rows.append(
+                        {
+                            "ruta_imagen": str(nih_dir / "all_images" / img),
+                            "dataset_origen": "nih",
+                            "split": split_name,
+                            "expert_id": 0,
+                            "tipo_dato": "2d_image",
+                        }
+                    )
 
     # ISIC
     for split_name in ["train", "val", "test"]:
@@ -863,13 +960,20 @@ def build_cae_splits(datasets_dir):
             df = pd.read_csv(fpath)
             for _, row in df.iterrows():
                 img_name = row["image"]
-                rows.append({
-                    "ruta_imagen": str(isic_dir / "isic_images" / (img_name + ".jpg")),
-                    "dataset_origen": "isic",
-                    "split": split_name,
-                    "expert_id": 1,
-                    "tipo_dato": "2d_image",
-                })
+                rows.append(
+                    {
+                        "ruta_imagen": str(
+                            isic_dir
+                            / "ISIC_2019_Training_Input"
+                            / "ISIC_2019_Training_Input"
+                            / (img_name + ".jpg")
+                        ),
+                        "dataset_origen": "isic",
+                        "split": split_name,
+                        "expert_id": 1,
+                        "tipo_dato": "2d_image",
+                    }
+                )
 
     # OA
     splits_path = oa_dir / "oa_splits"
@@ -879,13 +983,15 @@ def build_cae_splits(datasets_dir):
             if split_dir.exists():
                 for img in sorted(split_dir.rglob("*.*")):
                     if img.suffix.lower() in {".jpg", ".png", ".jpeg"}:
-                        rows.append({
-                            "ruta_imagen": str(img),
-                            "dataset_origen": "oa",
-                            "split": split_name,
-                            "expert_id": 2,
-                            "tipo_dato": "2d_image",
-                        })
+                        rows.append(
+                            {
+                                "ruta_imagen": str(img),
+                                "dataset_origen": "oa",
+                                "split": split_name,
+                                "expert_id": 2,
+                                "tipo_dato": "2d_image",
+                            }
+                        )
 
     # LUNA (parches .npy)
     patches_dir = luna_dir / "patches"
@@ -893,13 +999,15 @@ def build_cae_splits(datasets_dir):
         split_dir = patches_dir / split_name
         if split_dir.exists():
             for npy in sorted(split_dir.glob("candidate_*.npy")):
-                rows.append({
-                    "ruta_imagen": str(npy),
-                    "dataset_origen": "luna",
-                    "split": split_name,
-                    "expert_id": 3,
-                    "tipo_dato": "3d_patch_npy",
-                })
+                rows.append(
+                    {
+                        "ruta_imagen": str(npy),
+                        "dataset_origen": "luna",
+                        "split": split_name,
+                        "expert_id": 3,
+                        "tipo_dato": "3d_patch_npy",
+                    }
+                )
 
     # Pancreas (volúmenes .nii.gz con preprocesado on-the-fly)
     pancreas_splits = datasets_dir / "pancreas_splits.csv"
@@ -919,13 +1027,15 @@ def build_cae_splits(datasets_dir):
             # Buscar el archivo .nii.gz correspondiente
             nii_candidates = list(zenodo_dir.glob("{}*.nii.gz".format(prow["case_id"])))
             for nii in nii_candidates:
-                rows.append({
-                    "ruta_imagen": str(nii),
-                    "dataset_origen": "pancreas",
-                    "split": norm_split,
-                    "expert_id": 4,
-                    "tipo_dato": "3d_volume_nifti",
-                })
+                rows.append(
+                    {
+                        "ruta_imagen": str(nii),
+                        "dataset_origen": "pancreas",
+                        "split": norm_split,
+                        "expert_id": 4,
+                        "tipo_dato": "3d_volume_nifti",
+                    }
+                )
 
     if not rows:
         log.warning("[CAE] No se encontraron datos para construir cae_splits.csv.")
@@ -936,14 +1046,24 @@ def build_cae_splits(datasets_dir):
 
     by_split = cae_df.groupby("split").size().to_dict()
     by_dataset = cae_df.groupby("dataset_origen").size().to_dict()
-    log.info("[CAE] cae_splits.csv: %d filas | Splits: %s | Datasets: %s",
-             len(cae_df), by_split, by_dataset)
-    return {"status": "✅", "total": len(cae_df), "by_split": by_split, "by_dataset": by_dataset}
+    log.info(
+        "[CAE] cae_splits.csv: %d filas | Splits: %s | Datasets: %s",
+        len(cae_df),
+        by_split,
+        by_dataset,
+    )
+    return {
+        "status": "✅",
+        "total": len(cae_df),
+        "by_split": by_split,
+        "by_dataset": by_dataset,
+    }
 
 
 # ══════════════════════════════════════════════════════════════════════════════
 #  Orquestador de splits
 # ══════════════════════════════════════════════════════════════════════════════
+
 
 def run_splits(datasets_dir, active):
     # type: (Path, set) -> dict
@@ -991,5 +1111,11 @@ def run_splits(datasets_dir, active):
     except Exception as e:
         log.error("[CAE] Error construyendo cae_splits.csv: %s", e)
         results["cae"] = {"status": "error", "error": str(e)}
+
+    # Calcular status global
+    has_error = any(
+        v.get("status") == "error" for v in results.values() if isinstance(v, dict)
+    )
+    results["status"] = "⚠️" if has_error else "✅"
 
     return results

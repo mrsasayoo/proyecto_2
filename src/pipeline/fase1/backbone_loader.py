@@ -6,6 +6,9 @@ Responsabilidad única: recibir un nombre de backbone y devolver un
 modelo en modo inferencia pura, con todos los parámetros congelados
 y la dimensión de salida verificada empíricamente.
 
+Los backbones se construyen desde cero (pesos aleatorios) para cumplir
+con el requisito del proyecto de no usar pesos preentrenados.
+
 No sabe nada de CvT-13 específicamente — la compatibilidad se activa
 importando backbone_cvt13 antes de llamar a este módulo.
 """
@@ -22,7 +25,7 @@ log = logging.getLogger("fase1")
 
 def load_frozen_backbone(backbone_name="vit_tiny_patch16_224", device="cuda"):
     """
-    Carga un backbone ViT/Swin/CvT preentrenado (timm) y lo congela.
+    Carga un backbone ViT/Swin/CvT desde cero (sin pesos preentrenados) y lo congela.
 
     Returns:
         model   — backbone listo para inferencia en `device`
@@ -35,15 +38,16 @@ def load_frozen_backbone(backbone_name="vit_tiny_patch16_224", device="cuda"):
         )
 
     expected_d = BACKBONE_CONFIGS[backbone_name]["d_model"]
-    vram_est   = BACKBONE_CONFIGS[backbone_name]["vram_gb"]
+    vram_est = BACKBONE_CONFIGS[backbone_name]["vram_gb"]
     log.info("[Backbone] Seleccionado  : %s", backbone_name)
     log.info("[Backbone] d_model esp.  : %d", expected_d)
     log.info("[Backbone] VRAM estimada : ~%.1f GB", vram_est)
 
+    # Construir modelo desde cero — sin pesos preentrenados (requisito del proyecto)
     model = timm.create_model(
         backbone_name,
-        pretrained=True,
-        num_classes=0,       # elimina cabeza de clasificación → devuelve CLS token
+        pretrained=False,
+        num_classes=0,  # elimina cabeza de clasificación → devuelve CLS token
     )
 
     # Congelar todos los parámetros
@@ -58,7 +62,9 @@ def load_frozen_backbone(backbone_name="vit_tiny_patch16_224", device="cuda"):
     if trainable:
         log.error(
             "[Backbone] ¡%d parámetros con requires_grad=True tras congelamiento! "
-            "Primeros 3: %s", len(trainable), trainable[:3],
+            "Primeros 3: %s",
+            len(trainable),
+            trainable[:3],
         )
     else:
         log.debug("[Backbone] Congelamiento verificado: 0 parámetros entrenables.")
@@ -73,7 +79,8 @@ def load_frozen_backbone(backbone_name="vit_tiny_patch16_224", device="cuda"):
         log.warning(
             "[Backbone] d_model real (%d) difiere del esperado (%d). "
             "Actualiza BACKBONE_CONFIGS si agregaste un backbone nuevo.",
-            actual_d, expected_d,
+            actual_d,
+            expected_d,
         )
     else:
         log.debug("[Backbone] d_model verificado: %d ✓", actual_d)

@@ -27,13 +27,15 @@ try:
     import psutil
 except ImportError:
     subprocess.check_call(
-        [sys.executable, "-m", "pip", "install", "--quiet", "--user", "psutil"])
+        [sys.executable, "-m", "pip", "install", "--quiet", "--user", "psutil"]
+    )
     import psutil
 
 log = logging.getLogger("fase0.extraer")
 
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
+
 
 def file_size_human(path):
     # type: (Path) -> str
@@ -68,7 +70,43 @@ def check_7z():
     return False
 
 
+def _log_progress(tag, watch_dir, total_files, stop_event):
+    # type: (str, Path, int, threading.Event) -> None
+    """Hilo que reporta progreso de extracción cada 60 segundos con porcentaje y ETA."""
+    t0 = time.time()
+    while not stop_event.wait(60):
+        elapsed_min = (time.time() - t0) / 60.0
+        try:
+            file_count = sum(1 for f in Path(watch_dir).rglob("*") if f.is_file())
+        except Exception:
+            file_count = 0
+        if total_files > 0:
+            pct = min(100.0, file_count / total_files * 100.0)
+            if pct > 0:
+                remaining_min = elapsed_min / pct * (100.0 - pct)
+                eta_str = "{:.0f} min restantes".format(remaining_min)
+            else:
+                eta_str = "calculando ETA..."
+            log.info(
+                "[%s] Progreso: %.1f min | %d/%d archivos | %.1f%% | %s",
+                tag,
+                elapsed_min,
+                file_count,
+                total_files,
+                pct,
+                eta_str,
+            )
+        else:
+            log.info(
+                "[%s] Progreso: %.1f min | %d archivos extraídos",
+                tag,
+                elapsed_min,
+                file_count,
+            )
+
+
 # ── Monitor de RAM ────────────────────────────────────────────────────────────
+
 
 class RAMMonitor:
     """Hilo demonio que pausa/reanuda un proceso 7z según RAM disponible."""
@@ -96,13 +134,21 @@ class RAMMonitor:
                 if not self._paused and avail < self.pause_mb:
                     os.kill(self.pid, signal.SIGSTOP)
                     self._paused = True
-                    log.warning("[%s][RAM] SIGSTOP — RAM: %.0f MB < %.0f MB",
-                                self.tag, avail, self.pause_mb)
+                    log.warning(
+                        "[%s][RAM] SIGSTOP — RAM: %.0f MB < %.0f MB",
+                        self.tag,
+                        avail,
+                        self.pause_mb,
+                    )
                 elif self._paused and avail > self.resume_mb:
                     os.kill(self.pid, signal.SIGCONT)
                     self._paused = False
-                    log.info("[%s][RAM] SIGCONT — RAM: %.0f MB > %.0f MB",
-                             self.tag, avail, self.resume_mb)
+                    log.info(
+                        "[%s][RAM] SIGCONT — RAM: %.0f MB > %.0f MB",
+                        self.tag,
+                        avail,
+                        self.resume_mb,
+                    )
             except ProcessLookupError:
                 break
             except Exception as e:
@@ -117,8 +163,9 @@ def wait_for_ram(tag, resume_mb):
     avail = ram_available_mb()
     if avail >= resume_mb:
         return
-    log.warning("[%s] RAM disponible: %.0f MB < %.0f MB — esperando...",
-                tag, avail, resume_mb)
+    log.warning(
+        "[%s] RAM disponible: %.0f MB < %.0f MB — esperando...", tag, avail, resume_mb
+    )
     while avail < resume_mb:
         time.sleep(10)
         avail = ram_available_mb()
@@ -127,9 +174,10 @@ def wait_for_ram(tag, resume_mb):
 
 # ── Extracción ────────────────────────────────────────────────────────────────
 
+
 def smart_extract(archive, dest, tag, pause_mb, resume_mb):
     # type: (Path, Path, str, float, float) -> bool
-    """Extracción con 7z + monitor de RAM (SIGSTOP/SIGCONT)."""
+    """Extracción con 7z + monitor de RAM (SIGSTOP/SIGCONT) + progreso en porcentaje."""
     if not archive.exists():
         log.error("[%s] Archivo no encontrado: %s", tag, archive)
         return False
@@ -137,19 +185,60 @@ def smart_extract(archive, dest, tag, pause_mb, resume_mb):
     wait_for_ram(tag, resume_mb)
     dest.mkdir(parents=True, exist_ok=True)
 
-    cmd = ["7z", "x", str(archive), "-o" + str(dest), "-y"]
-    log.info("[%s] Extrayendo %s -> %s", tag, archive.name, dest)
+    # ── Leer manifiesto del ZIP para calcular progreso real ──────────────────
+    # zipfile lee solo el directorio central (al final del archivo) — muy rápido
+    # incluso en ZIPs de varios GB.
+    total_files = 0
+    watch_dir = dest
+    try:
+        with zipfile.ZipFile(archive, "r") as zf:
+            names = zf.namelist()
+            total_files = len(names)
+            # Determinar subdirectorio destino (ej. "subset0/" → ct_volumes/subset0/)
+            top_dirs = {Path(n).parts[0] for n in names if n and Path(n).parts}
+            if len(top_dirs) == 1:
+                watch_dir = dest / top_dirs.pop()
+    except Exception as e:
+        log.debug("[%s] No se pudo leer manifiesto ZIP: %s — progreso sin %%.", tag, e)
+
+    archive_size_gb = archive.stat().st_size / 1e9
+    log.info(
+        "[%s] Iniciando extracción: %s (%.1f GB, %d archivos) → %s",
+        tag,
+        archive.name,
+        archive_size_gb,
+        total_files,
+        dest,
+    )
+    log.info(
+        "[%s] Velocidad estimada HDD ~1.4 MB/s → ETA estimada: %.0f min",
+        tag,
+        archive_size_gb * 1000 / 1.4 / 60,
+    )
     t0 = time.time()
 
-    proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    # NOTA: NO usar -mmt=auto — es inválido para formato ZIP en p7zip y
+    # provoca rc=2 ("E_INVALIDARG") incluso en ZIPs completamente válidos.
+    cmd = ["7z", "x", str(archive), "-o" + str(dest), "-y"]
+
+    proc = subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
     monitor = RAMMonitor(proc.pid, tag, pause_mb, resume_mb)
     monitor.start()
+
+    progress_stop = threading.Event()
+    progress_thread = threading.Thread(
+        target=_log_progress,
+        args=(tag, watch_dir, total_files, progress_stop),
+        daemon=True,
+    )
+    progress_thread.start()
 
     try:
         _, stderr = proc.communicate()
         rc = proc.returncode
     finally:
         monitor.stop()
+        progress_stop.set()
 
     elapsed = time.time() - t0
     stderr_text = stderr.decode(errors="replace")
@@ -160,7 +249,17 @@ def smart_extract(archive, dest, tag, pause_mb, resume_mb):
     elif rc == 1:
         log.warning(
             "[%s] 7z terminó con warnings (rc=1) — posible ZIP64 con datos "
-            "corruptos en origen (LUNA16 subsets 7/9). Verificar conteo.", tag)
+            "corruptos en origen (LUNA16 subsets 7/9). Verificar conteo.",
+            tag,
+        )
+        return True
+    elif rc == 2:
+        log.warning(
+            "[%s] 7z terminó con rc=2 (Data Error) en %.0fs — típico en LUNA16 ZIP64. "
+            "Archivos probablemente extraídos. Verificando...",
+            tag,
+            elapsed,
+        )
         return True
     else:
         log.error("[%s] 7z falló (rc=%d): %s", tag, rc, stderr_text[:300])
@@ -169,15 +268,33 @@ def smart_extract(archive, dest, tag, pause_mb, resume_mb):
 
 # ── Verificaciones de extracción ──────────────────────────────────────────────
 
+
 def is_extracted(datasets_dir, ds_id, luna_subsets=None):
     # type: (Path, str, list|None) -> bool
     """Verifica si un dataset ya está extraído."""
     checks = {
-        "nih":      lambda: (datasets_dir / "nih_chest_xrays" / "images_001").is_dir(),
-        "isic":     lambda: (datasets_dir / "isic_2019" / "ISIC_2019_Training_Input").is_dir(),
-        "oa":       lambda: (datasets_dir / "osteoarthritis" / "KLGrade").is_dir(),
-        "luna":     lambda: (datasets_dir / "luna_lung_cancer" / "candidates_V2").is_dir(),
-        "luna_ct":  lambda: _luna_ct_extracted(datasets_dir, luna_subsets or [0]),
+        "nih": lambda: (
+            sum(
+                len(
+                    list(
+                        (
+                            datasets_dir
+                            / "nih_chest_xrays"
+                            / "images_{:03d}".format(i)
+                            / "images"
+                        ).glob("*.png")
+                    )
+                )
+                for i in range(1, 13)
+            )
+            >= 100000
+        ),
+        "isic": lambda: (
+            datasets_dir / "isic_2019" / "ISIC_2019_Training_Input"
+        ).is_dir(),
+        "oa": lambda: (datasets_dir / "osteoarthritis" / "KLGrade").is_dir(),
+        "luna": lambda: (datasets_dir / "luna_lung_cancer" / "candidates_V2").is_dir(),
+        "luna_ct": lambda: _luna_ct_extracted(datasets_dir, luna_subsets or [0]),
         "pancreas": lambda: _pancreas_extracted(datasets_dir),
     }
     checker = checks.get(ds_id)
@@ -191,7 +308,10 @@ def _luna_ct_extracted(datasets_dir, subsets):
         subset_dir = ct_dir / "subset{}".format(i)
         if not subset_dir.is_dir():
             return False
-        if len(list(subset_dir.glob("*.mhd"))) < 5:
+        mhd_count = len(list(subset_dir.glob("*.mhd")))
+        raw_count = len(list(subset_dir.glob("*.raw")))
+        # Threshold real: 88 pares mhd+raw mínimo (subsets 8-9 tienen 88; los demás 89)
+        if mhd_count < 88 or mhd_count != raw_count:
             return False
     return True
 
@@ -207,19 +327,42 @@ def verify_luna_ct_subset(datasets_dir, subset_idx):
     """Verifica un subset CT extraído."""
     ct_dir = datasets_dir / "luna_lung_cancer" / "ct_volumes"
     subset_dir = ct_dir / "subset{}".format(subset_idx)
+    MIN_RAW_BYTES = 1_048_576  # 1 MB mínimo por archivo .raw
     mhd_count = len(list(subset_dir.glob("*.mhd"))) if subset_dir.exists() else 0
-    raw_count = len(list(subset_dir.glob("*.raw"))) if subset_dir.exists() else 0
-    expected = 178 if subset_idx == 0 else 85
-    ok = mhd_count >= expected and mhd_count == raw_count
+    raw_files = list(subset_dir.glob("*.raw")) if subset_dir.exists() else []
+    raw_count = len(raw_files)
+    raw_valid = sum(1 for f in raw_files if f.stat().st_size >= MIN_RAW_BYTES)
+    raw_zero = raw_count - raw_valid
+    expected = 88  # LUNA16: 89 mhd per subset (88 for subsets 8-9); 88 is safe minimum
+    ok = mhd_count >= expected and raw_valid >= expected
     if ok:
-        log.info("[LUNA-CT%d] Verificación OK: %d .mhd / %d .raw",
-                 subset_idx, mhd_count, raw_count)
+        log.info(
+            "[LUNA-CT%d] Verificación OK: %d .mhd / %d .raw (%d válidos, %d vacíos)",
+            subset_idx,
+            mhd_count,
+            raw_count,
+            raw_valid,
+            raw_zero,
+        )
     else:
         log.warning(
-            "[LUNA-CT%d] Extracción posiblemente parcial: %d .mhd / %d .raw "
+            "[LUNA-CT%d] Extracción posiblemente parcial: %d .mhd / %d .raw (%d válidos, %d vacíos) "
             "(esperados >= %d pares).",
-            subset_idx, mhd_count, raw_count, expected)
-    return {"mhd": mhd_count, "raw": raw_count, "ok": ok, "expected": expected}
+            subset_idx,
+            mhd_count,
+            raw_count,
+            raw_valid,
+            raw_zero,
+            expected,
+        )
+    return {
+        "mhd": mhd_count,
+        "raw": raw_count,
+        "raw_valid": raw_valid,
+        "raw_zero": raw_zero,
+        "ok": ok,
+        "expected": expected,
+    }
 
 
 def _extract_nih_split_txts(data_zip_path, nih_dir):
@@ -236,42 +379,74 @@ def _extract_nih_split_txts(data_zip_path, nih_dir):
                     out_path = nih_dir / txt_name
                     out_path.write_bytes(data)
                     line_count = data.count(b"\n")
-                    log.info("[NIH][--disco] %s extraído (%d líneas)", txt_name, line_count)
+                    log.info(
+                        "[NIH][--disco] %s extraído (%d líneas)", txt_name, line_count
+                    )
     except Exception as e:
         log.warning("[NIH][--disco] No se pudieron extraer txts de splits: %s", e)
 
 
 # ── Orquestador de extracciones ───────────────────────────────────────────────
 
-def run_extractions(datasets_dir, active, luna_subsets=None, pause_mb=700,
-                    resume_mb=1400, disco=False):
+
+def run_extractions(
+    datasets_dir, active, luna_subsets=None, pause_mb=700, resume_mb=1400, disco=False
+):
     # type: (Path, set, list|None, float, float, bool) -> dict
     """Ejecuta las extracciones. Retorna {ds_id: bool}."""
     results = {}
 
     # Orden: menor a mayor
     extraction_plan = [
-        ("oa", datasets_dir / "osteoarthritis" / "osteoarthritis.zip",
-         datasets_dir / "osteoarthritis", None),
-        ("luna", datasets_dir / "luna_lung_cancer" / "luna-lung-cancer-dataset.zip",
-         datasets_dir / "luna_lung_cancer", None),
-        ("isic", datasets_dir / "isic_2019" / "isic-2019.zip",
-         datasets_dir / "isic_2019", None),
-        ("nih", datasets_dir / "nih_chest_xrays" / "data.zip",
-         datasets_dir / "nih_chest_xrays", None),
+        (
+            "oa",
+            datasets_dir / "osteoarthritis" / "osteoarthritis.zip",
+            datasets_dir / "osteoarthritis",
+            None,
+        ),
+        (
+            "luna",
+            datasets_dir / "luna_lung_cancer" / "luna-lung-cancer-dataset.zip",
+            datasets_dir / "luna_lung_cancer",
+            None,
+        ),
+        (
+            "isic",
+            datasets_dir / "isic_2019" / "isic-2019.zip",
+            datasets_dir / "isic_2019",
+            None,
+        ),
+        (
+            "nih",
+            datasets_dir / "nih_chest_xrays" / "data.zip",
+            datasets_dir / "nih_chest_xrays",
+            None,
+        ),
     ]
 
-    for i in (luna_subsets or []):
+    if luna_subsets is None:
+        luna_subsets = list(range(10))
+
+    for i in luna_subsets or []:
         extraction_plan.append(
-            ("luna_ct",
-             datasets_dir / "luna_lung_cancer" / "ct_volumes" / "subset{}.zip".format(i),
-             datasets_dir / "luna_lung_cancer" / "ct_volumes",
-             [i]),
+            (
+                "luna_ct",
+                datasets_dir
+                / "luna_lung_cancer"
+                / "ct_volumes"
+                / "subset{}.zip".format(i),
+                datasets_dir / "luna_lung_cancer" / "ct_volumes",
+                [i],
+            ),
         )
 
     extraction_plan.append(
-        ("pancreas", datasets_dir / "zenodo_13715870" / "batch_1.zip",
-         datasets_dir / "zenodo_13715870", None),
+        (
+            "pancreas",
+            datasets_dir / "zenodo_13715870" / "batch_1.zip",
+            datasets_dir / "zenodo_13715870",
+            None,
+        ),
     )
 
     for ds_id, archive, dest, subset_override in extraction_plan:

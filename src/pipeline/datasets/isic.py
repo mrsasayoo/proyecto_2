@@ -237,10 +237,11 @@ class ISICDataset(Dataset):
             weights = total / (self.N_TRAIN_CLS * counts)
             weights_full = np.append(weights, 1.0)
             self.class_weights = torch.tensor(weights_full, dtype=torch.float32)
+            _cls_names = self.CLASSES + ["UNK"]
             log.info(
                 f"[ISIC] H1 — class_weights: "
-                f"min={self.class_weights.min():.2f}({self.CLASSES[self.class_weights.argmin()]}) | "
-                f"max={self.class_weights.max():.2f}({self.CLASSES[self.class_weights.argmax()]})"
+                f"min={self.class_weights.min():.2f}({_cls_names[self.class_weights.argmin()]}) | "
+                f"max={self.class_weights.max():.2f}({_cls_names[self.class_weights.argmax()]})"
             )
 
             all_zero = (self.df[self.CLASSES].sum(axis=1) == 0).sum()
