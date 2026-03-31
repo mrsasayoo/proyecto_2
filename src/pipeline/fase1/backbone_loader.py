@@ -89,4 +89,12 @@ def load_frozen_backbone(backbone_name="vit_tiny_patch16_224", device="cuda"):
     log.info("[Backbone] d_model real (CLS dim) : %d", actual_d)
     log.info("[Backbone] Parámetros congelados  : %s", f"{total_params:,}")
 
+    # OPT-4: torch.compile mejora throughput ~10-30% en CPU (disponible desde PyTorch 2.0)
+    if hasattr(torch, "compile"):
+        try:
+            model = torch.compile(model, mode="reduce-overhead")
+            log.info("[Backbone] torch.compile() activado (mode=reduce-overhead)")
+        except Exception as e:
+            log.warning("[Backbone] torch.compile() no disponible: %s", e)
+
     return model, actual_d

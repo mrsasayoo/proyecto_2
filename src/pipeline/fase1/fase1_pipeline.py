@@ -74,6 +74,43 @@ log = logging.getLogger("fase1")
 
 
 # ══════════════════════════════════════════════════════════════
+#  Detección de dispositivo con fallback CPU inteligente
+# ══════════════════════════════════════════════════════════════
+
+
+def _detect_device():
+    # type: () -> tuple[torch.device, str]
+    """Detecta GPU o CPU y configura el entorno óptimo para cada caso."""
+    if torch.cuda.is_available():
+        device = torch.device("cuda")
+        device_name = torch.cuda.get_device_name(0)
+        vram_gb = torch.cuda.get_device_properties(0).total_memory / 1e9
+        log.info(
+            "[Setup] GPU detectada: %s (%.1f GB VRAM) — modo GPU activado",
+            device_name,
+            vram_gb,
+        )
+        return device, "gpu"
+    else:
+        # CPU: configurar threads óptimos
+        n_cores = os.cpu_count() or 4
+        # Dejar cores para el DataLoader workers y el OS
+        n_torch_threads = max(1, n_cores // 2)
+        torch.set_num_threads(n_torch_threads)
+        # set_num_interop_threads solo se puede llamar una vez; ignorar si ya se fijó
+        try:
+            torch.set_num_interop_threads(max(1, n_torch_threads // 2))
+        except RuntimeError:
+            pass  # Ya se configuró en una llamada anterior (e.g. dry-run → main)
+        log.info(
+            "[Setup] CPU detectada: %d cores → torch threads: %d",
+            n_cores,
+            n_torch_threads,
+        )
+        return torch.device("cpu"), "cpu"
+
+
+# ══════════════════════════════════════════════════════════════
 #  Verificación de idempotencia
 # ══════════════════════════════════════════════════════════════
 
@@ -392,15 +429,19 @@ def main(args):
     }
     _check_fase0_artifacts(cfg)
 
-    # ── 3. Setup de dispositivo ──
-    device = "cuda" if torch.cuda.is_available() else "cpu"
-    report_data["device"] = device
-    log.info("[Setup] Dispositivo: %s", device)
-    if device == "cuda":
+    # ── 3. Setup de dispositivo (OPT-1: detección GPU con fallback CPU) ──
+    # Logging de capacidades del entorno (OPT-6)
+    log.info(
+        "[Setup] PyTorch %s | MKL: %s | MKL-DNN: %s",
+        torch.__version__,
+        torch.backends.mkl.is_available(),
+        torch.backends.mkldnn.is_available(),
+    )
+
+    device, device_type = _detect_device()
+    if device_type == "gpu":
         gpu_name = torch.cuda.get_device_name(0)
-        log.info("[Setup] GPU           : %s", gpu_name)
         total_vram = torch.cuda.get_device_properties(0).total_memory / 1e9
-        log.info("[Setup] VRAM total    : %.1f GB", total_vram)
         report_data["device"] = f"cuda ({gpu_name}, {total_vram:.1f} GB)"
         expected_vram = BACKBONE_CONFIGS[args.backbone]["vram_gb"]
         if expected_vram > total_vram * 0.8:
@@ -412,7 +453,20 @@ def main(args):
                 total_vram,
             )
     else:
-        log.warning("[Setup] CPU — la extracción será lenta. Se recomienda GPU.")
+        report_data["device"] = "cpu"
+        log.info("[Setup] Modo CPU — se aplicarán optimizaciones de threading y cache")
+
+    # OPT-2: Batch size adaptativo según dispositivo
+    if device_type == "cpu":
+        # En CPU, batches pequeños caben mejor en cache L2/L3
+        effective_batch = min(args.batch_size, 16)
+        if effective_batch < args.batch_size:
+            log.info(
+                "[Setup] CPU mode: batch_size reducido %d→%d (cache-friendly)",
+                args.batch_size,
+                effective_batch,
+            )
+        args.batch_size = effective_batch
 
     # ── 4. Cargar backbone congelado ──
     log.info("[Setup] Cargando backbone '%s'...", args.backbone)
@@ -425,12 +479,29 @@ def main(args):
     log.info("[Dataset] Total val  : %s", f"{len(val_dataset):,}")
     log.info("[Dataset] Total test : %s", f"{len(test_dataset):,}")
 
-    # ── 6. DataLoaders ──
+    # ── 6. DataLoaders (OPT-5: workers y prefetch adaptativos) ──
+    # En CPU limitamos workers para no competir con torch threads por cores
+    n_workers = (
+        args.workers
+        if device_type == "gpu"
+        else min(args.workers, max(1, (os.cpu_count() or 4) // 2 - 1))
+    )
+    # prefetch_factor mayor en CPU para mantener el pipeline alimentado
+    prefetch = 4 if device_type == "cpu" else 2
     _dl_kw = dict(
         batch_size=args.batch_size,
         shuffle=False,
-        num_workers=args.workers,
-        pin_memory=(device == "cuda"),
+        num_workers=n_workers,
+        pin_memory=(device_type == "gpu"),
+        prefetch_factor=prefetch if n_workers > 0 else None,
+        persistent_workers=(n_workers > 0),
+    )
+    log.info(
+        "[Setup] DataLoader: workers=%d | prefetch=%s | pin_memory=%s | persistent=%s",
+        n_workers,
+        prefetch if n_workers > 0 else "N/A",
+        device_type == "gpu",
+        n_workers > 0,
     )
     train_loader = DataLoader(train_dataset, **_dl_kw)
     val_loader = DataLoader(val_dataset, **_dl_kw)
@@ -784,6 +855,16 @@ def _print_dry_run_summary(args):
     log.info("=" * 60)
     log.info("[DRY-RUN] Resumen de configuración")
     log.info("=" * 60)
+
+    # OPT-6: Logging de capacidades al inicio del dry-run
+    log.info(
+        "[Setup] PyTorch %s | MKL: %s | MKL-DNN: %s",
+        torch.__version__,
+        torch.backends.mkl.is_available(),
+        torch.backends.mkldnn.is_available(),
+    )
+    device, device_type = _detect_device()
+    log.info("[Setup] Dispositivo: %s (modo %s)", device, device_type)
 
     # ── 1. Argumentos resueltos ──
     log.info("")
