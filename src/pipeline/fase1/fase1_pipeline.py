@@ -293,27 +293,40 @@ def _generate_report(report_data, output_path):
 
 
 def _check_luna_patches(luna_patches_dir):
-    """Verificar que patches/train/, patches/val/, patches/test/ existen."""
+    """Verificar que patches/train/, patches/val/ existen; test/ es opcional."""
     if luna_patches_dir is None:
         return
     base = Path(luna_patches_dir)
-    missing = []
-    for split_name in ("train", "val", "test"):
+
+    # ── Splits obligatorios: train/ y val/ ──
+    missing_required = []
+    for split_name in ("train", "val"):
         split_dir = base / split_name
         if not split_dir.exists():
-            missing.append("  ✗ {} (no existe)".format(split_dir))
+            missing_required.append("  ✗ {} (no existe)".format(split_dir))
         elif not any(split_dir.glob("*.npy")):
-            missing.append("  ✗ {} (vacía — sin .npy)".format(split_dir))
-    if missing:
+            missing_required.append("  ✗ {} (vacía — sin .npy)".format(split_dir))
+    if missing_required:
         log.error(
             "LUNA16: parches 3D no encontrados.\n%s\n\n"
             "Ejecuta primero:\n"
             "  python fase0/fase0_pipeline.py --solo_pasos 6 --solo luna\n"
             "antes de correr fase1_pipeline.py.",
-            "\n".join(missing),
+            "\n".join(missing_required),
         )
         sys.exit(1)
-    log.info("[Guard] LUNA16 patches verificados ✓ (train/, val/, test/)")
+
+    # ── Split opcional: test/ ──
+    test_dir = base / "test"
+    if not test_dir.exists():
+        log.warning(
+            "[Guard] LUNA16: patches/test/ no existe — split test de LUNA omitido"
+        )
+    elif not any(test_dir.glob("*.npy")):
+        log.warning(
+            "[Guard] LUNA16: patches/test/ vacía (sin .npy) — split test de LUNA omitido"
+        )
+    log.info("[Guard] LUNA16 patches verificados ✓ (train/, val/)")
 
 
 def _check_fase0_artifacts(cfg):

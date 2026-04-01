@@ -230,7 +230,7 @@ def build_datasets(cfg):
         log.info("[Dataset] Cargando LUNA16 parches 3D (Experto 3)...")
         _base = Path(cfg["luna_patches_dir"])
 
-        # Lee los tres directorios directamente — sin re-dividir
+        # Lee los directorios directamente — sin re-dividir
         luna_train = LUNA16Dataset(
             str(_base / "train"),
             cfg["luna_csv"],
@@ -241,23 +241,35 @@ def build_datasets(cfg):
             cfg["luna_csv"],
             mode="embedding",
         )
-        luna_test = LUNA16Dataset(
-            str(_base / "test"),
-            cfg["luna_csv"],
-            mode="embedding",
-        )
         train_datasets.append(luna_train)
         val_datasets.append(luna_val)
-        test_datasets.append(luna_test)
+
+        # test/ es opcional — puede no existir si Fase 0 no lo generó
+        _luna_test_dir = _base / "test"
+        if _luna_test_dir.exists() and any(_luna_test_dir.glob("*.npy")):
+            luna_test = LUNA16Dataset(
+                str(_luna_test_dir),
+                cfg["luna_csv"],
+                mode="embedding",
+            )
+            test_datasets.append(luna_test)
+            _luna_test_count = f"{len(luna_test):,}"
+        else:
+            log.warning(
+                "[LUNA16] patches/test/ no existe o está vacía "
+                "— split test de LUNA omitido"
+            )
+            _luna_test_count = "0 (omitido)"
+
         log.info(
             "[LUNA16] Splits respetan separación por seriesuid de Fase 0 "
-            "(tres directorios leídos directamente, sin re-dividir)."
+            "(directorios leídos directamente, sin re-dividir)."
         )
         log.info(
             "  → train: %s  val: %s  test: %s",
             f"{len(luna_train):,}",
             f"{len(luna_val):,}",
-            f"{len(luna_test):,}",
+            _luna_test_count,
         )
     else:
         log.warning("[Dataset] LUNA16 OMITIDO — faltan rutas")

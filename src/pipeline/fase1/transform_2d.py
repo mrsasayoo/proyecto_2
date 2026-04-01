@@ -5,8 +5,8 @@ transform_2d.py — Pipeline Estándar para Imágenes 2D
 Denominador común de todos los datasets 2D (Chest, ISIC, OA).
 No tiene conocimiento de ningún dominio clínico específico.
 
-Orden estricto según §6.2 de arquitectura_moe.md:
-  Resize → TVF → GammaCorrection → CLAHE → [guardar transform] → ToTensor → Normalize
+Orden estricto según §3.3 de arquitectura_moe.md:
+  CLAHE → Resize → TVF → GammaCorrection → [guardar transform] → ToTensor → Normalize
 
 Referencias:
   - PMC9340712: TVF + Gamma mejora accuracy y convergencia.
@@ -200,10 +200,10 @@ class TransformRecord:
     imagenet_std: list[float] = field(default_factory=lambda: list(IMAGENET_STD))
     pipeline_order: list[str] = field(
         default_factory=lambda: [
+            "CLAHE",
             "Resize",
             "TotalVariationFilter",
             "GammaCorrection",
-            "CLAHE",
             "ToTensor",
             "Normalize",
         ]
@@ -282,9 +282,11 @@ def build_2d_transform(
     """Transform estándar para todos los datasets 2D (§6.2).
 
     Cadena completa:
-        Resize → TotalVariationFilter → GammaCorrection → CLAHE → ToTensor → Normalize
+        CLAHE → Resize → TotalVariationFilter → GammaCorrection → ToTensor → Normalize
 
-    Los pasos 1–4 operan sobre PIL Image (uint8) en resolución
+    CLAHE se aplica primero, a resolución original, antes del resize
+    (§3.3: "CLAHE siempre antes del resize").
+    Los pasos restantes operan sobre PIL Image (uint8) en resolución
     ``img_size × img_size``.  ToTensor convierte HWC uint8 → CHW float [0,1].
     Normalize aplica la estandarización ImageNet final.
 
@@ -308,14 +310,15 @@ def build_2d_transform(
     """
     pipeline = transforms.Compose(
         [
-            # Paso 1: Resize estandarizado (PIL, sin interpolación agresiva)
-            transforms.Resize((img_size, img_size)),
-            # Paso 2: Total Variation Filter — denoising preservando bordes
-            TotalVariationFilter(weight=tvf_weight, n_iter=tvf_n_iter),
-            # Paso 3: Corrección gamma — realza brillo y estructuras
-            GammaCorrection(gamma=gamma),
-            # Paso 4: CLAHE — realce de contraste adaptativo local
+            # Paso 1: CLAHE — realce de contraste adaptativo local
+            # (a resolución original, ANTES del resize — §3.3)
             CLAHETransform(clip_limit=clahe_clip_limit, tile_grid=clahe_tile_grid),
+            # Paso 2: Resize estandarizado (PIL, sin interpolación agresiva)
+            transforms.Resize((img_size, img_size)),
+            # Paso 3: Total Variation Filter — denoising preservando bordes
+            TotalVariationFilter(weight=tvf_weight, n_iter=tvf_n_iter),
+            # Paso 4: Corrección gamma — realza brillo y estructuras
+            GammaCorrection(gamma=gamma),
             # --- Paso 5: guardar transform (se hace fuera del Compose) ---
             # Paso 6: Generar tensor normalizado
             transforms.ToTensor(),
@@ -336,12 +339,12 @@ def build_2d_transform(
         save_transform(record, save_path)
 
     log.info(
-        "[Transform 2D] Cadena construida: Resize(%d) → TVF(w=%.1f) → "
-        "Gamma(γ=%.2f) → CLAHE(clip=%.1f) → ToTensor → Normalize",
+        "[Transform 2D] Cadena construida: CLAHE(clip=%.1f) → Resize(%d) → "
+        "TVF(w=%.1f) → Gamma(γ=%.2f) → ToTensor → Normalize",
+        clahe_clip_limit,
         img_size,
         tvf_weight,
         gamma,
-        clahe_clip_limit,
     )
 
     return pipeline
