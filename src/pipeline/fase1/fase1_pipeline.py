@@ -764,7 +764,9 @@ def _build_parser():
     )
     parser.add_argument(
         "--isic_imgs",
-        default=_default_if_exists("isic_2019/ISIC_2019_Training_Input"),
+        default=_default_if_exists(
+            "isic_2019/ISIC_2019_Training_Input/ISIC_2019_Training_Input"
+        ),
         help="Carpeta con imágenes ISIC .jpg",
     )
 

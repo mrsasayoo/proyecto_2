@@ -39,6 +39,7 @@ class ISICDataset(Dataset):
     N_TRAIN_CLS = 8
     MINORITY_IDX = {3, 5, 6, 7}  # AK=3, DF=5, VASC=6, SCC=7
     KNOWN_DUPLICATES = {"ISIC_0067980", "ISIC_0069013"}
+    _error_count = 0
 
     @staticmethod
     def build_isic_transforms(img_size=224):
@@ -409,9 +410,13 @@ class ISICDataset(Dataset):
         try:
             img = Image.open(img_path).convert("RGB")
         except Exception as e:
-            log.warning(
-                f"[ISIC] Error abriendo '{img_path}': {e}. Reemplazando con tensor cero."
-            )
+            ISICDataset._error_count += 1
+            if ISICDataset._error_count <= 1:
+                log.warning(
+                    f"[ISIC] Error abriendo '{img_path}': {e}. "
+                    f"Reemplazando con tensor cero. "
+                    f"(futuros errores similares se silenciarán)"
+                )
             dummy = torch.zeros(3, 224, 224)
             if self.mode == "embedding":
                 return dummy, self.expert_id, img_name

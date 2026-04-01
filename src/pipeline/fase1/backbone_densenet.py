@@ -230,6 +230,7 @@ class DenseNet(nn.Module):
         # ── BN final + proyección al embed_dim ─────────────────────────────
         self.final_bn = nn.BatchNorm2d(num_features)
         self.projection = nn.Linear(num_features, embed_dim)
+        self.norm = nn.LayerNorm(embed_dim)
 
         # ── Inicialización de pesos (Kaiming/He) ──────────────────────────
         self._initialize_weights()
@@ -293,6 +294,9 @@ class DenseNet(nn.Module):
 
         # Proyección lineal al embed_dim
         embedding = self.projection(out)  # [B, embed_dim]
+        embedding = self.norm(
+            embedding
+        )  # normalización final (consistente con ViT/Swin/CvT)
 
         return embedding
 
