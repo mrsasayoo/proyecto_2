@@ -27,6 +27,7 @@ import torch.nn as nn
 from torch.utils.data import Dataset
 from pathlib import Path
 import SimpleITK as sitk
+from scipy.ndimage import rotate as scipy_rotate
 
 from config import EXPERT_IDS, HU_LUNG_CLIP
 from preprocessing import normalize_hu, resize_volume_3d, volume_to_vit_input
@@ -356,18 +357,49 @@ class LUNA16Dataset(Dataset):
     Dos modos:
       mode="embedding" → FASE 0: (img_2d, expert_id=3, patch_stem)
       mode="expert"    → FASE 2: (volume_3d, label_binary, patch_stem)
+
+    Augmentation 3D (solo mode="expert" + split="train"):
+      - Flip aleatorio en ejes D, H, W (P=0.5 por eje)
+      - Rotación aleatoria ±15° en eje axial (Z)
+      - Variación de intensidad HU: offset ∈ [-20, +20], escala ∈ [0.95, 1.05]
+      - Ruido gaussiano σ~U(0, 0.02) con P=0.3
     """
 
     SENSITIVITY_CEILING = 1120 / 1186  # ≈ 0.9443
 
-    def __init__(self, patches_dir: str, candidates_csv: str, mode: str = "embedding"):
+    def __init__(
+        self,
+        patches_dir: str,
+        candidates_csv: str,
+        mode: str = "embedding",
+        split: str = "train",
+        augment_3d: bool = True,
+    ):
         assert mode in ("embedding", "expert"), (
             f"[LUNA16] mode debe ser 'embedding' o 'expert', recibido: '{mode}'"
+        )
+        assert split in ("train", "val", "test"), (
+            f"[LUNA16] split debe ser 'train', 'val' o 'test', recibido: '{split}'"
         )
 
         self.patches_dir = Path(patches_dir)
         self.expert_id = EXPERT_IDS["luna"]
         self.mode = mode
+        self.split = split
+        # Augmentation 3D activo solo en mode="expert" + split="train" + flag habilitado
+        self._apply_augment = mode == "expert" and split == "train" and augment_3d
+        if self._apply_augment:
+            log.info(
+                "[LUNA16] Augmentation 3D ACTIVO para mode='expert', split='train':\n"
+                "    - Flip aleatorio 3 ejes (P=0.5 c/u)\n"
+                "    - Rotación axial ±15°\n"
+                "    - Variación intensidad HU offset∈[-20,+20] + escala∈[0.95,1.05]\n"
+                "    - Ruido gaussiano σ~U(0,0.02), P=0.3\n"
+                "    - Desplazamiento espacial ±4 vóxeles (anti-posición como atajo)"
+            )
+        elif mode == "expert" and split == "train" and not augment_3d:
+            log.info("[LUNA16] Augmentation 3D DESACTIVADO (augment_3d=False)")
+        # En mode="embedding" o split!="train", no se aplica augmentation
 
         if not self.patches_dir.exists():
             log.error(
@@ -465,7 +497,8 @@ class LUNA16Dataset(Dataset):
 
         # ── H2: log de FocalLoss ──────────────────────────────────────────────
         log.info(
-            "[LUNA16] H2 — Loss obligatoria para FASE 2: FocalLoss(gamma=2, alpha=0.25). "
+            "[LUNA16] H2 — Loss obligatoria para FASE 2: FocalLoss(gamma=2, alpha=0.85). "
+            "alpha=0.85 pondera la clase positiva (nódulos, minoritaria con ratio ~10:1). "
             "BCELoss estándar convergirá a predecir siempre class=0 (accuracy >99.7% trivial). "
             "Alternativa complementaria: submuestreo de negativos (ratio máx. 1:20)."
         )
@@ -526,6 +559,114 @@ class LUNA16Dataset(Dataset):
     def __len__(self):
         return len(self.samples)
 
+    # ── Augmentation 3D (online, solo mode="expert" + split="train") ──────
+    def _random_spatial_shift(
+        self, volume: np.ndarray, max_shift: int = 4
+    ) -> np.ndarray:
+        """
+        Desplazamiento espacial aleatorio para evitar que el modelo aprenda la
+        posición central como atajo de clasificación.
+
+        Problema: los parches 64×64×64 están siempre centrados en la coordenada
+        del candidato. Sin este augmentation, el modelo puede aprender
+        "si hay algo en el centro → nódulo" en lugar de aprender morfología.
+
+        Implementación: desplaza el volumen ±max_shift vóxeles en cada eje usando
+        np.roll (desplazamiento circular) para preservar el shape sin padding costoso.
+        El desplazamiento circular es aceptable en CT pulmonar porque los bordes
+        del parche son aire (-1000 HU → 0.0 normalizado), y np.roll introduce
+        el mismo valor de borde del lado opuesto.
+
+        Args:
+            volume:    ndarray float32 shape (64, 64, 64)
+            max_shift: desplazamiento máximo en vóxeles por eje. Default: 4
+                       (6.25% de 64 — conservador para no sacar el nódulo del FOV)
+
+        Returns:
+            ndarray float32 shape (64, 64, 64) con el candidato descentrado
+        """
+        for axis in range(3):
+            shift = random.randint(-max_shift, max_shift)
+            if shift != 0:
+                volume = np.roll(volume, shift=shift, axis=axis)
+        return volume
+
+    def _augment_3d(self, volume: np.ndarray) -> np.ndarray:
+        """
+        Pipeline de data augmentation 3D para parches CT de nódulos pulmonares.
+
+        Diseñado para combatir overfitting en Expert 3 (LUNA16): con solo
+        ~14,728 muestras de entrenamiento y un modelo de ~25M parámetros,
+        el augmentation es crítico para regularización.
+
+        Entrada y salida: ndarray float32 shape (64,64,64), rango aprox [-1,1]
+        tras normalización HU. Todas las transformaciones preservan dtype y rango.
+
+        Args:
+            volume: parche 3D normalizado, shape (64, 64, 64), float32
+
+        Returns:
+            Parche 3D aumentado con el mismo shape y dtype
+        """
+        # --- 1. Flip aleatorio en los 3 ejes (D, H, W) con P=0.5 por eje ---
+        # Justificación: los nódulos pulmonares no tienen orientación preferida;
+        # un flip simula la misma anatomía vista desde una dirección diferente.
+        for axis in range(3):  # 0=D (axial), 1=H (coronal), 2=W (sagital)
+            if random.random() < 0.5:
+                volume = np.flip(volume, axis=axis)
+
+        # --- 2. Rotación aleatoria ±15° en el eje axial (Z) ----------------
+        # Justificación: la orientación del paciente en el scanner varía
+        # ligeramente entre adquisiciones. ±15° es conservador para preservar
+        # la anatomía sin crear artefactos. Se rota en el plano (H,W) = axes (1,2).
+        angle = random.uniform(-15.0, 15.0)
+        if abs(angle) > 0.5:  # Evitar rotaciones despreciables (ahorro de cómputo)
+            volume = scipy_rotate(
+                volume,
+                angle=angle,
+                axes=(1, 2),  # Rotar en plano axial (H, W)
+                reshape=False,  # Mantener shape original (64,64,64)
+                order=1,  # Interpolación bilineal (buen balance calidad/velocidad)
+                mode="nearest",  # Relleno de bordes con valor más cercano
+            )
+
+        # --- 3. Variación de intensidad HU ---------------------------------
+        # Justificación: simulamos variabilidad inter-scanner en calibración HU.
+        # Offset ∈ [-20, +20] HU y escala ∈ [0.95, 1.05] son realistas para
+        # diferencias entre equipos. Los valores están en escala normalizada:
+        # offset_normalizado = offset_HU / (max_HU - min_HU) = 20/1400 ≈ 0.014
+        offset_hu = random.uniform(-20.0, 20.0)
+        scale = random.uniform(0.95, 1.05)
+        # Convertir offset de HU a escala normalizada [0,1]
+        hu_range = 1400.0  # HU_LUNG_CLIP: (-1000, 400) → rango = 1400
+        offset_norm = offset_hu / hu_range
+        volume = volume * scale + offset_norm
+
+        # --- 4. Ruido gaussiano con P=0.3, σ~U(0, 0.02) -------------------
+        # Justificación: simula ruido de adquisición CT. σ=0.02 es sutil
+        # (~2% del rango normalizado), suficiente para regularizar sin
+        # destruir la señal diagnóstica de nódulos pequeños.
+        if random.random() < 0.3:
+            sigma = random.uniform(0.0, 0.02)
+            noise = np.random.normal(0.0, sigma, size=volume.shape).astype(np.float32)
+            volume = volume + noise
+
+        # Asegurar que el volumen mantenga dtype float32 y un rango razonable
+        # (no clipear estrictamente a [0,1] para no perder información en bordes)
+        volume = np.ascontiguousarray(volume, dtype=np.float32)
+
+        # --- 5. Desplazamiento espacial aleatorio ±4 vóxeles ----------------
+        # Justificación: los parches están centrados en el candidato. Sin shift,
+        # el modelo puede aprender "objeto en el centro → nódulo" como atajo.
+        # np.roll es circular — los bordes del parche son aire (≈0.0 norm),
+        # así que el valor circular no introduce artefactos significativos.
+        volume = self._random_spatial_shift(volume, max_shift=4)
+
+        # Clip suave post-augmentación: evita valores fuera del rango de entrenamiento
+        volume = np.clip(volume, 0.0, 1.0)
+
+        return volume
+
     def __getitem__(self, idx):
         patch_file, label = self.samples[idx]
         try:
@@ -552,5 +693,9 @@ class LUNA16Dataset(Dataset):
             img = volume_to_vit_input(volume_t)
             return img, self.expert_id, patch_file.stem
         else:
+            # mode="expert" → FASE 2: volumen 3D completo
+            # Aplicar augmentation 3D si está activo (solo train)
+            if self._apply_augment:
+                volume = self._augment_3d(volume)
             volume_t = torch.from_numpy(volume).float().unsqueeze(0)
             return volume_t, label, patch_file.stem

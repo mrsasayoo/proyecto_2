@@ -301,8 +301,8 @@ La restricción es **heterogeneidad**: cada experto debe usar una arquitectura b
 | Exp. 1 | NIH ChestX-ray14 | ConvNeXt-Tiny | DenseNet-121, ResNet-50, EfficientNet-B2 |
 | Exp. 2 | ISIC 2019 | EfficientNet-B3 | EfficientNetV2-S, ConvNeXt-Small |
 | Exp. 3 | Osteoarthritis | VGG-16 BN | ResNet-34, Inception-V3 |
-| Exp. 4 | LUNA16 CT 3D | ViViT-Tiny | R3D-18 o MC3-18 (`torchvision.models.video`) |
-| Exp. 5 | Pancreatic Cancer 3D | Swin3D-Tiny | R3D-18, MedicalNet (pretrained on medical CT) |
+| Exp. 4 | LUNA16 CT 3D | ViViT-Tiny | MC3-18 (`torchvision.models.video`) |
+| Exp. 5 | Pancreatic Cancer 3D | Swin3D-Tiny | MC3-18, MedicalNet (pretrained on medical CT) |
 
 ---
 
@@ -355,7 +355,7 @@ GMM, Naive Bayes y k-NN se ejecutan completamente en CPU con `sklearn` y FAISS. 
 | Métrica | Umbral | ¿Por qué es alcanzable? | ¿Por qué es difícil? |
 |---|---|---|---|
 | F1-Score Macro (Datasets 2D) | > 0.72 | EfficientNet/ConvNeXt con fine-tuning en ImageNet alcanzan ~0.70–0.78 en estos datasets. | Distribución muy desbalanceada en NIH (14 patologías). Requiere class-weighted loss y augmentation agresivo. |
-| F1-Score Macro (Datasets 3D) | > 0.65 | Modelos 3D livianos (R3D-18, Swin3D-Tiny) con grad. checkpointing y FP16 alcanzan ~0.65–0.72. | Alta variabilidad volumétrica con datos limitados (281 vol. de páncreas). |
+| F1-Score Macro (Datasets 3D) | > 0.65 | Modelos 3D livianos (MC3-18, Swin3D-Tiny) con grad. checkpointing y FP16 alcanzan ~0.65–0.72. | Alta variabilidad volumétrica con datos limitados (281 vol. de páncreas). |
 | Routing Accuracy (ablation study) | > 0.80 para el mejor router | Un backbone ViT-Tiny preentrenado produce embeddings suficientemente discriminativos para > 80% de routing correcto. | El router debe generalizar a volúmenes 3D aunque el backbone esté preentrenado en 2D. |
 | OOD Detection (AUROC Router) | > 0.80 | Entropía del gating score como señal de incertidumbre — no requiere entrenamiento adicional. | El router debe generalizar su concepto de imagen médica a tipos no vistos. |
 | VRAM por tarjeta | < 11.5 GB | FP16 + gradient accumulation + grad. checkpointing (3D). Los routers estadísticos corren en CPU. | Router ViT + 2 expertos 3D simultáneos puede superar 12 GB sin optimizaciones. |

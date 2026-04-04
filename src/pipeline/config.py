@@ -144,8 +144,8 @@ EXPERT_NOTES = {
     3: (
         "LUNA16 — BINARIO parches 3D (NO volúmenes completos). "
         "H1: Tarea = clasificar parche 64×64×64 centrado en candidato (x,y,z). "
-        "Tensor FASE 2: [B, 1, 64, 64, 64] — arquitectura 3D (R3D-18, Swin3D). "
-        "H2: Desbalance ~490:1 — FocalLoss(gamma=2, alpha=0.25) obligatoria. "
+        "Tensor FASE 2: [B, 1, 64, 64, 64] — arquitectura 3D (MC3-18, Swin3D). "
+        "H2: Desbalance ~490:1 — FocalLoss(gamma=2, alpha=0.85) obligatoria. "
         "BCELoss → modelo trivial (siempre class=0). "
         "H3: Conversión world→vóxel con LUNA16PatchExtractor.world_to_voxel(). "
         "Validar con LUNA16PatchExtractor.validate_extraction() antes de producción. "

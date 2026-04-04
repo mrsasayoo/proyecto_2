@@ -105,7 +105,7 @@ def volume_to_vit_input(volume_3d_tensor):
 
     Nota: esto es una aproximación válida para extracción de
     embeddings de routing. Para clasificación 3D real se usa
-    la arquitectura 3D del experto (R3D-18, Swin3D-Tiny).
+    la arquitectura 3D del experto (MC3-18, Swin3D-Tiny).
     """
     v = volume_3d_tensor.squeeze(0)  # [64, 64, 64]
     d, h, w = v.shape

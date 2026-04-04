@@ -21,23 +21,24 @@ class FocalLossMultiLabel(nn.Module):
         criterion = FocalLossMultiLabel(gamma=2.0)
         loss = criterion(logits, labels)   # logits: [B,14], labels: [B,14] float
     """
+
     def __init__(self, gamma: float = 2.0, reduction: str = "mean"):
         super().__init__()
-        self.gamma     = gamma
+        self.gamma = gamma
         self.reduction = reduction
 
     def forward(self, logits: torch.Tensor, targets: torch.Tensor) -> torch.Tensor:
-        bce  = nn.functional.binary_cross_entropy_with_logits(
+        bce = nn.functional.binary_cross_entropy_with_logits(
             logits, targets, reduction="none"
         )
-        p_t  = torch.exp(-bce)
+        p_t = torch.exp(-bce)
         loss = (1 - p_t) ** self.gamma * bce
 
         if self.reduction == "mean":
             return loss.mean()
         elif self.reduction == "sum":
             return loss.sum()
-        return loss   # "none"
+        return loss  # "none"
 
 
 class OrdinalLoss(nn.Module):
@@ -55,6 +56,7 @@ class OrdinalLoss(nn.Module):
         criterion = OrdinalLoss(n_classes=3)
         loss = criterion(logits, labels)   # logits: [B, K-1], labels ∈ {0, 1, 2}
     """
+
     def __init__(self, n_classes: int = 3):
         super().__init__()
         self.n_classes = n_classes
@@ -76,22 +78,30 @@ class FocalLoss(nn.Module):
     aprendizaje en los positivos y los negativos difíciles.
 
     Parámetros recomendados:
-      LUNA16:   gamma=2, alpha=0.25
+      LUNA16:   gamma=2, alpha=0.85
       Pancreas: gamma=2, alpha=0.75 (más peso a PDAC+)
 
+    CORRECCIÓN: alpha=0.85 pondera la clase positiva (nódulos, minoritaria).
+    La spec decía 0.25 que es la convención de Lin et al. 2017 donde alpha pondera
+    la clase foreground (positiva). Sin embargo, con ratio 10:1 neg:pos en disco,
+    se requiere un peso mayor para la clase positiva.
+    n_neg/n_total = 13470/14728 ≈ 0.915 → alpha=0.85 es una aproximación conservadora.
+
     Uso en FASE 2:
-        criterion = FocalLoss(gamma=2, alpha=0.25)
+        criterion = FocalLoss(gamma=2, alpha=0.85)
         loss = criterion(logits, labels.float())  # logits: [B], labels: [B] ∈ {0,1}
     """
-    def __init__(self, gamma: float = 2.0, alpha: float = 0.25):
+
+    def __init__(self, gamma: float = 2.0, alpha: float = 0.85):
         super().__init__()
         self.gamma = gamma
         self.alpha = alpha
 
     def forward(self, logits: torch.Tensor, targets: torch.Tensor) -> torch.Tensor:
-        bce    = nn.functional.binary_cross_entropy_with_logits(
-                     logits, targets, reduction="none")
-        p_t    = torch.exp(-bce)
+        bce = nn.functional.binary_cross_entropy_with_logits(
+            logits, targets, reduction="none"
+        )
+        p_t = torch.exp(-bce)
         alpha_t = self.alpha * targets + (1 - self.alpha) * (1 - targets)
-        loss   = alpha_t * (1 - p_t) ** self.gamma * bce
+        loss = alpha_t * (1 - p_t) ** self.gamma * bce
         return loss.mean()
