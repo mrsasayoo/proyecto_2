@@ -135,10 +135,12 @@ def train_linear_router(
             loss_ce = loss_fn(logits, y_b)
 
             # ── L_aux: Switch Transformer auxiliary loss ──────────────
-            # f_i: fracción de muestras del batch por experto (distribución empírica)
+            # f_i: fracción de muestras del batch RUTEADAS al experto i
+            # (decisión dura del router, no diferenciable — per spec)
+            routed = logits.detach().argmax(dim=-1)
             f_i = torch.zeros(N_EXPERTS_DOMAIN, device=device)
             for exp_id in range(N_EXPERTS_DOMAIN):
-                f_i[exp_id] = (y_b == exp_id).float().sum() / len(y_b)
+                f_i[exp_id] = (routed == exp_id).float().sum() / len(y_b)
 
             # P_i: probabilidad media del router por experto sobre el batch
             probs_batch = torch.softmax(logits, dim=-1)  # [B, N_EXPERTS_DOMAIN]
@@ -203,6 +205,10 @@ def train_linear_router(
         probs = model(Z_v).cpu().numpy()
         preds = probs.argmax(axis=1)
 
+    # Recomputar accuracy del modelo restaurado (best_acc puede ser stale
+    # si ninguna época múltiplo de 10 mejoró, e.g. dry-run con epochs=2)
+    final_acc = float(accuracy_score(y_val, preds))
+
     per_exp = per_expert_accuracy(y_val, preds)
     log_per_expert("Linear", per_exp)
     balance = check_load_balance(preds, "Linear")
@@ -218,4 +224,4 @@ def train_linear_router(
             acc_test = float(accuracy_score(y_test, test_preds))
         log.info("  [Linear] Routing Accuracy test: %.4f", acc_test)
 
-    return model, best_acc, probs, balance, threshold, acc_test
+    return model, final_acc, probs, balance, threshold, acc_test

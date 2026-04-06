@@ -57,7 +57,8 @@ from fase1_config import (
 )
 import backbone_cvt13  # noqa: F401 — activar registro en timm
 import backbone_densenet  # noqa: F401 — activar registro de DenseNet-121 custom
-from backbone_loader import load_frozen_backbone
+from backbone_loader import load_frozen_backbone, load_frozen_backbone_from_checkpoint
+from fase1_config import BACKBONE_TO_CHECKPOINT_DIR, BACKBONE_CHECKPOINT_FILENAME
 from dataset_builder import build_datasets
 from embeddings_extractor import extract_embeddings
 from embeddings_storage import save_embeddings, log_distribution
@@ -482,8 +483,39 @@ def main(args):
         args.batch_size = effective_batch
 
     # ── 4. Cargar backbone congelado ──
-    log.info("[Setup] Cargando backbone '%s'...", args.backbone)
-    model, d_model = load_frozen_backbone(args.backbone, device)
+    # Paso 4.1 entrenó el backbone y guardó el checkpoint.
+    # Si no se proporciona --checkpoint_path, intenta el path canónico.
+    if args.checkpoint_path is None:
+        # Intentar path canónico según BACKBONE_TO_CHECKPOINT_DIR
+        _subdir = BACKBONE_TO_CHECKPOINT_DIR.get(args.backbone, "")
+        _canonical = (
+            _PROJECT_ROOT / "checkpoints" / _subdir / BACKBONE_CHECKPOINT_FILENAME
+        )
+        if _canonical.exists():
+            args.checkpoint_path = str(_canonical)
+            log.info(
+                "[Setup] Checkpoint encontrado automáticamente: %s",
+                args.checkpoint_path,
+            )
+        else:
+            log.warning(
+                "[Setup] Checkpoint no encontrado en '%s'. "
+                "El backbone se inicializará con pesos ALEATORIOS. "
+                "Los embeddings NO serán significativos para routing. "
+                "Ejecuta primero: python src/pipeline/fase1/fase1_train_pipeline.py "
+                "--backbone %s",
+                _canonical,
+                args.backbone,
+            )
+
+    if args.checkpoint_path and Path(args.checkpoint_path).exists():
+        log.info("[Setup] Cargando backbone desde checkpoint: %s", args.checkpoint_path)
+        model, d_model = load_frozen_backbone_from_checkpoint(
+            args.backbone, args.checkpoint_path, device
+        )
+    else:
+        log.info("[Setup] Cargando backbone '%s' (pesos aleatorios)...", args.backbone)
+        model, d_model = load_frozen_backbone(args.backbone, device)
 
     # ── 5. Construir datasets (lectura pura de artefactos Fase 0) ──
     log.info("[Setup] Construyendo datasets...")
@@ -707,6 +739,15 @@ def _build_parser():
         default=False,
         help="Forzar re-extracción aunque los embeddings ya existan en disco",
     )
+    parser.add_argument(
+        "--checkpoint_path",
+        default=None,
+        help=(
+            "Ruta al checkpoint backbone.pth generado por Paso 4.1 "
+            "(fase1_train_pipeline.py). Si no se proporciona, se usa "
+            "el backbone con pesos aleatorios (ADVERTENCIA: embeddings no significativos)."
+        ),
+    )
     # ── Dry-run ──
     parser.add_argument(
         "--dry-run",
@@ -777,9 +818,7 @@ def _build_parser():
     )
     parser.add_argument(
         "--isic_imgs",
-        default=_default_if_exists(
-            "isic_2019/ISIC_2019_Training_Input/ISIC_2019_Training_Input"
-        ),
+        default=_default_if_exists("isic_2019/ISIC_2019_Training_Input"),
         help="Carpeta con imágenes ISIC .jpg",
     )
 

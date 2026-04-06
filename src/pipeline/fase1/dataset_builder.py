@@ -107,6 +107,7 @@ def build_datasets(cfg):
             file_list=cfg["nih_val_list"],
             transform=transform_2d,
             mode="embedding",
+            split="val",
             filter_view=view_filter,
         )
         chest_test = ChestXray14Dataset(
@@ -115,6 +116,7 @@ def build_datasets(cfg):
             file_list=cfg["nih_test_list"],
             transform=transform_2d,
             mode="embedding",
+            split="test",
             filter_view=view_filter,
         )
         train_datasets.append(chest_train)
@@ -179,12 +181,14 @@ def build_datasets(cfg):
             img_dir=cfg["isic_imgs"],
             split_df=isic_val_df,
             mode="embedding",
+            split="val",
             transform_standard=isic_transform,
         )
         isic_test = ISICDataset(
             img_dir=cfg["isic_imgs"],
             split_df=isic_test_df,
             mode="embedding",
+            split="test",
             transform_standard=isic_transform,
         )
         train_datasets.append(isic_train)
@@ -240,6 +244,7 @@ def build_datasets(cfg):
             str(_base / "val"),
             cfg["luna_csv"],
             mode="embedding",
+            split="val",
         )
         train_datasets.append(luna_train)
         val_datasets.append(luna_val)
@@ -251,6 +256,7 @@ def build_datasets(cfg):
                 str(_luna_test_dir),
                 cfg["luna_csv"],
                 mode="embedding",
+                split="test",
             )
             test_datasets.append(luna_test)
             _luna_test_count = f"{len(luna_test):,}"
@@ -290,6 +296,8 @@ def build_datasets(cfg):
         def _build_pairs(mask):
             """Construye pares (ruta_nii, label) desde el CSV de splits."""
             pairs = []
+            n_total = int(mask.sum())
+            n_skipped = 0
             for _, row in splits_df[mask].iterrows():
                 case_id = row["case_id"]
                 label = int(row["label"])
@@ -298,6 +306,14 @@ def build_datasets(cfg):
                     candidates = list(nii_dir.rglob("*{}*.nii".format(case_id)))
                 if candidates:
                     pairs.append((str(candidates[0]), label))
+                else:
+                    n_skipped += 1
+            if n_skipped:
+                log.warning(
+                    "[Pancreas] %d/%d casos sin NIfTI en disco — omitidos (A19)",
+                    n_skipped,
+                    n_total,
+                )
             return pairs
 
         roi = cfg.get("pancreas_roi_strategy", "A")
@@ -315,11 +331,13 @@ def build_datasets(cfg):
                 panc_val_pairs,
                 mode="embedding",
                 roi_strategy=roi,
+                split="val",
             )
             panc_test = PancreasDataset(
                 panc_test_pairs,
                 mode="embedding",
                 roi_strategy=roi,
+                split="test",
             )
             train_datasets.append(panc_train)
             val_datasets.append(panc_val)

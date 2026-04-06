@@ -365,6 +365,8 @@ class PancreasDataset(Dataset):
         mode: str = "embedding",
         roi_strategy: str = "B",
         z_score_per_volume: bool = True,
+        split: str = "train",
+        augment_3d: bool = True,
     ):
         assert mode in ("embedding", "expert"), (
             f"[Pancreas] mode debe ser 'embedding' o 'expert', recibido: '{mode}'"
@@ -372,12 +374,28 @@ class PancreasDataset(Dataset):
         assert roi_strategy in ("A", "B"), (
             f"[Pancreas] roi_strategy debe ser 'A' o 'B', recibido: '{roi_strategy}'."
         )
+        assert split in ("train", "val", "test"), (
+            f"[Pancreas] split debe ser 'train', 'val' o 'test', recibido: '{split}'"
+        )
 
         self.expert_id = EXPERT_IDS["pancreas"]
         self.mode = mode
+        self.split = split
         self.roi_strategy = roi_strategy
         self.z_score_norm = z_score_per_volume
         self.samples = valid_pairs
+        # Augmentation 3D solo en mode="expert" + split="train" + flag habilitado
+        self._apply_augment = mode == "expert" and split == "train" and augment_3d
+        if self._apply_augment:
+            log.info(
+                "[Pancreas] Augmentation 3D ACTIVO (solo PDAC+, label=1):\n"
+                "    - Flip aleatorio 3 ejes (P=0.5 c/u)\n"
+                "    - Rotación axial ±15°\n"
+                "    - Variación HU offset ±0.03 (≈±15 HU normalizado)\n"
+                "    - Ruido gaussiano σ~U(0,0.02), P=0.3"
+            )
+        elif mode == "expert" and split == "train" and not augment_3d:
+            log.info("[Pancreas] Augmentation 3D DESACTIVADO (augment_3d=False)")
 
         n_total = len(self.samples)
         n_pos = sum(1 for _, l in self.samples if l == 1)
@@ -439,7 +457,6 @@ class PancreasDataset(Dataset):
             "    Un CT abdominal 512×512×300 float32 = ~300 MB por volumen.\n"
             "    Configuración obligatoria: batch_size=1–2 + FP16 + checkpoint."
         )
-
         # ── H4/Item-7: FocalLoss ──────────────────────────────────────────────
         log.info(
             f"[Pancreas] H4/Item-7 — Loss: FocalLoss(alpha=0.75, gamma=2).\n"
@@ -598,6 +615,43 @@ class PancreasDataset(Dataset):
             f"      FocalLoss(alpha=0.75) → concentra aprendizaje en casos difíciles"
         )
 
+    # ── Augmentation 3D (online, solo mode="expert" + split="train" + label=1) ──
+    def _augment_3d(self, volume: np.ndarray) -> np.ndarray:
+        """
+        Pipeline de data augmentation 3D para volúmenes CT abdominales (páncreas).
+
+        Adaptado de LUNA16Dataset._augment_3d() con diferencias clave:
+          - Sin desplazamiento espacial: los volúmenes ya están Z-cropped (ROI),
+            no centrados en candidatos puntuales como en LUNA16.
+          - Offset HU conservador (±15 HU normalizado ≈ ±0.03) para tejido abdominal.
+          - Solo se aplica a PDAC+ (label=1) para combatir desbalance ~2.3:1 a 3:1.
+
+        Entrada y salida: ndarray float32 shape (D, H, W), rango aprox [0, 1].
+        """
+        from scipy.ndimage import rotate as ndimage_rotate
+
+        # Flip along each axis independently (p=0.5)
+        for axis in range(3):
+            if np.random.random() < 0.5:
+                volume = np.flip(volume, axis=axis).copy()
+
+        # Random rotation in axial plane ±15° (axes 1,2 = H,W)
+        angle = np.random.uniform(-15, 15)
+        volume = ndimage_rotate(volume, angle, axes=(1, 2), reshape=False, order=1)
+
+        # HU variation: offset ±15 HU (conservative for abdominal tissue)
+        # HU range for pancreas is ~500 ([-100, 400]), normalized: 15/500 = 0.03
+        hu_offset = np.random.uniform(-0.03, 0.03)
+        volume = volume + hu_offset
+
+        # Gaussian noise (p=0.3)
+        if np.random.random() < 0.3:
+            sigma = np.random.uniform(0, 0.02)
+            noise = np.random.normal(0, sigma, volume.shape)
+            volume = volume + noise
+
+        return volume.astype(np.float32)
+
     def __len__(self):
         return len(self.samples)
 
@@ -611,12 +665,12 @@ class PancreasDataset(Dataset):
         except Exception as e:
             log.warning(
                 f"[Pancreas] Error leyendo '{nii_path}': {e}. "
-                f"Reemplazando con tensor cero."
+                f"Reemplazando con tensor sintético."
             )
             if self.mode == "embedding":
-                return torch.zeros(3, 224, 224), self.expert_id, case_stem
+                return torch.randn(3, 224, 224) * 0.1, self.expert_id, case_stem
             else:
-                return torch.zeros(1, 64, 64, 64), label, case_stem
+                return torch.randn(1, 64, 64, 64) * 0.1, label, case_stem
 
         lo, hi = HU_ABDOMEN_CLIP
 
@@ -647,6 +701,9 @@ class PancreasDataset(Dataset):
                 roi = PancreasROIExtractor.extract_option_b(volume)
             else:
                 roi = PancreasROIExtractor.extract_option_a(volume)
+            # Augmentation 3D: solo PDAC+ (label=1) durante training en expert mode
+            if self._apply_augment and label == 1:
+                roi = self._augment_3d(roi)
             volume_t = torch.from_numpy(roi).float().unsqueeze(0)
             return volume_t, label, case_stem
 

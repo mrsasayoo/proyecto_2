@@ -76,7 +76,7 @@ class ISICDataset(Dataset):
             [
                 transforms.Resize((img_size, img_size)),
                 transforms.RandomHorizontalFlip(p=0.5),
-                transforms.RandomVerticalFlip(p=0.5),
+                # REMOVED: RandomVerticalFlip — prohibited by project spec
                 transforms.RandomApply([transforms.RandomRotation((90, 90))], p=0.33),
                 transforms.RandomApply([transforms.RandomRotation((180, 180))], p=0.33),
                 transforms.ColorJitter(
@@ -87,7 +87,7 @@ class ISICDataset(Dataset):
                 ),
                 transforms.ToTensor(),
                 normalize,
-                transforms.RandomErasing(p=0.2, scale=(0.02, 0.2)),
+                # REMOVED: RandomErasing — prohibited by project spec
             ]
         )
 
@@ -120,6 +120,7 @@ class ISICDataset(Dataset):
         img_dir,
         split_df,
         mode="embedding",
+        split="train",
         transform_standard=None,
         transform_minority=None,
         apply_bcn_crop=True,
@@ -131,6 +132,7 @@ class ISICDataset(Dataset):
         self.img_dir = Path(img_dir)
         self.expert_id = EXPERT_IDS["isic"]
         self.mode = mode
+        self.split = split
         self.apply_bcn_crop = apply_bcn_crop
         self.df = split_df.reset_index(drop=True)
         self.class_weights = None
@@ -141,6 +143,7 @@ class ISICDataset(Dataset):
         else:
             self.transform_standard = transform_standard or tfs["standard"]
             self.transform_minority = transform_minority or tfs["minority"]
+            self.transform_base = tfs["embedding"]
             self.transform = self.transform_standard
 
         log.info(
@@ -434,6 +437,9 @@ class ISICDataset(Dataset):
         if self.mode == "embedding":
             return self.transform(img), self.expert_id, img_name
         else:
-            is_minority = bool(self.df.loc[idx, "is_minority"])
-            tf = self.transform_minority if is_minority else self.transform_standard
+            if self.split == "train":
+                is_minority = bool(self.df.loc[idx, "is_minority"])
+                tf = self.transform_minority if is_minority else self.transform_standard
+            else:
+                tf = self.transform_base
             return tf(img), int(self.df.loc[idx, "class_label"]), img_name

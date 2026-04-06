@@ -1,0 +1,9 @@
+{
+  "ood_auroc": 0.0,
+  "entropy_threshold": 0.8047189562170501,
+  "n_in_dist": 0,
+  "n_ood": 0,
+  "passes": false,
+  "threshold_min": 0.8,
+  "dry_run": true
+}

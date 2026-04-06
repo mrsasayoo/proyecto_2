@@ -27,7 +27,6 @@ from config import (
     OA_N_CLASSES,
     OA_BASE_IMG_COUNT,
 )
-from preprocessing import apply_clahe
 
 log = logging.getLogger("fase0")
 
@@ -114,6 +113,7 @@ class OAKneeDataset(Dataset):
         self.expert_id = EXPERT_IDS["oa"]
         self.img_size = img_size
         self.mode = mode
+        self.split = split
         self.samples = []
 
         split_dir = Path(root_dir) / split
@@ -346,14 +346,18 @@ class OAKneeDataset(Dataset):
             )
 
         # H4 — CLAHE ANTES del resize
+        from transform_domain import apply_clahe
+
         img = apply_clahe(img)
         img = img.resize((self.img_size, self.img_size), Image.BICUBIC)
 
         if self.mode == "embedding":
             return self.base_transform(img), self.expert_id, str(img_path.name)
         else:
-            if self.mode == "expert" and not getattr(
-                self, "_aug_offline_detected", False
+            if (
+                self.mode == "expert"
+                and not getattr(self, "_aug_offline_detected", False)
+                and self.split == "train"
             ):
                 img_tensor = self.aug_transform(img)
             else:

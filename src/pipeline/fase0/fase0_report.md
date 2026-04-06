@@ -77,7 +77,7 @@ python3 /mnt/hdd/datasets/carlos_andres_ferro/proyecto_2/src/pipeline/fase1/fase
     --oa_root datasets/osteoarthritis/oa_splits \
     --luna_patches_dir datasets/luna_lung_cancer/patches \
     --luna_csv datasets/luna_lung_cancer/candidates_V2/candidates_V2.csv \
-    --pancreas_splits_csv datasets/zenodo_13715870/pancreas_splits.csv \
+    --pancreas_splits_csv datasets/pancreas_splits.csv \
     --pancreas_nii_dir datasets/zenodo_13715870 \
     --pancreas_fold 1 \
     --pancreas_roi_strategy A

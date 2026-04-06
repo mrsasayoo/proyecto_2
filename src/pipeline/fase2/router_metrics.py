@@ -208,7 +208,6 @@ def measure_latency(fn, n_runs: int = 10) -> float:
 def log_split_distribution(y: np.ndarray, split_name: str) -> None:
     """Log per-expert sample counts and percentages for a data split."""
     total = len(y)
-    log = logging.getLogger(__name__)
     log.info("=== Distribución de expertos — %s ===", split_name)
     for expert_id in range(N_EXPERTS_DOMAIN):
         count = int((y == expert_id).sum())

@@ -73,3 +73,24 @@ BACKBONE_META_KEYS = frozenset(
         "vram_gb",
     }
 )
+
+# ── Entrenamiento end-to-end de backbones (Paso 4.1) ──────────
+# Hiperparámetros para la tarea proxy de clasificación de dominio
+TRAIN_EPOCHS = 20  # épocas — suficiente para proxy de dominio
+TRAIN_LR = 3e-4  # AdamW default
+TRAIN_WEIGHT_DECAY = 0.01  # L2 regularización
+TRAIN_WARMUP_EPOCHS = 2  # épocas de warm-up lineal del LR
+TRAIN_BATCH_SIZE = 64  # igual que DEFAULT_BATCH_SIZE
+TRAIN_WORKERS = 4  # igual que DEFAULT_WORKERS
+TRAIN_GRAD_CLIP = 1.0  # gradient clipping max norm
+
+# Mapeo backbone_name → subdirectorio en checkpoints/
+BACKBONE_TO_CHECKPOINT_DIR = {
+    "vit_tiny_patch16_224": "backbone_01_vit_tiny",
+    "cvt_13": "backbone_02_cvt13",
+    "swin_tiny_patch4_window7_224": "backbone_03_swin_tiny",
+    "densenet121_custom": "backbone_04_densenet121",
+}
+
+# Nombre del archivo de checkpoint dentro del subdirectorio
+BACKBONE_CHECKPOINT_FILENAME = "backbone.pth"

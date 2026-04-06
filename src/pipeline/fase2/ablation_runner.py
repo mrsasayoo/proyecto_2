@@ -39,7 +39,7 @@ from routers import (
 log = logging.getLogger("fase2")
 
 
-def run_ablation(data: dict, args) -> dict:
+def run_ablation(data: dict, args, dry_run: bool = False) -> dict:
     """
     Ejecuta los cuatro routers del ablation study y devuelve los resultados.
 
@@ -78,6 +78,7 @@ def run_ablation(data: dict, args) -> dict:
 
     # ── A) LINEAR ────────────────────────────────────────────────────────
     log.info("\n[A] Entrenando Linear + Softmax (baseline DL)...")
+    linear_epochs = 2 if dry_run else getattr(args, "epochs", LINEAR_EPOCHS)
     t0 = time.time()
     (
         linear_model,
@@ -92,7 +93,7 @@ def run_ablation(data: dict, args) -> dict:
         Z_val,
         y_val,
         d_model,
-        epochs=getattr(args, "epochs", LINEAR_EPOCHS),
+        epochs=linear_epochs,
         lr=LINEAR_LR,
         batch_size=LINEAR_BATCH_SIZE,
         alpha=getattr(args, "l_aux_alpha", ALPHA_L_AUX),
@@ -103,7 +104,12 @@ def run_ablation(data: dict, args) -> dict:
 
     device = "cuda" if torch.cuda.is_available() else "cpu"
     sample_t = torch.from_numpy(sample_np).float().to(device)
-    linear_latency = measure_latency(lambda: linear_model(sample_t))
+
+    @torch.no_grad()
+    def _linear_infer():
+        return linear_model(sample_t)
+
+    linear_latency = measure_latency(_linear_infer)
 
     results["Linear"] = {
         "acc": linear_acc,
@@ -119,6 +125,7 @@ def run_ablation(data: dict, args) -> dict:
 
     # ── B) GMM ───────────────────────────────────────────────────────────
     log.info("\n[B] Entrenando GMM (paramétrico EM)...")
+    gmm_max_iter = 5 if dry_run else None
     t0 = time.time()
     (
         gmm_model,
@@ -129,7 +136,15 @@ def run_ablation(data: dict, args) -> dict:
         gmm_thresh,
         gmm_cov_type,
         gmm_acc_test,
-    ) = train_gmm_router(Z_train, y_train, Z_val, y_val, Z_test=Z_test, y_test=y_test)
+    ) = train_gmm_router(
+        Z_train,
+        y_train,
+        Z_val,
+        y_val,
+        Z_test=Z_test,
+        y_test=y_test,
+        max_iter_override=gmm_max_iter,
+    )
     gmm_time = time.time() - t0
 
     gmm_latency = measure_latency(lambda: gmm_model.predict_proba(sample_np))

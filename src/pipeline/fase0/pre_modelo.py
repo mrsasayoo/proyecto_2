@@ -31,6 +31,7 @@ from sklearn.model_selection import (
     train_test_split,
     StratifiedShuffleSplit,
     StratifiedKFold,
+    GroupKFold,
 )
 from PIL import Image
 
@@ -812,6 +813,10 @@ def split_pancreas(datasets_dir):
     """
     10% test fijo estratificado + k-fold CV (k=5) sobre el 90% restante.
     Requiere pancreas_labels_binary.csv del Paso 4.
+
+    La unidad de splitting es patient_id (prefijo antes del último '_' en case_id),
+    NO case_id individual. Esto evita data leakage cuando un paciente tiene
+    múltiples estudios (e.g. 100047_00001, 100047_00002, ...).
     """
     csv_path = datasets_dir / "pancreas_labels_binary.csv"
     out_csv = datasets_dir / "pancreas_splits.csv"
@@ -836,77 +841,101 @@ def split_pancreas(datasets_dir):
         len(df),
     )
 
-    case_ids = df_valid["case_id"].astype(str).tolist()
-    labels = df_valid["label"].astype(int).tolist()
+    # Extraer patient_id del case_id (formato: {patient_id}_{study_id})
+    df_valid["patient_id"] = (
+        df_valid["case_id"].astype(str).apply(lambda x: x.rsplit("_", 1)[0])
+    )
 
-    # 10% test fijo
+    # ── Paso 1: Seleccionar 10% de PACIENTES como test ────────────────────────
+    unique_patients = df_valid["patient_id"].unique()
+    # Etiqueta por paciente: usar la moda (etiqueta más frecuente)
+    patient_label = df_valid.groupby("patient_id")["label"].agg(
+        lambda x: int(x.mode().iloc[0])
+    )
+    patient_ids_arr = patient_label.index.tolist()
+    patient_labels_arr = patient_label.values.tolist()
+
     try:
-        remain_ids, test_ids, remain_labels, _ = train_test_split(
-            case_ids,
-            labels,
+        remain_patient_ids, test_patient_ids = train_test_split(
+            patient_ids_arr,
             test_size=0.10,
-            stratify=labels,
+            stratify=patient_labels_arr,
             random_state=SEED,
         )
     except ValueError:
-        remain_ids, test_ids, remain_labels, _ = train_test_split(
-            case_ids,
-            labels,
+        remain_patient_ids, test_patient_ids = train_test_split(
+            patient_ids_arr,
             test_size=0.10,
             random_state=SEED,
         )
 
-    remain_ids = list(remain_ids)
-    test_ids = list(test_ids)
-    remain_labels = list(remain_labels)
+    test_patient_set = set(test_patient_ids)
+    remain_patient_set = set(remain_patient_ids)
 
-    # k-fold (k=5) sobre el 90% restante
-    skf = StratifiedKFold(n_splits=5, shuffle=True, random_state=SEED)
+    # ── Paso 2: Separar cases en test y cv_pool ───────────────────────────────
+    df_test = df_valid[df_valid["patient_id"].isin(test_patient_set)].copy()
+    df_cv = df_valid[df_valid["patient_id"].isin(remain_patient_set)].copy()
+
+    # ── Paso 3: GroupKFold(n_splits=5) sobre cv_pool, agrupando por patient_id
+    gkf = GroupKFold(n_splits=5)
+    cv_groups = df_cv["patient_id"].values
     fold_assignments = {}
 
     for fold_idx, (train_idx, val_idx) in enumerate(
-        skf.split(remain_ids, remain_labels), 1
+        gkf.split(df_cv, groups=cv_groups), 1
     ):
         for i in train_idx:
-            cid = remain_ids[i]
+            cid = str(df_cv.iloc[i]["case_id"])
             if cid not in fold_assignments:
                 fold_assignments[cid] = []
             fold_assignments[cid].append("fold{}_train".format(fold_idx))
         for i in val_idx:
-            cid = remain_ids[i]
+            cid = str(df_cv.iloc[i]["case_id"])
             if cid not in fold_assignments:
                 fold_assignments[cid] = []
             fold_assignments[cid].append("fold{}_val".format(fold_idx))
 
     # Construir CSV de salida
     rows = []
-    for cid in test_ids:
-        lbl = int(df_valid[df_valid["case_id"] == cid]["label"].iloc[0])
-        rows.append({"case_id": cid, "label": lbl, "split": "test"})
+    for _, row in df_test.iterrows():
+        rows.append(
+            {
+                "case_id": str(row["case_id"]),
+                "label": int(row["label"]),
+                "split": "test",
+            }
+        )
 
-    for cid in remain_ids:
-        lbl = int(df_valid[df_valid["case_id"] == cid]["label"].iloc[0])
+    for _, row in df_cv.iterrows():
+        cid = str(row["case_id"])
+        lbl = int(row["label"])
         for split_tag in fold_assignments.get(cid, []):
             rows.append({"case_id": cid, "label": lbl, "split": split_tag})
 
     out_df = pd.DataFrame(rows)
     out_df.to_csv(out_csv, index=False)
 
-    # Archivo de test IDs para referencia rápida
-    test_ids_file.write_text("\n".join(str(x) for x in test_ids) + "\n")
+    # Archivo de test IDs para referencia rápida (patient_ids de test)
+    test_case_ids = df_test["case_id"].astype(str).tolist()
+    test_ids_file.write_text("\n".join(test_case_ids) + "\n")
 
-    n_test = len(test_ids)
-    n_remain = len(remain_ids)
+    n_test_cases = len(df_test)
+    n_cv_cases = len(df_cv)
     log.info(
-        "[PANCREAS] Splits: test=%d (fijo) | train/val=5-fold sobre %d",
-        n_test,
-        n_remain,
+        "[PANCREAS] Splits: test=%d cases (%d patients) | "
+        "train/val=5-fold sobre %d cases (%d patients)",
+        n_test_cases,
+        len(test_patient_ids),
+        n_cv_cases,
+        len(remain_patient_ids),
     )
     return {
         "status": "✅",
-        "test": n_test,
-        "train_val_pool": n_remain,
-        "total": n_test + n_remain,
+        "test": n_test_cases,
+        "test_patients": len(test_patient_ids),
+        "train_val_pool": n_cv_cases,
+        "train_val_patients": len(remain_patient_ids),
+        "total": n_test_cases + n_cv_cases,
     }
 
 
@@ -963,10 +992,7 @@ def build_cae_splits(datasets_dir):
                 rows.append(
                     {
                         "ruta_imagen": str(
-                            isic_dir
-                            / "ISIC_2019_Training_Input"
-                            / "ISIC_2019_Training_Input"
-                            / (img_name + ".jpg")
+                            isic_dir / "ISIC_2019_Training_Input" / (img_name + ".jpg")
                         ),
                         "dataset_origen": "isic",
                         "split": split_name,

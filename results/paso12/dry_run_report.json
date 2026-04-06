@@ -1,0 +1,72 @@
+{
+  "paso": 12,
+  "phase": "paso12_dashboard",
+  "dry_run": true,
+  "timestamp": "2026-04-06T00:29:38.562899+00:00",
+  "summary": {
+    "total": 10,
+    "passed": 10,
+    "warned": 0,
+    "failed": 0
+  },
+  "checks": [
+    {
+      "name": "check_imports",
+      "status": "PASS",
+      "message": "All imports OK: gradio=6.11.0, matplotlib=3.10.8, pandas=3.0.1, torch=2.10.0+cpu"
+    },
+    {
+      "name": "check_dashboard_figures_module",
+      "status": "PASS",
+      "message": "generate_all_figures importable"
+    },
+    {
+      "name": "check_results_paso9",
+      "status": "PASS",
+      "message": "test_metrics_summary.json readable: 5 experts, f1_2d_mean=0.0"
+    },
+    {
+      "name": "check_results_paso10",
+      "status": "PASS",
+      "message": "verification_report.json readable: 28/34 passed"
+    },
+    {
+      "name": "check_results_paso11",
+      "status": "PASS",
+      "message": "dry_run_report.json readable: 10/13 passed"
+    },
+    {
+      "name": "check_load_balance_data",
+      "status": "PASS",
+      "message": "load_balance_test.json readable: ratio=1.0, passes=True"
+    },
+    {
+      "name": "check_output_dir",
+      "status": "PASS",
+      "message": "Output dir writable: /mnt/hdd/datasets/carlos_andres_ferro/proyecto_2/results/paso12"
+    },
+    {
+      "name": "check_figures_generation",
+      "status": "PASS",
+      "message": "All 5 figures generated: ['figura1_arquitectura_moe.png', 'figura2_ablation_study.png', 'figura3_curvas_entrenamiento.png', 'figura4_load_balance.png', 'figura5_attention_heatmap.png']"
+    },
+    {
+      "name": "check_gradio_components",
+      "status": "PASS",
+      "message": "Blocks/Tab/Image/JSON instantiated without launch"
+    },
+    {
+      "name": "check_report_write",
+      "status": "PASS",
+      "message": "Report written to /mnt/hdd/datasets/carlos_andres_ferro/proyecto_2/results/paso12/dry_run_report.json"
+    }
+  ],
+  "figures_generated": [
+    "figura1_arquitectura_moe.png",
+    "figura2_ablation_study.png",
+    "figura3_curvas_entrenamiento.png",
+    "figura4_load_balance.png",
+    "figura5_attention_heatmap.png"
+  ],
+  "exit_code": 0
+}

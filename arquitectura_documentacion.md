@@ -1,6 +1,6 @@
 # Arquitectura del Sistema MoE — Clasificación Médica Multimodal
 
-*Última actualización: 2026-03-28 | Autor: MNEMON (agente de memoria)Proyecto: Incorporar Elementos de IA — Unidad II, Bloque VisiónUniversidad Autónoma de Occidente — Pregrado Ingeniería de Datos / IA*
+*Última actualización: 2026-04-06 (Pasos 5.1, 5.2, 5.3, 5.4, 5.5, 5.6, 6, 8, 9, 10, 11 y 12 implementados — dry-run verificado) | Autor: MNEMON (agente de memoria) | Proyecto: Incorporar Elementos de IA — Unidad II, Bloque Visión | Universidad Autónoma de Occidente — Pregrado Ingeniería de Datos / IA*
 
 ---
 
@@ -51,6 +51,8 @@ Los expertos 0–4 se entrenan con su dataset propio. El experto 5 (CAE) se entr
 > **Nota sobre los backbones de los expertos:**
 > - Los modelos **ViT, CvT y Swin** se construyen **desde cero** con arquitectura predefinida (no son pesos preentrenados de ImageNet ni HuggingFace como punto de partida).
 > - **DenseNet** es una arquitectura **propia/custom** diseñada desde cero para este proyecto.
+> - **Paso 4.1 (Entrenar backbones — ✅ completado):** antes de extraer embeddings, cada backbone se entrena end-to-end con una **tarea proxy de clasificación de dominio médico** (5 clases = `expert_id` 0–4, `CrossEntropyLoss`). La cabeza lineal (`LinearHead(d_model→5)`) se descarta tras el entrenamiento; solo los pesos del backbone se guardan en `checkpoints/backbone_0X_<nombre>/backbone.pth`. El Paso 4.2 carga ese checkpoint y congela el backbone antes de extraer embeddings.
+> - **Fix en `transform_2d.py` (2026-04-05):** durante el dry-run de Pasos 5.1/5.2, se detectó que el import de `fase1_config` en `src/pipeline/fase1/transform_2d.py` fallaba cuando se invocaba desde el contexto de Fase 2. Corregido con `try/except` que intenta `from . import fase1_config` y como fallback `from fase1 import fase1_config`, preservando compatibilidad hacia atrás.
 
 ### 1.3 Restricción absoluta: solo píxeles
 
@@ -93,35 +95,36 @@ Router: softmax(W·z + b) → distribución sobre 6 expertos
 
 | # | Paso | Descripción | Fase pipeline | Estado |
 | --- | --- | --- | --- | --- |
-| 1 | Descargar datos | Descarga de los 5 datasets desde fuentes públicas | Fase 0 – Paso 1 | ✅ Completado |
+| 1 | Descargar datos | Descarga de los 5 datasets desde fuentes públicas | Fase 0 – Paso 1 | ✅ Completado (100% — 19/19 ítems resueltos, 2026-04-05) |
 | 2 | Extraer archivos | Descompresión de ZIPs, tarballs, NIfTI | Fase 0 – Paso 2 | ✅ Completado |
-| 3 | Preparar datos | Splits 80/10/10, preprocesado por dominio, etiquetas | Fase 0 – Pasos 3–5 | 🔄 En progreso (Pancreas con error) |
-| 4 | Generar embeddings | Backbone congelado extrae CLS tokens → `.npy` | Fase 1 | ⏳ Pendiente |
-| 5.1 | Entrenar Experto 1 | Chest — ConvNeXt-Tiny, BCEWithLogitsLoss, 14 clases | Fase 2 | ⏳ Pendiente |
-| 5.2 | Entrenar Experto 2 | ISIC — EfficientNet-B3, CrossEntropyLoss, 9 clases | Fase 2 | ⏳ Pendiente |
-| 5.3 | Entrenar Experto 3 | OA — VGG16-BN, CrossEntropyLoss ordinal, 3 clases | Fase 2 | ⏳ Pendiente |
-| 5.4 | Entrenar Experto 4 | LUNA16 — ViViT-Tiny 3D, FocalLoss, 2 clases | Fase 2 | ⏳ Pendiente |
-| 5.5 | Entrenar Experto 5 | Páncreas — Swin3D-Tiny, FocalLoss, 2 clases | Fase 2 | ⏳ Pendiente |
-| 5.6 | Entrenar Experto 6 | CAE sobre los 5 datasets combinados | Fase 3 | ⏳ Pendiente |
-| 6 | Ablation study | Routers sobre expertos congelados (GMM, KNN, Linear, NB) | Fase 4 | ⏳ Pendiente |
-| 7 | Escoger router | Seleccionar el mejor método de routing | Fase 4 | ⏳ Pendiente |
-| 8 | Fine-tuning por etapas | Descongelar cabezas → fine-tuning global | Fase 5 | ⏳ Pendiente |
-| 9 | Prueba con datos reales | Validación end-to-end con imágenes nuevas | — | ⏳ Pendiente |
-| 10 | Verificación | Pruebas funcionales completas del sistema | — | ⏳ Pendiente |
-| 11 | Página web | Interfaz web para inferencia interactiva | Fase 6 | ⏳ Pendiente |
-| 12 | Dashboard | Dashboard + explicación del flujo arquitectónico | Fase 6 | ⏳ Pendiente |
+| 3 | Preparar datos | Splits 80/10/10, preprocesado por dominio, etiquetas | Fase 0 – Pasos 3–5 | 🔄 En progreso — verificar con re-ejecución (Pancreas previamente con error, datos ya disponibles) |
+| 4.1 | Entrenar backbones | Entrenamiento end-to-end de los 4 backbones desde cero con tarea proxy (clasificación de dominio médico, 5 clases). Produce `backbone.pth` en `checkpoints/backbone_0X_<nombre>/` | Fase 1 | ✅ Completado (2026-04-05) |
+| 4.2 | Generar embeddings | Backbone congelado (cargado desde checkpoint de Paso 4.1) extrae CLS tokens → `.npy` | Fase 1 | ⏳ Pendiente |
+| 5.1 | Entrenar Experto 1 | Chest — ConvNeXt-Tiny (~27.8M params), BCEWithLogitsLoss(pos_weight), 14 clases multilabel. Archivos: `expert1_config.py`, `models/expert1_convnext.py`, `dataloader_expert1.py`, `train_expert1.py`. Checkpoint: `checkpoints/expert_00_convnext_tiny/expert1_best.pt` | Fase 2 | ✅ Script implementado — dry-run verificado |
+| 5.2 | Entrenar Experto 2 | ISIC — EfficientNet-B3 (~10.7M params), CrossEntropyLoss(class_weights), 9 clases (8 train + UNK). Archivos: `expert2_config.py`, `models/expert2_efficientnet.py`, `dataloader_expert2.py`, `train_expert2.py`. Checkpoint: `checkpoints/expert_01_efficientnet_b3/expert2_best.pt` | Fase 2 | ✅ Script implementado — dry-run verificado |
+| 5.3 | Entrenar Experto 3 | OA — VGG16-BN (~134M params), CrossEntropyLoss(class_weights), 3 clases ordinales (KL→Normal/Leve/Severo). Archivos: `expert_oa_config.py`, `models/expert_oa_vgg16bn.py`, `dataloader_expert_oa.py`, `train_expert_oa.py`. Checkpoint: `checkpoints/expert_02_vgg16_bn/expert_oa_best.pt` | Fase 2 | ✅ Script implementado — dry-run verificado |
+| 5.4 | Entrenar Experto 4 | LUNA16 — MC3-18 (~11.4M params), FocalLoss(alpha=0.85, gamma=2.0), 2 clases. Script `train_expert3.py` corregido (BUG-1: paths). Checkpoint: `checkpoints/expert_03_vivit_tiny/expert3_best.pt` | Fase 2 | ✅ Script corregido — dry-run verificado |
+| 5.5 | Entrenar Experto 5 | Páncreas — Swin3D-Tiny (~6.94M params), FocalLoss(alpha=0.75, gamma=2.0), 2 clases, k-fold CV (k=5). Archivos: `expert4_config.py`, `models/expert4_swin3d.py`, `dataloader_expert4.py`, `train_expert4.py`. Checkpoint: `checkpoints/expert_04_swin3d_tiny/expert4_best.pt` | Fase 2 | ✅ Script implementado — dry-run verificado |
+| 5.6 | Entrenar Experto 6 | CAE — ConvAutoEncoder 2D (~206M params), MSE+L1, 5 datasets combinados (162,611 muestras). Activado por entropía H(g)>P95, NO routing directo. Archivos: `expert5_cae_config.py`, `models/expert5_cae.py`, `dataloader_cae.py`, `train_cae.py`. Checkpoint: `checkpoints/expert_05_cae/cae_best.pt` | Fase 3 | ✅ Script implementado — dry-run verificado |
+| 6 | Ablation study | 4 routers comparados sobre embeddings congelados: Linear (L_aux Switch Transformer), GMM (EM full/diag), NaiveBayes (MLE analítico), kNN-FAISS (coseno, k=5). Winner: load balance filter → max accuracy. Input: embeddings Fase 1, d_model=192, N_EXPERTS_DOMAIN=5. Output: `ablation_results.json` + best router model. `--dry-run` disponible (embeddings sintéticos, sin artefactos a disco) | Fase 2 | ✅ Implementado — dry-run verificado |
+| 7 | Escoger router | Seleccionar el mejor método de routing (integrado en Paso 6 — selección automática por criterio balance+accuracy) | Fase 2 | ✅ Implementado (parte del Paso 6) |
+| 8 | Fine-tuning por etapas | Fine-tuning 3 etapas: Stage1 (router LR=1e-3, ~50ep) → Stage2 (router+cabezas LR=1e-4, ~30ep) → Stage3 (global, LR router=1e-4/expertos=1e-6, 7-10ep). Script: `fase5_finetune_global.py`. `--dry-run` disponible. | Fase 5 | ✅ Implementado — dry-run verificado |
+| 9 | Prueba con datos reales | Evaluación end-to-end del MoE sobre test sets reales. Inferencia sin expert_id (router decide): backbone→router→entropy→experto. Métricas F1/AUC por experto, routing accuracy, load balance, OOD AUROC, Grad-CAM. Script: `fase9_test_real.py`. `--dry-run` disponible. | Fase 6 | ✅ Implementado — dry-run verificado |
+| 10 | Verificación | Verificación funcional completa del sistema. 9 categorías de checks (A–I): imports, no-metadata, load balance, métricas §10, reproducibilidad, artefactos, augmentaciones prohibidas, VRAM, arquitectura. Detecta penalizaciones −40%/−20%. Script: `paso10_verificacion.py`. `--dry-run` disponible. | Fase 6 | ✅ Implementado — dry-run verificado |
+| 11 | Página web | Dashboard Interactivo MoE con 8 funcionalidades obligatorias (§11 guía). Gradio app: carga imagen, inferencia en tiempo real, Grad-CAM, panel experto, ablation study, load balance, OOD alert. Scripts: `paso11_webapp.py`, `webapp_helpers.py`. Degradación graceful sin checkpoints. `--dry-run` disponible. | Fase 6 | ✅ Implementado — dry-run verificado |
+| 12 | Dashboard | Dashboard de reporte final con 6 tabs (arquitectura, métricas, ablation, load balance, estado, figuras) + 5 figuras obligatorias §12.2 (matplotlib Agg, 150 dpi). Scripts: `paso12_dashboard.py`, `dashboard_figures.py`. `--dry-run` disponible. | Fase 6 | ✅ Implementado — dry-run verificado |
 
 ### 2.2 Mapa de fases del pipeline
 
 | Fase | Nombre | Descripción | Script orquestador |
 | --- | --- | --- | --- |
 | Fase 0 | Preparación de datos | Descarga, extracción, splits, parches 3D | `fase0_pipeline.py` |
-| Fase 1 | Extracción de embeddings | Backbone congelado → vectores `.npy` | `fase1_pipeline.py` |
+| Fase 1 | Entrenamiento de backbones + extracción de embeddings | **Paso 4.1:** entrenamiento end-to-end desde cero (proxy: clasificación de dominio) → `backbone.pth`. **Paso 4.2:** backbone congelado → vectores `.npy` | `fase1_train_pipeline.py` (4.1) / `fase1_pipeline.py` (4.2) |
 | Fase 2 | Entrenamiento de los 5 expertos | Fine-tuning individual de cada experto de dominio | `fase2_train_experts.py` |
 | Fase 3 | Entrenamiento del Experto 6 (CAE) | Autoencoder convolucional para filtro OOD/basura | `fase3_train_cae.py` |
-| Fase 4 | Ablation study del router | 4 métodos de routing comparados sobre expertos congelados | `fase4_ablation.py` |
-| Fase 5 | Fine-tuning global | Sistema MoE completo, descongelamiento por etapas | `fase5_finetune_global.py` |
-| Fase 6 | Despliegue web | Dashboard interactivo + API REST | `fase6_webapp.py` |
+| Fase 4 | Ablation study del router | 4 métodos de routing (Linear, GMM, NaiveBayes, kNN-FAISS) comparados sobre embeddings congelados. ✅ Implementado — dry-run verificado | `fase2_pipeline.py` (en `src/pipeline/fase2/`) |
+| Fase 5 | Fine-tuning global | Sistema MoE completo, descongelamiento progresivo en 3 stages: Stage1 (router solo, LR=1e-3) → Stage2 (router+cabezas, LR=1e-4) → Stage3 (global, LR router=1e-4 / expertos=1e-6). L_total = L_task + 0.01·L_aux + 0.1·L_error. ✅ Implementado — dry-run verificado | `src/pipeline/fase5/fase5_finetune_global.py` |
+| Fase 6 | Evaluación + Despliegue web | **Paso 9:** Evaluación end-to-end del MoE sobre test sets reales (inferencia sin expert_id). ✅ Implementado — dry-run verificado. **Paso 10:** Verificación funcional completa (9 categorías, detección de penalizaciones). ✅ Implementado — dry-run verificado. **Paso 11:** Dashboard Interactivo MoE — 8 funcionalidades, Gradio, --dry-run verificado. ✅ Implementado. **Paso 12:** Dashboard de reporte final — 6 tabs + 5 figuras obligatorias §12.2 (matplotlib Agg, 150 dpi), --dry-run verificado. ✅ Implementado | `src/pipeline/fase6/fase9_test_real.py` (Paso 9) / `src/pipeline/fase6/paso10_verificacion.py` (Paso 10) / `src/pipeline/fase6/paso11_webapp.py` (Paso 11) / `src/pipeline/fase6/webapp_helpers.py` (Paso 11 helpers) / `src/pipeline/fase6/paso12_dashboard.py` (Paso 12) / `src/pipeline/fase6/dashboard_figures.py` (Paso 12 figures) |
 
 ---
 
@@ -141,7 +144,31 @@ Router: softmax(W·z + b) → distribución sobre 6 expertos
 | **Preprocesado** | Resize 224×224, normalización ImageNet |
 | **Split** | Por Patient ID (`train_val_list.txt` / `test_list.txt` oficiales) |
 
+**Estado del dataset (verificado 2026-04-04):**
+
+| Campo | Detalle |
+| --- | --- |
+| **Estado** | ✅ Completo |
+| **Imágenes** | 112,120 `.png` (`images_001/` a `images_012/`) |
+| **all_images/** | 112,120 symlinks (namespace plano) |
+| **Splits** | train 88,999 / val 11,349 / test 11,772 = 112,120 ✅ |
+| **Método de split** | Patient ID (listas oficiales `train_val_list.txt` / `test_list.txt`) |
+| **Metadata** | `Data_Entry_2017.csv` (112,120 filas), `BBox_List_2017.csv` |
+| **data.zip** | ~~45 GB eliminado el 2026-04-04~~ |
+| **Anomalías** | Ninguna |
+| **Fuente** | Kaggle `nih-chest-xrays` (organización oficial NIH) — Riesgo 🟢 Bajo |
+
 **Patologías (14):** Atelectasis, Cardiomegaly, Effusion, Infiltration, Mass, Nodule, Pneumonia, Pneumothorax, Consolidation, Edema, Emphysema, Fibrosis, Pleural_Thickening, Hernia.
+
+**Estado del script de entrenamiento (Paso 5.1, 2026-04-05):**
+
+| Campo | Detalle |
+| --- | --- |
+| **Estado** | ✅ Script listo — dry-run verificado, datos pendientes |
+| **Modelo** | `Expert1ConvNeXtTiny` — ConvNeXt-Tiny, ~27.8M params, `weights=None` |
+| **Archivos** | `expert1_config.py`, `models/expert1_convnext.py`, `dataloader_expert1.py`, `train_expert1.py` |
+| **Checkpoint** | `checkpoints/expert_00_convnext_tiny/expert1_best.pt` |
+| **Pipeline** | `CLAHETransform → Resize(224×224) → TVF → ToTensor → Normalize(ImageNet)` |
 
 **Notas críticas:**
 - Etiquetas generadas por NLP — benchmark DenseNet-121 ≈ 0.81 AUC macro.
@@ -164,11 +191,37 @@ Router: softmax(W·z + b) → distribución sobre 6 expertos
 | **Preprocesado** | Resize 224×224, ColorJitter agresivo |
 | **Split** | Por `lesion_id` (función `build_lesion_split`) |
 
+**Estado del dataset (verificado 2026-04-04):**
+
+| Campo | Detalle |
+| --- | --- |
+| **Estado** | ✅ Completo |
+| **Imágenes** | 25,331 `.jpg` en `datasets/isic_2019/ISIC_2019_Training_Input/` |
+| **Directorio `isic_images/`** | Vacío — directorio huérfano. **No usar.** |
+| **Splits** | train 20,409 / val 2,474 / test 2,448 = 25,331 ✅ |
+| **Método de split** | `build_lesion_split` por `lesion_id` |
+| **Sufijo `_downsampled`** | Manejado por exclusión en `dataset_builder.py` — no es un bug activo |
+| **Bug corregido** | `fase0_pipeline.py`, `fase1_pipeline.py`, `pre_modelo.py` — rutas actualizadas a nivel único (fuente oficial) |
+| **isic-2019.zip** | ~~9.3 GB eliminado el 2026-04-04~~ |
+| **Fuente** | ISIC Archive oficial (S3: `isic-archive.s3.amazonaws.com`). Re-descargado 2026-04-05 (9,771,618,190 bytes, 25,331 imágenes verificadas). Riesgo 🟢 Bajo. |
+
 **Notas críticas:**
 - 3 fuentes con bias de dominio — augmentación agresiva obligatoria.
 - 9 neuronas en la capa de salida (incluye slot UNK para inferencia).
 - Sin `metadata_csv` → riesgo de leakage entre fuentes.
 - UNK en inferencia → H(g) alta → Experto 5 OOD la captura.
+
+**Estado del script de entrenamiento (Paso 5.2, 2026-04-05):**
+
+| Campo | Detalle |
+| --- | --- |
+| **Estado** | ✅ Script listo — dry-run verificado, datos pendientes |
+| **Modelo** | `Expert2EfficientNetB3` — EfficientNet-B3, ~10.7M params, `weights=None` |
+| **Archivos** | `expert2_config.py`, `models/expert2_efficientnet.py`, `dataloader_expert2.py`, `train_expert2.py` |
+| **Checkpoint** | `checkpoints/expert_01_efficientnet_b3/expert2_best.pt` |
+| **Pipeline** | `BCNCrop (por ISICDataset) → Resize(224×224) → ToTensor → Normalize(ImageNet)` |
+| **Augmentation** | `ColorJitter(0.3, 0.3, 0.3, 0.1)` + flips + affine (agresivo, obligatorio por 3 fuentes) |
+| **Nota BCNCrop** | Aplicado internamente por `ISICDataset`, no en el objeto `transform` — evita doble crop |
 
 ### 3.3 Experto 2 — OA Knee (Osteoartritis de rodilla)
 
@@ -177,20 +230,35 @@ Router: softmax(W·z + b) → distribución sobre 6 expertos
 | **Dataset** | Osteoarthritis Knee X-ray |
 | **Modalidad** | Radiografía de rodilla 2D |
 | **Tarea** | Clasificación ordinal (3 clases: Normal KL0 / Leve KL1-2 / Severo KL3-4) |
-| **Arquitectura** | VGG16-BN |
+| **Arquitectura** | VGG16-BN con clasificador modificado (BN en capas FC, Dropout=0.5) |
+| **Expert ID** | 2 (`EXPERT_IDS["oa"]`) |
+| **Parámetros** | ~134M (~11.7M features + ~119M classifier) |
 | **Loss** | `CrossEntropyLoss` con `class_weights` (opción pragmática) u `OrdinalLoss(n_classes=3)` |
-| **Métricas** | QWK (Quadratic Weighted Kappa) — **no** Accuracy ni F1 |
-| **Volumen** | ~8,260 imágenes base |
-| **Preprocesado** | CLAHE → resize 224×224 (CLAHE **siempre** antes del resize) |
-| **Split** | Directorios `oa_splits/{train,val,test}/` |
+| **Métricas** | QWK (Quadratic Weighted Kappa) + F1-macro (secundaria) — **no** Accuracy |
+| **Volumen** | 4,766 imágenes KL-graded (de 9,339 en disco). Remapeo: KL0→Cls0 / KL1+2→Cls1 / KL3+4→Cls2 (`pre_modelo.py:569`) |
+| **Preprocesado** | CLAHE (interno en OAKneeDataset) → resize 224×224 BICUBIC (CLAHE **siempre** antes del resize) |
+| **Split** | Directorios `oa_splits/{train,val,test}/` — train:3,814 / val:480 / test:472. Copias físicas, ratio 80/10/10 |
 
 **Notas críticas:**
-- Augmentación offline ya aplicada — **no** augmentar de nuevo en runtime.
-- Sin Patient ID — documentar como limitación.
+- Remapeo KL0→0 / KL1+2→1 / KL3+4→2 documentado — ver `paso_01_descarga_datos.md` §3.3.
+- Sin Patient ID — split por grupo de similitud visual (heurística, no equivale a patient_id). Documentar como limitación.
 - KL1 contamina la frontera Clase 0 ↔︎ Clase 1 (la más difícil).
 - **Nunca** usar `RandomVerticalFlip` (anatomía simétrica solo horizontalmente).
 - Matriz de costos para penalización ordinal disponible:
 `[[0, 1, 4],    [1, 0, 1],    [4, 1, 0]]`
+- **Nomenclatura de archivos:** usan prefijo `expert_oa_` (no `expert3_`) para evitar confusión entre el expert_id (2) y el paso del pipeline (5.3).
+
+**Estado del script de entrenamiento (Paso 5.3, 2026-04-05):**
+
+| Campo | Detalle |
+| --- | --- |
+| **Estado** | ✅ Script listo — dry-run verificado, pendiente de entrenamiento completo |
+| **Modelo** | VGG16-BN con clasificador modificado (BN en FC layers), ~134M params, `weights=None` |
+| **Archivos** | `expert_oa_config.py`, `models/expert_oa_vgg16bn.py`, `dataloader_expert_oa.py`, `train_expert_oa.py` |
+| **Checkpoint** | `checkpoints/expert_02_vgg16_bn/expert_oa_best.pt` |
+| **Pipeline** | `CLAHETransform (interno en dataset) → Resize(224×224, BICUBIC) → ToTensor → Normalize(ImageNet)` |
+| **Augmentation** | `RandomHorizontalFlip(0.5)` + `RandomRotation(10)` + `ColorJitter(0.2, 0.15)`. **Prohibido:** `RandomVerticalFlip` |
+| **Config** | LR=1e-4, WD=0.05, batch=32, accum=4 (efectivo=128), FP16, patience=10, max_epochs=100 |
 
 ### 3.4 Experto 3 — LUNA16 (Cáncer de pulmón)
 
@@ -199,19 +267,40 @@ Router: softmax(W·z + b) → distribución sobre 6 expertos
 | **Dataset** | LUNA16 / LIDC-IDRI |
 | **Modalidad** | CT pulmonar 3D (parches, no volúmenes completos) |
 | **Tarea** | Clasificación binaria de parches (nódulo sí/no) |
-| **Arquitectura** | ViViT-Tiny (3D) |
-| **Loss** | `FocalLoss(gamma=2, alpha=0.25)` — obligatoria |
-| **Métricas** | CPM + FROC (`noduleCADEvaluationLUNA16.py`) |
+| **Arquitectura** | MC3-18 (Mixed Convolutions 3D) — **cambio justificado respecto a la spec original (ViViT-Tiny)** |
+| **Expert ID** | 3 |
+| **Parámetros** | ~11.4M |
+| **Loss** | `FocalLoss(gamma=2, alpha=0.85)` — obligatoria. **Corrección:** alpha=0.85 (no 0.25 como indicaba la doc anterior) |
+| **Métricas** | AUC-ROC + F1 + sensitivity + specificity |
 | **Tensor** | `[B, 1, 64, 64, 64]` — parche centrado en candidato (x, y, z) |
 | **Preprocesado** | HU clip [-1000, 400] → normalización [0, 1] |
 
+**Cambios de arquitectura respecto a la documentación original:**
+
+| Aspecto | Spec original | Implementación | Razón |
+| --- | --- | --- | --- |
+| Modelo | ViViT-Tiny (~25M params) | MC3-18 (~11.4M params) | Ratio params/datos ViViT: ~1,700:1 (alto riesgo overfitting) vs. MC3-18: ~761:1 (manejable) |
+| FocalLoss alpha | 0.25 | 0.85 | alpha=0.85 pondera correctamente la clase positiva minoritaria con ratio ~10.7:1 |
+
 **Notas críticas:**
-- Desbalance extremo ~490:1 — BCELoss produce modelo trivial (siempre clase 0).
+- Desbalance ~10.7:1 (post-fix leakage) — BCELoss produce modelo trivial (siempre clase 0).
 - **Siempre** usar `candidates_V2.csv` (V1 obsoleto, 24 nódulos menos).
 - Conversión world→vóxel con `LUNA16PatchExtractor.world_to_voxel()`.
-- Gradient checkpointing obligatorio (batch=4, FP16, 12GB VRAM).
+- FP16 obligatorio. Gradient checkpointing recomendado (batch=4, 12GB VRAM).
 - Techo teórico de sensibilidad: 94.4%.
 - Spacing variable entre volúmenes — verificado en `__init__`.
+- **NO usar** `datasets/luna_lung_cancer/patches/_LEAKED_DO_NOT_USE/` (data leakage).
+
+**Estado del script de entrenamiento (Paso 5.4, 2026-04-05):**
+
+| Campo | Detalle |
+| --- | --- |
+| **Estado** | ✅ Script corregido — dry-run verificado (exit_code=0, 0 errores) |
+| **Modelo** | MC3-18, ~11.4M params, `weights=None` |
+| **Archivos** | `train_expert3.py` (corregido BUG-1: paths de checkpoint/log) |
+| **Checkpoint** | `checkpoints/expert_03_vivit_tiny/expert3_best.pt` |
+| **BUG-1 corregido** | Paths de checkpoint y log apuntaban a raíz del proyecto → corregidos a `expert_03_vivit_tiny/` |
+| **Config** | LR=3e-4, WD=0.03, batch=4, accum=8 (efectivo=32), FP16, patience=20, max_epochs=100 |
 
 ### 3.5 Experto 4 — Páncreas (PANORAMA / Zenodo)
 
@@ -232,7 +321,20 @@ Router: softmax(W·z + b) → distribución sobre 6 expertos
 - HU clip diferente al de LUNA16: `HU_ABDOMEN_CLIP = (-100, 400)`.
 - z-score por volumen para compensar bias multicéntrico (Radboudumc/MSD/NIH).
 - batch_size=1–2 + FP16 + gradient checkpointing (más restrictivo que LUNA16).
-- **Estado actual:** ❌ Dataset no descargado (`datasets/zenodo_13715870/` solo contiene `.gitkeep`). Bloqueante para Fase 2.
+- **Estado actual:** ✅ Listo — 557 archivos `.nii.gz` (1,850 pacientes únicos), ~93 GB en `datasets/zenodo_13715870/`. Todos los bugs corregidos: OOM en `paso4_pancreas_labels()` (loop secuencial + streaming), leakage en `split_pancreas()` (`GroupKFold` por `patient_id`). `pancreas_labels_binary.csv`: 1,864 filas (1,756 PDAC+, 108 PDAC−, 0 errores). `pancreas_splits.csv`: 1,864 casos, 186 test (0 leakage), ~1,342/~336 train/val por fold. `cae_splits.csv` regenerado. A19 resuelto: `_build_pairs()` omite silenciosamente los 1,307 casos sin CT en disco (guard `if candidates:`), `log.warning` añadido.
+
+**Estado del script de entrenamiento (Paso 5.5, 2026-04-05):**
+
+| Campo | Detalle |
+| --- | --- |
+| **Estado** | ✅ Script implementado — dry-run verificado (exit_code=0, train=1,491 / val=373 fold 0) |
+| **Modelo** | SwinTransformer3d (Tiny), ~6.94M params, `weights=None`, `Conv3d(1, 48, kernel=4, stride=4)` para entrada monocanal |
+| **Archivos** | `expert4_config.py`, `models/expert4_swin3d.py`, `dataloader_expert4.py`, `train_expert4.py`, `datasets/pancreas.py` |
+| **Checkpoint** | `checkpoints/expert_04_swin3d_tiny/expert4_best.pt` |
+| **Pipeline** | `HU clip [-100, 400] → z-score → clip [-3, 3] → rescale [0, 1] → resize 64³ (trilinear)` |
+| **Config** | LR=5e-5, WD=0.05, batch=2, accum=8 (efectivo=16), FP16, patience=15, max_epochs=100, FocalLoss(α=0.75, γ=2.0) |
+| **Scheduler** | `CosineAnnealingWarmRestarts(T_0=10, T_mult=2)` |
+| **k-fold** | 5 folds obligatorio (`--fold 0..4`), gradient checkpointing habilitado |
 
 ### 3.6 Orden de entrenamiento del sistema completo
 
@@ -354,6 +456,20 @@ El CAE produce exactamente dos etiquetas de salida:
 - **Durante el entrenamiento, el CAE no recibe imágenes por el router.** Solo en inferencia recibe imágenes cuando el router tiene entropía alta.
 - **Riesgo del "router perezoso":** si el CAE aprende demasiado bien de todo tipo de imagen, el router se volvería perezoso y le enviaría todo al Experto 6 porque siempre daría métricas positivas. Esto colapsa la lógica MoE. La `L_error` en la función de pérdida total existe precisamente para penalizar este comportamiento.
 
+**Estado del script de entrenamiento (Paso 5.6, 2026-04-05):**
+
+| Campo | Detalle |
+| --- | --- |
+| **Estado** | ✅ Script implementado — dry-run verificado (exit_code=0, train=130,002 / val=15,959) |
+| **Modelo** | `ConvAutoEncoder` 2D, ~206M params (206,464,771). Encoder: 3× Conv2d(stride=2)+BN+ReLU → Linear(200704, 512). Decoder: Linear(512, 200704) → 3× ConvTranspose2d → Sigmoid |
+| **Archivos** | `expert5_cae_config.py`, `models/expert5_cae.py`, `dataloader_cae.py`, `train_cae.py`, `datasets/cae.py` |
+| **Checkpoint** | `checkpoints/expert_05_cae/cae_best.pt` |
+| **Dataset** | `cae_splits.csv` (162,611 filas). `__getitem__` → `(tensor [3,224,224], path_str)` — sin label. 3D dispatch: LUNA→axial central, Páncreas→HU clip+central slice |
+| **Config** | LR=1e-3, WD=1e-5, batch=32, **FP32 obligatorio** (NO FP16), patience=15, max_epochs=100 |
+| **Loss** | `MSE(recon, x) + 0.1 · L1(recon, x)` |
+| **Scheduler** | `ReduceLROnPlateau(factor=0.5, patience=5)` |
+| **Nota** | expert_id=5, excluido de load balancing, activado por entropía H(g)>P95, extensión verbal (no en proyecto_moe.md) |
+
 ### 4.7 Feedback loop con el router
 
 Durante el entrenamiento del router (Fase 1 y Fase 5), el sistema incluye un término de pérdida `L_error` que penaliza al router cuando delega una imagen médica válida al Experto 6. Este feedback entrena al router a **no enviar** imágenes legítimas al CAE.
@@ -394,14 +510,27 @@ H(g) = -Σ g_i · log(g_i)
 
 ### 5.3 Ablation study: 4 métodos de routing
 
+> **Estado:** ✅ Implementado y dry-run verificado (2026-04-05). Script: `src/pipeline/fase2/fase2_pipeline.py`. Documentación completa: `docs/documentacion_pasos/paso_06_ablation_study.md`.
+
 El núcleo científico del proyecto compara 4 routers sobre los mismos embeddings:
 
 | Router | Tipo | Parámetros clave | Naturaleza |
 | --- | --- | --- | --- |
-| **Linear + Softmax** | Paramétrico (gradiente) | LR=1e-3, 50 épocas, batch=512, α ∈ [0.01, 0.1] — calibrar en val | Deep Learning |
-| **GMM** | Paramétrico (EM) | 5 componentes, covarianza `full`, max_iter=200 | Estadístico |
-| **Naive Bayes** | MLE analítico | Estimación máxima verosimilitud | Estadístico |
-| **k-NN (FAISS)** | No paramétrico | k=5, distancia coseno, suavizado Laplace ε=0.01 | Estadístico |
+| **Linear + Softmax** | Paramétrico (gradiente) | LR=1e-3, 50 épocas, batch=512, α_L_aux=0.01 | Deep Learning |
+| **GMM** | Paramétrico (EM) | 5 componentes, covarianza `full` (fallback `diag`), max_iter=200 | Estadístico |
+| **Naive Bayes** | MLE analítico | GaussianNB — solución cerrada, sin iteraciones | Estadístico |
+| **k-NN (FAISS)** | No paramétrico | k=5, distancia coseno (IndexFlatIP + L2 norm), suavizado Laplace ε=0.01 | Estadístico |
+
+**Input:** embeddings pre-computados de Fase 1 (`Z_train.npy`, `Z_val.npy`), d_model=192 (ViT-Tiny), N_EXPERTS_DOMAIN=5.
+
+**Winner selection (dos pasos):**
+1. Filtrar: descartar routers con `load_balance > LOAD_BALANCE_THRESHOLD` (1.30) — riesgo de expert collapse
+2. Seleccionar: `max(accuracy_val)` entre los que pasan el filtro
+3. Si todos fallan → seleccionar menor ratio load_balance (con warning)
+
+**Output:** `ablation_results.json` (comparación completa + ganador + metadata) + modelo ganador serializado (`best_router_{type}.{ext}`).
+
+**Modo `--dry-run`:** ejecuta el ablation completo con embeddings sintéticos (200 train, 40 val, d=192) y parámetros reducidos (Linear: 2 épocas, GMM: 5 iter). No guarda artefactos a disco. Verificado con exit code 0.
 
 **Protocolo del ablation:**
 1. Fase 1 extrae embeddings con el backbone congelado → `Z_train`, `Z_val`, `Z_test` en disco
@@ -432,6 +561,7 @@ Donde `f_i` es la fracción de muestras asignadas al experto `i` (sobre los expe
 | `vit_tiny_patch16_224` (default) | 192 | ~2GB | Primera corrida, iteración rápida |
 | `cvt_13` | 384 | ~3GB | Balance intermedio |
 | `swin_tiny_patch4_window7_224` | 768 | ~4GB | Ablation study final |
+| `densenet121_custom` | 1024 | ~3GB | Imágenes 2D — recomendado por el profesor para imagenología médica |
 
 ### 5.6 Fases de entrenamiento del router
 
@@ -444,6 +574,39 @@ Donde `f_i` es la fracción de muestras asignadas al experto `i` (sobre los expe
 **Regla crítica en Fase 3:** NO reiniciar el optimizer — se pierden los momentos acumulados de fases anteriores.
 
 > **Nota de diseño (divergencia consciente con la guía):** La guía oficial propone LR=1e-5 en la Fase 3 global. Este proyecto usa LR=1e-6 de forma deliberada: dado que el sistema integra 6 expertos heterogéneos (2D y 3D), un learning rate más bajo en la fase global minimiza el riesgo de desestabilizar los expertos ya convergidos, especialmente los modelos 3D con gradientes más inestables. Se acepta convergencia más lenta a cambio de mayor estabilidad.
+
+**Estado de implementación (2026-04-05):** ✅ Implementado — dry-run verificado
+- Script: `src/pipeline/fase5/fase5_finetune_global.py`
+- Freeze utilities: `src/pipeline/fase5/freeze_utils.py`
+- Config: `src/pipeline/fase5/fase5_config.py`
+- Divergencia LR consciente documentada en config: `STAGE3_LR_EXPERTS=1e-6` (guía: 1e-5)
+- Documentación completa: `docs/documentacion_pasos/paso_08_finetune_por_etapas.md`
+
+### 5.7 Paso 9 — Prueba con datos reales (Fase 6)
+
+**Estado:** Implementado ✅ — dry-run OK
+**Script orquestador:** `src/pipeline/fase6/fase9_test_real.py`
+**Fase pipeline:** fase6
+
+**Componentes:**
+- `fase6_config.py` — constantes, umbrales de métricas, rutas
+- `inference_engine.py` — forward de inferencia (sin expert_id)
+- `test_evaluator.py` — evaluador batch por experto
+- `gradcam_heatmap.py` — generación Grad-CAM/Attention Rollout
+- `ood_detector.py` — calibración umbral entropía + AUROC OOD
+- `fase9_test_real.py` — orquestador principal
+
+**Forward de inferencia (brecha crítica cerrada):**
+La diferencia entre entrenamiento e inferencia:
+- Entrenamiento: `forward(x, expert_id)` — expert_id conocido (supervisado)
+- Inferencia: backbone(x) → router(z) → H = -Σg·log(g+ε) → if H>θ: CAE else experts[argmax(g)]
+
+**Prerequisitos bloqueantes para ejecución real:**
+- Paso 4.2: embeddings generados
+- Pasos 5.1–5.6: checkpoints de todos los expertos
+- Paso 8: `checkpoints/fase5/moe_final.pt`
+
+**Documentación completa:** `docs/documentacion_pasos/paso_09_prueba_datos_reales.md`
 
 ---
 
@@ -460,19 +623,69 @@ El formato preferido para imágenes médicas es `.mha` (MetaImage), porque:
 
 ---
 
-### 6.2 Orden de pasos del preprocesamiento
+### 6.2 Pipelines de preprocesamiento per-dataset
 
-Secuencia recomendada por el profesor (combinada con los papers de referencia PMC9340712 y el estudio de CLAHE/Gamma en teledermatoscopía):
+Cada dataset utiliza un pipeline de preprocesamiento específico, adaptado a la modalidad de imagen y a las características diagnósticas relevantes. Un pipeline uniforme (aplicar CLAHE + TVF + Gamma a todos los datasets) sería clínicamente incorrecto: cada modalidad tiene señales diagnósticas distintas que requieren tratamiento diferenciado.
+
+#### 6.2.1 NIH ChestXray14 — Radiografía de tórax (escala de grises)
+
+| Paso | Técnica | Justificación clínica |
+|---|---|---|
+| 1 | **CLAHETransform** | Realza contraste en campos pulmonares; mejora visibilidad de infiltrados y nódulos en escala de grises. Recomendación directa del profesor. |
+| 2 | **Resize(224×224)** | Estandarización espacial sin interpolación agresiva. |
+| 3 | **TotalVariationFilter (TVF)** | Elimina ruido del sensor de rayos X sin borrar estructuras diagnósticas (bordes pulmonares, silueta cardíaca). |
+| 4 | **ToTensor** | Conversión a tensor PyTorch. |
+| 5 | **Normalize** (ImageNet stats) | Normalización de rango para el backbone. |
+
+**Pipeline:** `CLAHETransform → Resize → TVF → ToTensor → Normalize`
+
+> **Nota (INC-04):** El paso de `GammaCorrection(γ=1.0)` que existía en la implementación original es un **no-op** (γ=1.0 devuelve la imagen sin modificar). Se omite aquí porque no aporta transformación alguna. Si se desea activar, debe calibrarse γ ≠ 1.0 con validación empírica.
+
+#### 6.2.2 ISIC 2019 — Dermatoscopía (imágenes color)
+
+| Paso | Técnica | Justificación clínica |
+|---|---|---|
+| 1 | **BCNCrop** | Crop específico del protocolo BCN que elimina los bordes negros del dispositivo dermatoscópico, los cuales no contienen información diagnóstica. |
+| 2 | **Resize(224×224)** | Estandarización espacial. |
+| 3 | **ToTensor** | Conversión a tensor PyTorch. |
+| 4 | **Normalize** (ImageNet stats) | Normalización de rango para el backbone. |
+
+**Pipeline:** `BCNCrop → Resize → ToTensor → Normalize`
+
+**¿Por qué NO se aplican CLAHE ni TVF en dermatoscopía?**
+- **CLAHE ❌:** En dermatoscopía, la información diagnóstica principal es el **color** (regla ABCD: Asymmetry, Border, Color, Diameter). CLAHE opera sobre luminancia y distorsiona los gradientes cromáticos que son señal diagnóstica — un melanoma se distingue por heterogeneidad de color, no por contraste de grises.
+- **TVF ❌:** El filtro de variación total suavizaría los gradientes de color heterogéneo que son precisamente la señal diagnóstica en lesiones pigmentadas. Aplicarlo eliminaría las transiciones de color que diferencian melanoma de nevus benigno.
+
+#### 6.2.3 OsteoArthritis KneeXray — Radiografía de rodilla (escala de grises)
+
+| Paso | Técnica | Justificación clínica |
+|---|---|---|
+| 1 | **CLAHETransform** | Realza estructura ósea y espacio articular; mejora la diferenciación visual para gradación Kellgren-Lawrence (KL). |
+| 2 | **Resize(224×224, BICUBIC)** | Interpolación bicúbica preserva mejor los detalles óseos finos (osteofitos, esclerosis subcondral) que la interpolación bilineal por defecto. |
+| 3 | **ToTensor** | Conversión a tensor PyTorch. |
+| 4 | **Normalize** (ImageNet stats) | Normalización de rango para el backbone. |
+
+**Pipeline:** `CLAHETransform → Resize(BICUBIC) → ToTensor → Normalize`
+
+#### 6.2.4 Resumen comparativo y justificación
+
+| Técnica | NIH Chest | ISIC Derm | OA Knee | Razón de la diferencia |
+|---|---|---|---|---|
+| CLAHE | ✅ | ❌ | ✅ | CLAHE beneficia imágenes en escala de grises (rayos X) pero daña la señal de color en dermatoscopía |
+| TVF | ✅ | ❌ | ❌ | TVF elimina ruido de sensor; en OA Knee no se aplica porque la señal ósea no tiene ruido de alta frecuencia comparable |
+| BCNCrop | ❌ | ✅ | ❌ | Solo aplica a imágenes de dermatoscopio con bordes de dispositivo |
+| Resize BICUBIC | ❌ | ❌ | ✅ | Los detalles óseos finos requieren interpolación de mayor calidad |
+| GammaCorrection | ⚠️ no-op | ❌ | ❌ | γ=1.0 es identidad; requiere calibración (ver INC-04) |
+
+> **Conclusión:** Los pipelines per-dataset son **superiores** al pipeline uniforme porque cada modalidad de imagen tiene características diagnósticas distintas que requieren preprocesamiento específico. Un pipeline uniforme aplicaría CLAHE/TVF a imágenes de dermatoscopía, lo cual dañaría la señal diagnóstica de color.
+
+#### 6.2.5 Reglas transversales (aplican a todos los pipelines)
 
 | Paso | Técnica | Justificación |
 |---|---|---|
-| 1 | **Resize estandarizado** | Sin interpolación agresiva. Evita píxeles degradados. |
-| 2 | **Total Variation Filter (TVF)** | Denoising pixel a pixel. Elimina incertidumbre sin perder bordes. |
-| 3 | **Gamma Correction** | Realza brillo y estructuras. Mejora accuracy y convergencia más rápida. |
-| 4 | **CLAHE local** (histograma adaptativo por zonas) | Mejor diferenciación de tejidos. Recomendación directa del profesor. Usarlo para embeddings de modelos, **no** para interpretación humana directa. |
-| 5 | **Guardar el `transform`** antes de normalizar | Permite recuperar el factor de redimensionalidad para generar mapas de calor (Grad-CAM). |
-| 6 | **Generar tensor 5D normalizado** | Soporta imágenes 2D y 3D simultáneamente. La profundidad varía entre sistemas pero la dimensionalidad se mantiene consistente. |
-| 7 | **Pasar por cada backbone de forma independiente** | Cada modelo (ViT, CvT, Swin, DenseNet) recibe su propio tensor redimensionado. |
+| — | **Guardar el `transform`** antes de normalizar | Permite recuperar el factor de redimensionalidad para generar mapas de calor (Grad-CAM). Requerido por Funcionalidad 4 del dashboard (§8.1). |
+| — | **Generar tensor 5D normalizado** | Soporta imágenes 2D y 3D simultáneamente. La profundidad varía entre sistemas pero la dimensionalidad se mantiene consistente. |
+| — | **Pasar por cada backbone de forma independiente** | Cada modelo (ViT, CvT, Swin, DenseNet) recibe su propio tensor redimensionado. |
 
 > **Regla del profesor:** "Los filtros redimensionan la imagen → guardar el `transform` antes de normalizar embeddings. Un método que normalice Y que a la salida permita recuperar el factor de redimensionalidad para generar mapas de calor."
 
@@ -550,27 +763,28 @@ Esta técnica produce imágenes médicas sintéticas superiores a augmentación 
 | 1 | Descargar datasets | ✅ | 8,773.7s (~2.4h) |
 | 2 | Extraer archivos | ✅ | 0.4s |
 | 3 | Post-procesado NIH | ✅ | 6.1s |
-| 4 | Etiquetas páncreas | ✅ | 679.7s |
+| 4 | Etiquetas páncreas | ✅ | ~4,205s (70 min) — re-ejecutado con fix OOM |
 | 5 | Splits 80/10/10 | ⚠️ parcial | 3.0s |
 | 6 | Datos 3D (parches) | ⚠️ parcial | 162.2s |
 | 7 | Parche CvT-13 | ⚠️ | 7.3s |
 | 8 | Reporte | — | — |
 
-### 7.2 Estado actual de los datos en disco (2026-03-25)
+### 7.2 Estado actual de los datos en disco (2026-04-05)
 
 | Dataset | Descargado | Extraído | Splits | Procesado |
 | --- | --- | --- | --- | --- |
 | NIH ChestXray14 | ✅ | ✅ | ✅ `splits/nih_*.txt` | N/A |
 | ISIC 2019 | ✅ | ✅ | ✅ `splits/isic_*.csv` | N/A |
-| OA Knee | ✅ | ✅ | ✅ `oa_splits/{train,val,test}/` | N/A |
-| LUNA16 | ✅ (meta+CT) | ✅ | ✅ `luna_splits.json` | ⚠️ `patches/` sin `test/` |
-| Pancreas | ❌ vacío | ❌ | ❌ | ❌ |
+| OA Knee | ✅ | ✅ | ✅ `oa_splits/{train,val,test}/` | ✅ Listo — 4,766 imgs KL-graded (9,339 total en disco), remapeo KL0→0/KL1+2→1/KL3+4→2 documentado |
+| LUNA16 | ✅ (meta+CT) | ✅ | ✅ `luna_splits.json` | ✅ Listo — ZIPs eliminados (~62 GB), no bugs, `_LEAKED_DO_NOT_USE/` (ex-`train_stale_backup/`, 1,839 parches con leakage). `annotations.csv`: 1,186 ✅. `candidates_V2.csv`: 754,975 ✅. `seg-lungs-LUNA16/`: 441 MB presente (no usado por pipeline). Licencia: CC BY 4.0. |
+| Pancreas | ✅ | ✅ | ✅ `pancreas_splits.csv` | ✅ Listo — todos los bugs corregidos (ruta + OOM + leakage GroupKFold). `pancreas_labels_binary.csv`: 1,864 filas (1,756 PDAC+, 108 PDAC−). `pancreas_splits.csv`: 1,864 casos, 186 test, 0 leakage. `cae_splits.csv` regenerado (162,611 filas). A19 resuelto: `_build_pairs()` omite casos sin CT silenciosamente. |
+| PANORAMA labels | ✅ (clonado) | N/A | N/A (etiquetas auxiliares) | N/A — 2,238 label files (1,756 auto + 482 manual) |
 
 ### 7.3 Bloqueantes
 
-**Páncreas:** `datasets/zenodo_13715870/` solo contiene `.gitkeep`. Fase 2 exige las 5 clases `{0,1,2,3,4}` en `y_train`. Sin páncreas (experto 4), Fase 2 fallará. Se debe ejecutar Fase 0 con `--solo pancreas` antes de continuar.
+**Páncreas:** ✅ Todos los bloqueantes resueltos. Datos descargados (557 `.nii.gz`), labels regenerados (1,864 filas, 0 errores), splits con `GroupKFold` sin leakage, `cae_splits.csv` regenerado. A19 resuelto: `_build_pairs()` omite silenciosamente los 1,307 casos sin CT (guard `if candidates:`). **Paso 1 — 19/19 items resolved ✅**.
 
-**LUNA16 test:** el directorio `patches/test/` no existe. Los parches de train y val sí están disponibles.
+**LUNA16 test:** ✅ Resuelto — el directorio `patches/test/` existe con 1,914 parches.
 
 ### 7.4 Splits generados
 
@@ -578,9 +792,9 @@ Esta técnica produce imágenes médicas sintéticas superiores a augmentación 
 | --- | --- | --- | --- | --- |
 | NIH | 88,999 | 11,349 | 11,772 | Patient ID (listas oficiales) |
 | ISIC | — | — | — | `lesion_id` (`build_lesion_split`) |
-| OA | — | — | — | Directorios pre-existentes |
-| LUNA | — | — | ⚠️ sin test | `seriesuid` |
-| Pancreas | ❌ | ❌ | ❌ | k-fold CV (k=5), 10% test fijo |
+| OA | 3,814 | 480 | 472 | Grupo de similitud visual 80/10/10 (proxy de patient_id) |
+| LUNA | 14,728 | 1,143 | 1,914 | `seriesuid` (leakage fix aplicado 2026-04-02) |
+| Pancreas | ~1,342 | ~336 | 186 | k-fold CV (k=5) por `patient_id` (`GroupKFold`). A19 resuelto: `_build_pairs()` omite los 1,307/1,864 casos sin CT silenciosamente. |
 | CAE | ✅ (skipped) | — | — | Combinación de los 5 datasets |
 
 ### 7.5 Artefactos producidos por Fase 0 → consumidos por Fase 1
@@ -589,6 +803,7 @@ Fase 1 es consumidora pura de los artefactos de Fase 0:
 - Splits (archivos `.txt`, `.csv`, directorios)
 - Parches 3D preprocesados (`.npy`)
 - Etiquetas cruzadas (páncreas: `pancreas_splits.csv`)
+- Manifiesto CAE: `cae_splits.csv` — 162,611 filas (NIH:112,120 | ISIC:25,331 | OA:4,766 | LUNA:17,785 | Pancreas:2,609). Consumido por Fase 3 (pendiente de implementación).
 - Reporte de estado (`fase0_report.md`)
 - Comando de ejecución para Fase 1 (generado en el paso 8)
 
@@ -602,14 +817,14 @@ La guía oficial establece explícitamente las siguientes 8 funcionalidades:
 
 | # | Funcionalidad | Descripción | Estado |
 |---|---|---|---|
-| 1 | **Carga de imagen** | Soporta PNG, JPEG, NIfTI. Detecta automáticamente 2D/3D por rank del tensor. | ⏳ Pendiente |
-| 2 | **Preprocesado transparente** | Muestra dimensiones originales y adaptadas tras el preprocesador. | ⏳ Pendiente |
-| 3 | **Inferencia en tiempo real** | Devuelve etiqueta, confianza (%) y tiempo de respuesta en milisegundos. | ⏳ Pendiente |
-| 4 | **Attention Heatmap del Router ViT** | Mapa de calor sobre la imagen original. Usa Grad-CAM con el `transform` guardado en el paso 5 del preprocesamiento. | ⏳ Pendiente |
-| 5 | **Panel del experto activado** | Muestra nombre del experto, arquitectura, dataset de entrenamiento y gating score asignado. | ⏳ Pendiente |
-| 6 | **Panel del ablation study** | Tabla comparativa de Routing Accuracy de los 4 métodos sobre el set de validación. | ⏳ Pendiente |
-| 7 | **Gráfica de Load Balance** | Barras con `f_i` acumulado desde que arrancó el sistema, en tiempo real. | ⏳ Pendiente |
-| 8 | **Alerta OOD** | Alerta visual cuando la entropía H(g) > umbral calibrado (percentil 95). Indica si la imagen fue al Experto 6 (CAE). | ⏳ Pendiente |
+| 1 | **Carga de imagen** | Soporta PNG, JPEG, NIfTI. Detecta automáticamente 2D/3D por rank del tensor. | ✅ Implementado |
+| 2 | **Preprocesado transparente** | Muestra dimensiones originales y adaptadas tras el preprocesador. | ✅ Implementado |
+| 3 | **Inferencia en tiempo real** | Devuelve etiqueta, confianza (%) y tiempo de respuesta en milisegundos. | ✅ Implementado |
+| 4 | **Attention Heatmap del Router ViT** | Mapa de calor sobre la imagen original. Usa Grad-CAM con el `transform` guardado en el paso 5 del preprocesamiento. | ✅ Implementado |
+| 5 | **Panel del experto activado** | Muestra nombre del experto, arquitectura, dataset de entrenamiento y gating score asignado. | ✅ Implementado |
+| 6 | **Panel del ablation study** | Tabla comparativa de Routing Accuracy de los 4 métodos sobre el set de validación. | ✅ Implementado |
+| 7 | **Gráfica de Load Balance** | Barras con `f_i` acumulado desde que arrancó el sistema, en tiempo real. | ✅ Implementado |
+| 8 | **Alerta OOD** | Alerta visual cuando la entropía H(g) > umbral calibrado (percentil 95). Indica si la imagen fue al Experto 6 (CAE). | ✅ Implementado |
 
 ### 8.2 Conexión con el pipeline
 
@@ -658,7 +873,7 @@ La guía oficial establece explícitamente las siguientes 8 funcionalidades:
 |---|---|---|
 | Backbone ViT-Tiny (d=192) | ~2 GB | — |
 | Backbone Swin-Tiny (d=768) | ~4 GB | — |
-| Experto 3D LUNA16 (ViViT, batch=4) | ~8–10 GB | FP16 + grad. checkpoint |
+| Experto 3D LUNA16 (MC3-18, batch=4) | ~8–10 GB | FP16 + grad. checkpoint |
 | Experto 3D Páncreas (Swin3D, batch=1–2) | ~10–12 GB | FP16 + grad. checkpoint |
 | Sistema MoE completo (Fase 5) | ~15–18 GB | FP16 + grad. accum. + checkpoint |
 

@@ -1,0 +1,12 @@
+{
+  "expert_idx": 2,
+  "expert_name": "oa_knee",
+  "n_samples": 0,
+  "f1_macro": 0.0,
+  "auc_roc": 0.0,
+  "routing_accuracy": 0.0,
+  "predicted_expert_counts": {},
+  "confusion_matrix": [],
+  "is_multilabel": false,
+  "dry_run": true
+}

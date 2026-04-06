@@ -30,7 +30,9 @@ from router_metrics import (
 log = logging.getLogger("fase2")
 
 
-def train_gmm_router(Z_train, y_train, Z_val, y_val, Z_test=None, y_test=None):
+def train_gmm_router(
+    Z_train, y_train, Z_val, y_val, Z_test=None, y_test=None, max_iter_override=None
+):
     """
     Entrena el router GMM sobre embeddings congelados.
 
@@ -56,12 +58,15 @@ def train_gmm_router(Z_train, y_train, Z_val, y_val, Z_test=None, y_test=None):
         GMM_COV_TYPE,
     )
 
+    effective_max_iter = (
+        max_iter_override if max_iter_override is not None else GMM_MAX_ITER
+    )
     cov_type = GMM_COV_TYPE
     try:
         gmm = GaussianMixture(
             n_components=N_EXPERTS_DOMAIN,
             covariance_type=GMM_COV_TYPE,
-            max_iter=GMM_MAX_ITER,
+            max_iter=effective_max_iter,
             random_state=42,
             verbose=0,
         )
@@ -70,7 +75,7 @@ def train_gmm_router(Z_train, y_train, Z_val, y_val, Z_test=None, y_test=None):
             log.warning(
                 "  [GMM] EM no convergió en %d iteraciones con %s covariance. "
                 "Considera aumentar GMM_MAX_ITER en fase2_config.py o cambiar a 'diag'.",
-                GMM_MAX_ITER,
+                effective_max_iter,
                 GMM_COV_TYPE,
             )
     except Exception as e:
@@ -83,7 +88,7 @@ def train_gmm_router(Z_train, y_train, Z_val, y_val, Z_test=None, y_test=None):
         gmm = GaussianMixture(
             n_components=N_EXPERTS_DOMAIN,
             covariance_type="diag",
-            max_iter=GMM_MAX_ITER,
+            max_iter=effective_max_iter,
             random_state=42,
         )
         gmm.fit(Z_train)

@@ -40,6 +40,8 @@ class ChestXray14Dataset(Dataset):
         file_list,
         transform,
         mode="embedding",
+        split="train",
+        aug_transform=None,
         patient_ids_other=None,
         filter_view=None,
     ):
@@ -49,6 +51,8 @@ class ChestXray14Dataset(Dataset):
 
         self.img_dir = Path(img_dir)
         self.transform = transform
+        self.split = split
+        self.aug_transform = aug_transform
         self.expert_id = EXPERT_IDS["chest"]
         self.mode = mode
         self.filter_view = filter_view
@@ -317,7 +321,10 @@ class ChestXray14Dataset(Dataset):
                 f"Reemplazando con tensor cero."
             )
             img = Image.fromarray(np.zeros((224, 224, 3), dtype=np.uint8))
-        img = self.transform(img)
+        if self.split == "train" and self.aug_transform is not None:
+            img = self.aug_transform(img)
+        else:
+            img = self.transform(img)
 
         if self.mode == "embedding":
             return img, self.expert_id, img_name

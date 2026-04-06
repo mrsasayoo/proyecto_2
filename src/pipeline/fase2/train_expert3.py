@@ -72,8 +72,10 @@ log = logging.getLogger("expert3_train")
 
 # ── Rutas de salida ────────────────────────────────────────────────────
 _CHECKPOINT_DIR = _PROJECT_ROOT / "checkpoints"
-_CHECKPOINT_PATH = _CHECKPOINT_DIR / "expert3_best.pt"
-_TRAINING_LOG_PATH = _CHECKPOINT_DIR / "expert3_training_log.json"
+_CHECKPOINT_PATH = _CHECKPOINT_DIR / "expert_03_vivit_tiny" / "expert3_best.pt"
+_TRAINING_LOG_PATH = (
+    _CHECKPOINT_DIR / "expert_03_vivit_tiny" / "expert3_training_log.json"
+)
 
 # ── Constantes de entrenamiento ────────────────────────────────────────
 _SEED = 42
@@ -442,7 +444,7 @@ def train(dry_run: bool = False) -> None:
     )
 
     # ── Directorio de checkpoints ──────────────────────────────────
-    _CHECKPOINT_DIR.mkdir(parents=True, exist_ok=True)
+    _CHECKPOINT_PATH.parent.mkdir(parents=True, exist_ok=True)
 
     # ── Training loop ──────────────────────────────────────────────
     best_val_loss = float("inf")

@@ -34,7 +34,7 @@ ROUTER_TYPE = {
 }
 
 
-def report_and_save(results: dict, data: dict, args) -> None:
+def report_and_save(results: dict, data: dict, args, dry_run: bool = False) -> None:
     """
     Imprime la tabla comparativa, selecciona el ganador, guarda el modelo y
     escribe ablation_results.json en el directorio de embeddings.
@@ -141,6 +141,12 @@ def report_and_save(results: dict, data: dict, args) -> None:
     log.info("  → Registrar tabla completa en Reporte Técnico (sección 3)")
 
     # ── Guardar modelo ganador ───────────────────────────────────────────
+    if dry_run:
+        log.info(
+            "[DRY-RUN] Saltando guardado de modelo ganador y ablation_results.json"
+        )
+        return
+
     best_router_path = _save_winner(winner_name, winner, emb_dir)
 
     # ── Construir y guardar ablation_results.json ────────────────────────

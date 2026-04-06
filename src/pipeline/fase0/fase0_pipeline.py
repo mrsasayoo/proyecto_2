@@ -35,7 +35,6 @@ import subprocess
 import sys
 import time
 from collections import OrderedDict
-from concurrent.futures import ProcessPoolExecutor, as_completed
 from pathlib import Path
 
 import numpy as np
@@ -80,17 +79,98 @@ PDAC_VALUE = 3
 
 
 def _process_mask(args):
-    """Procesa una sola máscara .nii.gz y retorna fila de resultado."""
+    """Procesa una sola máscara .nii.gz y retorna fila de resultado.
+
+    Streams the gzip-compressed NIfTI data in chunks to find unique label
+    values without loading the entire volume into memory.  Critical for
+    masks that decompress to >7 GB on a 13 GB RAM machine.
+    """
     lf_str, pdac_value = args
-    import nibabel as nib
+    import gc
+    import gzip
+    import struct
 
     lf = Path(lf_str)
     case_id = lf.name.replace(".nii.gz", "")
     try:
-        data = np.asarray(nib.load(str(lf)).dataobj)
-        unique_vals = sorted(np.unique(np.round(data)).astype(int).tolist())
+        # ── 1. Parse NIfTI-1 header (348 bytes + 4 ext) ──
+        with gzip.open(str(lf), "rb") as f:
+            hdr_bytes = f.read(352)
+
+        sizeof_hdr = struct.unpack_from("<i", hdr_bytes, 0)[0]
+        endian = "<" if sizeof_hdr == 348 else ">"
+
+        # datatype code at offset 70
+        datatype = struct.unpack_from(endian + "h", hdr_bytes, 70)[0]
+
+        # vox_offset at offset 108 (float32)
+        vox_offset = max(352, int(struct.unpack_from(endian + "f", hdr_bytes, 108)[0]))
+
+        # scl_slope / scl_inter at offsets 112, 116
+        scl_slope = struct.unpack_from(endian + "f", hdr_bytes, 112)[0]
+        scl_inter = struct.unpack_from(endian + "f", hdr_bytes, 116)[0]
+        if scl_slope == 0:
+            scl_slope, scl_inter = 1.0, 0.0
+
+        # Map NIfTI datatype code → numpy dtype string
+        _np_dtype = {
+            2: "u1",
+            4: "i2",
+            8: "i4",
+            16: "f4",
+            64: "f8",
+            256: "i1",
+            512: "u2",
+            768: "u4",
+        }
+        if datatype not in _np_dtype:
+            # Fallback for unusual dtypes: load with nibabel (may use lots of RAM)
+            import nibabel as nib
+
+            data = np.asarray(nib.load(str(lf)).dataobj)
+            unique_vals = sorted(np.unique(np.round(data)).astype(int).tolist())
+            has_pdac = int(pdac_value in unique_vals)
+            del data
+            gc.collect()
+            return {
+                "case_id": case_id,
+                "label": has_pdac,
+                "label_source": "mask_value_3",
+                "mask_values": str(unique_vals),
+            }
+
+        dt = np.dtype(endian + _np_dtype[datatype])
+        item_size = dt.itemsize
+
+        # ── 2. Stream data in 4-MB chunks and collect unique values ──
+        CHUNK_BYTES = 4 * 1024 * 1024  # 4 MB per read
+        unique_set = set()
+
+        with gzip.open(str(lf), "rb") as f:
+            f.read(vox_offset)  # skip header
+            leftover = b""
+            while True:
+                raw = f.read(CHUNK_BYTES)
+                if not raw and not leftover:
+                    break
+                raw = leftover + raw
+                usable = (len(raw) // item_size) * item_size
+                leftover = raw[usable:]
+                if usable == 0:
+                    break
+                arr = np.frombuffer(raw[:usable], dtype=dt)
+                if scl_slope != 1.0 or scl_inter != 0.0:
+                    vals = np.round(arr * scl_slope + scl_inter).astype(int)
+                else:
+                    vals = np.round(arr).astype(int)
+                unique_set.update(np.unique(vals).tolist())
+                del raw, arr, vals
+
+        del hdr_bytes
+        gc.collect()
+
+        unique_vals = sorted(unique_set)
         has_pdac = int(pdac_value in unique_vals)
-        del data
         return {
             "case_id": case_id,
             "label": has_pdac,
@@ -326,32 +406,39 @@ def paso4_pancreas_labels(active, dry_run=False):
     n_total = len(label_files)
     log.info("  Máscaras a procesar: %d", n_total)
 
-    n_workers = max(1, (os.cpu_count() or 2) - 1)
-    args_list = [(str(lf), PDAC_VALUE) for lf in label_files]
+    # Sequential in-process loop: avoids OOM from fork overhead on 13 GB RAM
+    # Resume support: load partial results from CSV if it exists
+    partial_csv = out_csv.with_suffix(".partial.csv")
+    already_done = {}
+    if partial_csv.exists():
+        try:
+            df_partial = pd.read_csv(partial_csv)
+            already_done = {r["case_id"]: r for _, r in df_partial.iterrows()}
+            log.info("  Resumiendo desde %d resultados parciales", len(already_done))
+        except Exception:
+            pass
+
     rows = [None] * n_total
     done = 0
     t0 = time.time()
 
-    with ProcessPoolExecutor(max_workers=n_workers) as executor:
-        future_to_idx = {
-            executor.submit(_process_mask, arg): i for i, arg in enumerate(args_list)
-        }
-        for future in as_completed(future_to_idx):
-            idx = future_to_idx[future]
-            try:
-                rows[idx] = future.result()
-            except Exception as e:
-                lf_str = args_list[idx][0]
-                rows[idx] = {
-                    "case_id": Path(lf_str).name.replace(".nii.gz", ""),
-                    "label": -1,
-                    "label_source": "FUTURE_ERROR",
-                    "mask_values": str(e),
-                }
-            done += 1
-            if done % 100 == 0 or done == n_total:
-                elapsed = time.time() - t0
-                log.info("  %d/%d máscaras [%.0fs]", done, n_total, elapsed)
+    for i, arg in enumerate(label_files):
+        case_id = arg.name.replace(".nii.gz", "")
+        if case_id in already_done:
+            rows[i] = already_done[case_id]
+        else:
+            rows[i] = _process_mask((str(arg), PDAC_VALUE))
+        done += 1
+        if done % 100 == 0 or done == n_total:
+            elapsed = time.time() - t0
+            log.info("  %d/%d máscaras [%.0fs]", done, n_total, elapsed)
+            # Save partial progress
+            df_partial = pd.DataFrame([r for r in rows[:done] if r is not None])
+            df_partial.to_csv(partial_csv, index=False)
+
+    # Remove partial CSV now that all masks are done
+    if partial_csv.exists():
+        partial_csv.unlink()
 
     # Fix 8: volúmenes sin máscara → asumir PDAC negativo
     mask_ids = {r["case_id"] for r in rows if r is not None}
@@ -599,11 +686,11 @@ def paso8_reporte(all_results, timings, active):
             "    --isic_train_csv datasets/isic_2019/splits/isic_train.csv \\",
             "    --isic_val_csv datasets/isic_2019/splits/isic_val.csv \\",
             "    --isic_test_csv datasets/isic_2019/splits/isic_test.csv \\",
-            "    --isic_imgs datasets/isic_2019/isic_images \\",
+            "    --isic_imgs datasets/isic_2019/ISIC_2019_Training_Input \\",
             "    --oa_root datasets/osteoarthritis/oa_splits \\",
             "    --luna_patches_dir datasets/luna_lung_cancer/patches \\",
             "    --luna_csv datasets/luna_lung_cancer/candidates_V2/candidates_V2.csv \\",
-            "    --pancreas_splits_csv datasets/zenodo_13715870/pancreas_splits.csv \\",
+            "    --pancreas_splits_csv datasets/pancreas_splits.csv \\",
             "    --pancreas_nii_dir datasets/zenodo_13715870 \\",
             "    --pancreas_fold 1 \\",
             "    --pancreas_roi_strategy A",

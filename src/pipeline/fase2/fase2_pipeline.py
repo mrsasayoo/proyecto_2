@@ -69,10 +69,60 @@ import ablation_reporter
 log = logging.getLogger("fase2")
 
 
+def _generate_synthetic_data(d_model: int) -> dict:
+    """Genera embeddings sintéticos para dry-run (sin acceder a disco)."""
+    import numpy as np
+
+    rng = np.random.RandomState(42)
+    n_train, n_val = 200, 40
+
+    # 40 muestras por clase en train, 8 por clase en val
+    y_train = np.repeat(np.arange(N_EXPERTS_DOMAIN), n_train // N_EXPERTS_DOMAIN)
+    y_val = np.repeat(np.arange(N_EXPERTS_DOMAIN), n_val // N_EXPERTS_DOMAIN)
+
+    Z_train = rng.randn(n_train, d_model).astype(np.float32)
+    Z_val = rng.randn(n_val, d_model).astype(np.float32)
+
+    return {
+        "Z_train": Z_train,
+        "y_train": y_train,
+        "Z_val": Z_val,
+        "y_val": y_val,
+        "Z_test": np.zeros((0, d_model), dtype=np.float32),
+        "y_test": np.zeros(0, dtype=np.int64),
+        "backbone_meta": {
+            "backbone": "synthetic-dry-run",
+            "d_model": d_model,
+            "n_train": n_train,
+            "n_val": n_val,
+            "n_test": 0,
+            "vram_gb": 0.0,
+        },
+        "d_model": d_model,
+        "has_test": False,
+    }
+
+
 def main(args):
     """Orquesta el ablation study completo."""
     global log
-    log = setup_logging(args.embeddings, phase_name="fase2")
+
+    dry_run = getattr(args, "dry_run", False)
+
+    # ── Dry-run: crear directorio temporal para logs si --embeddings no existe
+    if dry_run:
+        import tempfile, os
+
+        _emb_dir = Path(args.embeddings)
+        if not _emb_dir.exists():
+            _log_dir = tempfile.mkdtemp(prefix="fase2_dryrun_")
+            args.embeddings = _log_dir
+        log = setup_logging(args.embeddings, phase_name="fase2")
+        log.info("=" * 70)
+        log.info("  [DRY-RUN] Step 6: Ablation Study del Router — modo verificación")
+        log.info("=" * 70)
+    else:
+        log = setup_logging(args.embeddings, phase_name="fase2")
 
     log.info("=" * 65)
     log.info("FASE 2 — Ablation Study del Router")
@@ -84,26 +134,56 @@ def main(args):
     log.info("=" * 65)
 
     # ── 1. Cargar y validar embeddings ───────────────────────────────────
-    data = embeddings_loader.load_embeddings(args.embeddings)
+    if dry_run:
+        from config import BACKBONE_CONFIGS
+
+        d_model = BACKBONE_CONFIGS["vit_tiny_patch16_224"]["d_model"]  # 192
+        data = _generate_synthetic_data(d_model)
+        log.info(
+            "[DRY-RUN] Embeddings sintéticos generados: "
+            "Z_train=%s, Z_val=%s, d_model=%d",
+            data["Z_train"].shape,
+            data["Z_val"].shape,
+            d_model,
+        )
+    else:
+        data = embeddings_loader.load_embeddings(args.embeddings)
 
     # ── 2. Distribución de expertos ──────────────────────────────────────
     log_split_distribution(data["y_train"], "train")
     log_split_distribution(data["y_val"], "val")
 
     # ── 3. Ejecutar ablation ─────────────────────────────────────────────
-    results = ablation_runner.run_ablation(data, args)
+    results = ablation_runner.run_ablation(data, args, dry_run=dry_run)
 
     # ── 4. Reporte y guardado ────────────────────────────────────────────
-    ablation_reporter.report_and_save(results, data, args)
+    ablation_reporter.report_and_save(results, data, args, dry_run=dry_run)
 
-    # ── 5. Siguiente paso ────────────────────────────────────────────────
-    fase3_path = _PIPELINE_DIR / "fase3" / "fase3_train_experts.py"
-    log.info(
-        "Siguiente paso: python %s --embeddings %s --ablation_results %s",
-        fase3_path,
-        args.embeddings,
-        Path(args.embeddings) / "ablation_results.json",
-    )
+    # ── 5. Siguiente paso / dry-run banner ───────────────────────────────
+    if dry_run:
+        log.info("")
+        log.info("=" * 70)
+        log.info("  DRY-RUN COMPLETADO — Step 6: Ablation Study (Router Selection)")
+        log.info("  Routers verificados: Linear, GMM, NaiveBayes, kNN-FAISS")
+        log.info(
+            "  Embeddings: sintéticos (%d train / %d val, d=%d)",
+            len(data["Z_train"]),
+            len(data["Z_val"]),
+            data["d_model"],
+        )
+        log.info("=" * 70)
+        log.info(
+            "[DRY-RUN] Pipeline verificado exitosamente. "
+            "Ejecuta sin --dry-run para el ablation real."
+        )
+    else:
+        fase3_path = _PIPELINE_DIR / "fase3" / "fase3_train_experts.py"
+        log.info(
+            "Siguiente paso: python %s --embeddings %s --ablation_results %s",
+            fase3_path,
+            args.embeddings,
+            Path(args.embeddings) / "ablation_results.json",
+        )
 
 
 def _build_parser() -> argparse.ArgumentParser:
@@ -139,6 +219,14 @@ def _build_parser() -> argparse.ArgumentParser:
         help=(
             f"Coeficiente α de la Auxiliary Loss L_aux del Switch Transformer "
             f"para el router Linear. Default: {ALPHA_L_AUX}"
+        ),
+    )
+    parser.add_argument(
+        "--dry-run",
+        action="store_true",
+        help=(
+            "Ejecuta el ablation study con embeddings sintéticos y parámetros "
+            "reducidos para verificar el pipeline sin datos reales."
         ),
     )
     return parser

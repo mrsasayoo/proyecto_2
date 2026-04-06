@@ -27,16 +27,28 @@ from PIL import Image
 from skimage.restoration import denoise_tv_chambolle
 from torchvision import transforms
 
-from fase1_config import (
-    CLAHE_CLIP_LIMIT,
-    CLAHE_TILE_GRID,
-    DEFAULT_GAMMA,
-    IMAGENET_MEAN,
-    IMAGENET_STD,
-    IMG_SIZE,
-    TVF_N_ITER,
-    TVF_WEIGHT,
-)
+try:
+    from fase1_config import (
+        CLAHE_CLIP_LIMIT,
+        CLAHE_TILE_GRID,
+        DEFAULT_GAMMA,
+        IMAGENET_MEAN,
+        IMAGENET_STD,
+        IMG_SIZE,
+        TVF_N_ITER,
+        TVF_WEIGHT,
+    )
+except ModuleNotFoundError:
+    from fase1.fase1_config import (
+        CLAHE_CLIP_LIMIT,
+        CLAHE_TILE_GRID,
+        DEFAULT_GAMMA,
+        IMAGENET_MEAN,
+        IMAGENET_STD,
+        IMG_SIZE,
+        TVF_N_ITER,
+        TVF_WEIGHT,
+    )
 
 log = logging.getLogger("fase1")
 
@@ -308,23 +320,24 @@ def build_2d_transform(
         defaults que preservan el comportamiento original cuando no se
         especifican explícitamente.
     """
-    pipeline = transforms.Compose(
-        [
-            # Paso 1: CLAHE — realce de contraste adaptativo local
-            # (a resolución original, ANTES del resize — §3.3)
-            CLAHETransform(clip_limit=clahe_clip_limit, tile_grid=clahe_tile_grid),
-            # Paso 2: Resize estandarizado (PIL, sin interpolación agresiva)
-            transforms.Resize((img_size, img_size)),
-            # Paso 3: Total Variation Filter — denoising preservando bordes
-            TotalVariationFilter(weight=tvf_weight, n_iter=tvf_n_iter),
-            # Paso 4: Corrección gamma — realza brillo y estructuras
-            GammaCorrection(gamma=gamma),
-            # --- Paso 5: guardar transform (se hace fuera del Compose) ---
-            # Paso 6: Generar tensor normalizado
-            transforms.ToTensor(),
-            transforms.Normalize(mean=IMAGENET_MEAN, std=IMAGENET_STD),
-        ]
-    )
+    steps = [
+        # Paso 1: CLAHE — realce de contraste adaptativo local
+        # (a resolución original, ANTES del resize — §3.3)
+        CLAHETransform(clip_limit=clahe_clip_limit, tile_grid=clahe_tile_grid),
+        # Paso 2: Resize estandarizado (PIL, sin interpolación agresiva)
+        transforms.Resize((img_size, img_size)),
+        # Paso 3: Total Variation Filter — denoising preservando bordes
+        TotalVariationFilter(weight=tvf_weight, n_iter=tvf_n_iter),
+    ]
+    # Paso 4: Corrección gamma — solo si γ ≠ 1.0 (identidad es no-op costoso)
+    if gamma != 1.0:
+        steps.append(GammaCorrection(gamma=gamma))
+    # --- Paso 5: guardar transform (se hace fuera del Compose) ---
+    # Paso 6: Generar tensor normalizado
+    steps.append(transforms.ToTensor())
+    steps.append(transforms.Normalize(mean=IMAGENET_MEAN, std=IMAGENET_STD))
+
+    pipeline = transforms.Compose(steps)
 
     # Paso 5: guardar registro del transform si se solicitó
     if save_path is not None:
@@ -348,6 +361,59 @@ def build_2d_transform(
     )
 
     return pipeline
+
+
+# =====================================================================
+# Constructor del pipeline 2D con augmentation (training)
+# =====================================================================
+def build_2d_aug_transform(
+    img_size: int = IMG_SIZE,
+    clahe_clip_limit: float = CLAHE_CLIP_LIMIT,
+    clahe_tile_grid: tuple[int, int] = CLAHE_TILE_GRID,
+    tvf_weight: float = TVF_WEIGHT,
+    tvf_n_iter: int = TVF_N_ITER,
+    gamma: float = DEFAULT_GAMMA,
+) -> transforms.Compose:
+    """Build augmented 2-D transform pipeline for training (chest X-ray).
+
+    Identical to build_2d_transform() but adds flipping, rotation, and
+    colour-jitter augmentations between Resize and TotalVariationFilter.
+    Occlusion-based transforms (RandomErasing, CutMix, etc.) are prohibited.
+
+    Clinical justifications:
+      - RandomHorizontalFlip(p=0.5): chest has left-right anatomical symmetry.
+      - RandomRotation(10°): simulates patient positioning variation.
+      - ColorJitter(brightness=0.2, contrast=0.2): simulates variability
+        across different X-ray equipment.
+
+    Pipeline order:
+      CLAHE → Resize → RandomHorizontalFlip → RandomRotation → ColorJitter
+      → TVF → [GammaCorrection if γ≠1.0] → ToTensor → Normalize
+    """
+    steps = [
+        CLAHETransform(clip_limit=clahe_clip_limit, tile_grid=clahe_tile_grid),
+        transforms.Resize((img_size, img_size)),
+        transforms.RandomHorizontalFlip(p=0.5),
+        transforms.RandomRotation(degrees=10),
+        transforms.ColorJitter(brightness=0.2, contrast=0.2),
+        TotalVariationFilter(weight=tvf_weight, n_iter=tvf_n_iter),
+    ]
+    if gamma != 1.0:
+        steps.append(GammaCorrection(gamma=gamma))
+    steps.append(transforms.ToTensor())
+    steps.append(transforms.Normalize(mean=IMAGENET_MEAN, std=IMAGENET_STD))
+
+    log.info(
+        "[Transform 2D Aug] Cadena construida: CLAHE(clip=%.1f) → Resize(%d) → "
+        "HFlip(0.5) → Rot(±10°) → ColorJitter → TVF(w=%.1f) → "
+        "Gamma(γ=%.2f) → ToTensor → Normalize",
+        clahe_clip_limit,
+        img_size,
+        tvf_weight,
+        gamma,
+    )
+
+    return transforms.Compose(steps)
 
 
 # =====================================================================

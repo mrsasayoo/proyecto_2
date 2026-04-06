@@ -151,6 +151,53 @@ def build_cvt13(
     return wrapper
 
 
+def build_cvt13_trainable(
+    device: str = "cuda",
+) -> CvT13Wrapper:
+    """
+    Construye CvT-13 desde cero en modo ENTRENABLE (sin congelar parámetros).
+
+    Usado exclusivamente por backbone_loader.load_trainable_backbone() durante
+    el entrenamiento end-to-end del Paso 4.1. Para extracción (Paso 4.2), usar
+    build_cvt13() que devuelve el modelo congelado.
+
+    Returns:
+        CvT13Wrapper en modo train, todos los parámetros con requires_grad=True.
+    """
+    from transformers import CvtConfig, CvtModel
+
+    log.info("[CvT-13/train] Construyendo desde cero (entrenable)")
+
+    config = CvtConfig(
+        num_channels=3,
+        patch_sizes=[7, 3, 3],
+        patch_stride=[4, 2, 2],
+        patch_padding=[2, 1, 1],
+        embed_dim=[64, 192, 384],
+        num_heads=[1, 3, 6],
+        depth=[1, 2, 10],
+        mlp_ratio=[4.0, 4.0, 4.0],
+        attention_drop_rate=[0.0, 0.0, 0.0],
+        drop_rate=[0.0, 0.0, 0.0],
+        drop_path_rate=[0.0, 0.0, 0.1],
+        qkv_bias=[True, True, True],
+        cls_token=[False, False, True],
+    )
+
+    hf_model = CvtModel(config)
+    wrapper = CvT13Wrapper(hf_model)
+
+    # NO congelar — modo entrenamiento
+    for param in wrapper.parameters():
+        param.requires_grad = True
+    wrapper.train()
+    wrapper.to(device)
+
+    total = sum(p.numel() for p in wrapper.parameters())
+    log.info("[CvT-13/train] Parámetros entrenables: %s ✓", f"{total:,}")
+    return wrapper
+
+
 def _register_cvt13_interceptor():
     """Registra el interceptor en timm.create_model (idempotente)."""
     global _CVT13_REGISTERED
