@@ -1117,7 +1117,7 @@ def run_splits(datasets_dir, active):
             log.error("[OA] Error en split: %s", e)
             results["oa"] = {"status": "error", "error": str(e)}
 
-    if "luna_ct" in active or "luna" in active:
+    if "luna_ct" in active or "luna_meta" in active:
         try:
             results["luna"] = split_luna(datasets_dir)
         except Exception as e:

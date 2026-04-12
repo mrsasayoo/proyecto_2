@@ -215,8 +215,9 @@ class ISICDataset(Dataset):
             log.info(
                 "[ISIC] H6/Item-9 — Augmentation diferenciado:\n"
                 "    Mayoría: flip H, rot±30°, ColorJitter moderado\n"
-                "    Minoría (DF/VASC/SCC/AK): flip H+V, rot 0/90/180/270°, "
-                "ColorJitter agresivo, RandomAffine, RandomErasing (Cutout)\n"
+                "    Minoría (DF/VASC/SCC/AK): flip H, rot 0/90/180/270°, "
+                "ColorJitter agresivo, RandomAffine\n"
+                "    (RandomVerticalFlip y RandomErasing/Cutout PROHIBIDOS — ver spec)\n"
                 "    Usar get_weighted_sampler() en DataLoader de FASE 2."
             )
 

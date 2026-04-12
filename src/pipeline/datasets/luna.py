@@ -250,39 +250,124 @@ class LUNA16PatchExtractor:
     def extract(
         mhd_path: str,
         coord_world: list,
+        seg_dir: str = None,
         patch_size: int = 64,
         clip_hu: tuple = (-1000, 400),
     ) -> np.ndarray:
         """
-        H3 — Lee un volumen .mhd y extrae un parche centrado en coord_world.
-        Normalización HU incluida (clip + escala a [0,1]).
-        """
-        image = sitk.ReadImage(mhd_path)
-        origin = np.array(image.GetOrigin())
-        spacing = np.array(image.GetSpacing())
-        direc = np.array(image.GetDirection())
-        array = sitk.GetArrayFromImage(image).astype(np.float32)
+        H3 — Extrae parche 64×64×64 a 1mm isotrópico con pipeline de 7 pasos.
 
-        iz, iy, ix = LUNA16PatchExtractor.world_to_voxel(
+        Pipeline:
+          1. Carga + conversión HU (SimpleITK aplica slope/intercept)
+          2. Resampleo isotrópico a 1×1×1 mm³
+          3. Máscara de segmentación pulmonar (fuera-de-pulmón → -1000 HU)
+          4. Clip HU [-1000, +400]
+          5. Normalización min-max a [0, 1]
+          6. (Zero-centering se aplica por separado en bulk)
+          7. Extracción del parche 64³ con zero-pad en bordes
+
+        Args:
+            mhd_path:    ruta al .mhd del CT
+            coord_world: [x, y, z] en mm (world coordinates)
+            seg_dir:     ruta al directorio seg-lungs-LUNA16/seg-lungs-LUNA16/
+            patch_size:  tamaño del parche (64)
+            clip_hu:     tupla (min_hu, max_hu)
+
+        Returns:
+            float32 ndarray (64, 64, 64) en rango [0, 1]
+        """
+        from scipy.ndimage import zoom as scipy_zoom
+
+        # ── Step 1: Load + HU conversion ────────────────────────────────
+        image = sitk.ReadImage(mhd_path)
+        origin = np.array(image.GetOrigin())  # [x, y, z] mm
+        spacing = np.array(image.GetSpacing())  # [sx, sy, sz] mm/voxel (XYZ)
+        direc = np.array(image.GetDirection())
+        array = sitk.GetArrayFromImage(image).astype(np.float32)  # [Z, Y, X]
+        array[array < -1000] = -1000.0  # clamp outside-FOV
+
+        # ── Step 2: Isotropic resampling to 1×1×1 mm³ ───────────────────
+        zoom_factors = (spacing[2], spacing[1], spacing[0])  # (z, y, x)
+        array = scipy_zoom(array, zoom_factors, order=1)
+
+        # ── Step 3: Apply lung segmentation mask ─────────────────────────
+        if seg_dir is not None:
+            uid = Path(mhd_path).stem
+            seg_path = Path(seg_dir) / (uid + ".mhd")
+            if seg_path.exists():
+                mask_img = sitk.ReadImage(str(seg_path))
+                mask_arr = sitk.GetArrayFromImage(mask_img).astype(np.float32)
+                mask_arr = scipy_zoom(mask_arr, zoom_factors, order=0)
+                mask_arr = (mask_arr > 0.5).astype(np.uint8)
+                min_z = min(array.shape[0], mask_arr.shape[0])
+                min_y = min(array.shape[1], mask_arr.shape[1])
+                min_x = min(array.shape[2], mask_arr.shape[2])
+                array[:min_z, :min_y, :min_x][
+                    mask_arr[:min_z, :min_y, :min_x] == 0
+                ] = -1000.0
+                if min_z < array.shape[0]:
+                    array[min_z:, :, :] = -1000.0
+                if min_y < array.shape[1]:
+                    array[:, min_y:, :] = -1000.0
+                if min_x < array.shape[2]:
+                    array[:, :, min_x:] = -1000.0
+
+        # ── Step 4: Clip HU ─────────────────────────────────────────────
+        array = np.clip(array, clip_hu[0], clip_hu[1])
+
+        # ── Step 5: Min-max normalization to [0, 1] ─────────────────────
+        array = (array - clip_hu[0]) / (clip_hu[1] - clip_hu[0])
+
+        # ── Step 7: Extract patch_size³ voxel patch ─────────────────────
+        half = patch_size // 2  # 32
+
+        # Convert world→voxel in original space, scale to resampled 1mm space
+        iz_orig, iy_orig, ix_orig = LUNA16PatchExtractor.world_to_voxel(
             coord_world, origin, spacing, direc
         )
+        iz = int(round(iz_orig * spacing[2]))
+        iy = int(round(iy_orig * spacing[1]))
+        ix = int(round(ix_orig * spacing[0]))
 
-        half = patch_size // 2
-        z1, z2 = max(0, iz - half), min(array.shape[0], iz + half)
-        y1, y2 = max(0, iy - half), min(array.shape[1], iy + half)
-        x1, x2 = max(0, ix - half), min(array.shape[2], ix + half)
+        z1 = max(0, iz - half)
+        z2 = min(array.shape[0], iz + half)
+        y1 = max(0, iy - half)
+        y2 = min(array.shape[1], iy + half)
+        x1 = max(0, ix - half)
+        x2 = min(array.shape[2], ix + half)
 
-        patch = array[z1:z2, y1:y2, x1:x2]
+        raw = array[z1:z2, y1:y2, x1:x2]
 
-        if patch.shape != (patch_size, patch_size, patch_size):
-            pad_z = patch_size - patch.shape[0]
-            pad_y = patch_size - patch.shape[1]
-            pad_x = patch_size - patch.shape[2]
-            patch = np.pad(
-                patch, ((0, pad_z), (0, pad_y), (0, pad_x)), constant_values=clip_hu[0]
+        # Zero-pad if near volume border (pad value 0.0 = air after normalization)
+        pad_z_before = max(0, half - iz)
+        pad_z_after = max(0, (iz + half) - array.shape[0])
+        pad_y_before = max(0, half - iy)
+        pad_y_after = max(0, (iy + half) - array.shape[1])
+        pad_x_before = max(0, half - ix)
+        pad_x_after = max(0, (ix + half) - array.shape[2])
+
+        if any(
+            p > 0
+            for p in [
+                pad_z_before,
+                pad_z_after,
+                pad_y_before,
+                pad_y_after,
+                pad_x_before,
+                pad_x_after,
+            ]
+        ):
+            raw = np.pad(
+                raw,
+                (
+                    (pad_z_before, pad_z_after),
+                    (pad_y_before, pad_y_after),
+                    (pad_x_before, pad_x_after),
+                ),
+                constant_values=0.0,
             )
 
-        return normalize_hu(patch, clip_hu[0], clip_hu[1])
+        return raw.astype(np.float32)
 
     @staticmethod
     def validate_extraction(
@@ -359,10 +444,13 @@ class LUNA16Dataset(Dataset):
       mode="expert"    → FASE 2: (volume_3d, label_binary, patch_stem)
 
     Augmentation 3D (solo mode="expert" + split="train"):
-      - Flip aleatorio en ejes D, H, W (P=0.5 por eje)
-      - Rotación aleatoria ±15° en eje axial (Z)
-      - Variación de intensidad HU: offset ∈ [-20, +20], escala ∈ [0.95, 1.05]
-      - Ruido gaussiano σ~U(0, 0.02) con P=0.3
+      Aug.1 — Oversampling positivos hasta ratio ~10:1 (Dataset level)
+      Aug.2 — Flips aleatorios en ejes D, H, W (P=0.5 por eje, sin interpolación)
+      Aug.3 — Rotaciones 3D ±15° en los 3 planos (axial, coronal, sagital)
+      Aug.4 — Zoom/Escalado aleatorio [0.80, 1.20] con crop/pad central
+      Aug.5 — Traslación espacial ±4 vóxeles con zero-padding
+      Aug.6 — Deformación elástica 3D (P=0.5, σ∈[1,3], α∈[0,5] mm)
+      Aug.7 — Intensidad: ruido gaussiano + brillo/contraste + blur σ∈[0.1,0.5]
     """
 
     SENSITIVITY_CEILING = 1120 / 1186  # ≈ 0.9443
@@ -391,11 +479,13 @@ class LUNA16Dataset(Dataset):
         if self._apply_augment:
             log.info(
                 "[LUNA16] Augmentation 3D ACTIVO para mode='expert', split='train':\n"
-                "    - Flip aleatorio 3 ejes (P=0.5 c/u)\n"
-                "    - Rotación axial ±15°\n"
-                "    - Variación intensidad HU offset∈[-20,+20] + escala∈[0.95,1.05]\n"
-                "    - Ruido gaussiano σ~U(0,0.02), P=0.3\n"
-                "    - Desplazamiento espacial ±4 vóxeles (anti-posición como atajo)"
+                "    Aug.1 — Oversampling positivos → ratio ~10:1\n"
+                "    Aug.2 — Flips aleatorios 3 ejes (P=0.5 c/u)\n"
+                "    Aug.3 — Rotaciones 3D ±15° (axial, coronal, sagital)\n"
+                "    Aug.4 — Zoom [0.80, 1.20] con crop/pad central\n"
+                "    Aug.5 — Traslación ±4 vóxeles (zero-pad)\n"
+                "    Aug.6 — Deformación elástica 3D (P=0.5, σ∈[1,3], α∈[0,5] mm)\n"
+                "    Aug.7 — Intensidad: ruido gaussiano + brillo/contraste + blur σ∈[0.1,0.5]"
             )
         elif mode == "expert" and split == "train" and not augment_3d:
             log.info("[LUNA16] Augmentation 3D DESACTIVADO (augment_3d=False)")
@@ -463,6 +553,25 @@ class LUNA16Dataset(Dataset):
                 self.samples.append((patch_file, int(row["class"])))
             else:
                 missing += 1
+
+        # ── Aug. 1: Oversampling de positivos (solo train con augment activo) ──────
+        if self._apply_augment:
+            pos_samples = [(f, c) for f, c in self.samples if c == 1]
+            neg_samples = [(f, c) for f, c in self.samples if c == 0]
+            target_ratio = 10  # ratio neg:pos objetivo ≈ 10:1
+            if len(pos_samples) > 0 and len(neg_samples) > 0:
+                current_ratio = len(neg_samples) / len(pos_samples)
+                if current_ratio > target_ratio:
+                    repeats = int(current_ratio / target_ratio)
+                    self.samples = neg_samples + pos_samples * repeats
+                    random.shuffle(self.samples)
+                    n_pos_new = sum(1 for _, c in self.samples if c == 1)
+                    n_neg_new = sum(1 for _, c in self.samples if c == 0)
+                    log.info(
+                        f"[LUNA16] Aug.1 — Oversampling positivos: "
+                        f"{len(pos_samples):,}×{repeats} repeticiones → "
+                        f"nuevo ratio {n_neg_new}/{n_pos_new} ≈ {n_neg_new / max(n_pos_new, 1):.0f}:1"
+                    )
 
         n_pos = sum(1 for _, c in self.samples if c == 1)
         n_neg = sum(1 for _, c in self.samples if c == 0)
@@ -564,105 +673,150 @@ class LUNA16Dataset(Dataset):
         self, volume: np.ndarray, max_shift: int = 4
     ) -> np.ndarray:
         """
-        Desplazamiento espacial aleatorio para evitar que el modelo aprenda la
-        posición central como atajo de clasificación.
+        Desplazamiento espacial aleatorio con zero-padding (reemplaza np.roll circular).
 
-        Problema: los parches 64×64×64 están siempre centrados en la coordenada
-        del candidato. Sin este augmentation, el modelo puede aprender
-        "si hay algo en el centro → nódulo" en lugar de aprender morfología.
-
-        Implementación: desplaza el volumen ±max_shift vóxeles en cada eje usando
-        np.roll (desplazamiento circular) para preservar el shape sin padding costoso.
-        El desplazamiento circular es aceptable en CT pulmonar porque los bordes
-        del parche son aire (-1000 HU → 0.0 normalizado), y np.roll introduce
-        el mismo valor de borde del lado opuesto.
+        np.roll introducía artefactos: los vóxeles del borde opuesto aparecían
+        en el borde desplazado. Con zero-padding, el borde desplazado se rellena
+        con 0.0 (equivalente a aire = -1000 HU normalizado), que es el valor
+        correcto del fondo de un parche pulmonar.
 
         Args:
             volume:    ndarray float32 shape (64, 64, 64)
             max_shift: desplazamiento máximo en vóxeles por eje. Default: 4
-                       (6.25% de 64 — conservador para no sacar el nódulo del FOV)
 
         Returns:
-            ndarray float32 shape (64, 64, 64) con el candidato descentrado
+            ndarray float32 shape (64, 64, 64) con zero-padding en bordes
         """
+        D = volume.shape[0]
         for axis in range(3):
             shift = random.randint(-max_shift, max_shift)
-            if shift != 0:
-                volume = np.roll(volume, shift=shift, axis=axis)
+            if shift == 0:
+                continue
+            shifted = np.zeros_like(volume)
+            slices_src = [slice(None)] * 3
+            slices_dst = [slice(None)] * 3
+            if shift > 0:
+                slices_src[axis] = slice(0, D - shift)
+                slices_dst[axis] = slice(shift, D)
+            else:
+                slices_src[axis] = slice(-shift, D)
+                slices_dst[axis] = slice(0, D + shift)
+            shifted[tuple(slices_dst)] = volume[tuple(slices_src)]
+            volume = shifted
         return volume
 
     def _augment_3d(self, volume: np.ndarray) -> np.ndarray:
         """
-        Pipeline de data augmentation 3D para parches CT de nódulos pulmonares.
+        Pipeline de data augmentation 3D (7 augmentaciones) para parches CT LUNA16.
+        Solo se aplica en mode='expert' + split='train'.
+        Nunca se aplica a val/test — evaluación reproducible garantizada.
 
-        Diseñado para combatir overfitting en Expert 3 (LUNA16): con solo
-        ~14,728 muestras de entrenamiento y un modelo de ~25M parámetros,
-        el augmentation es crítico para regularización.
+        Orden de aplicación (basado en literatura LUNA16 / DSB2017):
+          1. Flips aleatorios en los 3 ejes (P=0.5 c/u) — sin interpolación
+          2. Rotaciones 3D ±15° en los 3 planos (axial, coronal, sagital)
+          3. Escalado/Zoom aleatorio [0.80, 1.20] con crop/pad central
+          4. Traslación aleatoria ±4 vóxeles (zero-padding)
+          5. Deformación elástica 3D (P=0.5, σ∈[1,3], α∈[0,5])
+          6. Augmentación de intensidad: ruido gaussiano + brillo/contraste + blur
+          (Aug.1 Oversampling se gestiona a nivel Dataset en __init__)
 
-        Entrada y salida: ndarray float32 shape (64,64,64), rango aprox [-1,1]
-        tras normalización HU. Todas las transformaciones preservan dtype y rango.
-
-        Args:
-            volume: parche 3D normalizado, shape (64, 64, 64), float32
-
-        Returns:
-            Parche 3D aumentado con el mismo shape y dtype
+        Entrada y salida: ndarray float32 shape (64,64,64), rango [0,1].
         """
-        # --- 1. Flip aleatorio en los 3 ejes (D, H, W) con P=0.5 por eje ---
-        # Justificación: los nódulos pulmonares no tienen orientación preferida;
-        # un flip simula la misma anatomía vista desde una dirección diferente.
-        for axis in range(3):  # 0=D (axial), 1=H (coronal), 2=W (sagital)
+        from scipy.ndimage import zoom as scipy_zoom
+        from scipy.ndimage import gaussian_filter, map_coordinates
+
+        D = volume.shape[0]  # 64
+
+        # ── Aug. 2: Flips aleatorios en los 3 ejes (P=0.5 c/u) ────────────
+        # Sin interpolación: operación píxel exacto — debe ir antes de rotaciones
+        for axis in range(3):
             if random.random() < 0.5:
                 volume = np.flip(volume, axis=axis)
 
-        # --- 2. Rotación aleatoria ±15° en el eje axial (Z) ----------------
-        # Justificación: la orientación del paciente en el scanner varía
-        # ligeramente entre adquisiciones. ±15° es conservador para preservar
-        # la anatomía sin crear artefactos. Se rota en el plano (H,W) = axes (1,2).
-        angle = random.uniform(-15.0, 15.0)
-        if abs(angle) > 0.5:  # Evitar rotaciones despreciables (ahorro de cómputo)
-            volume = scipy_rotate(
-                volume,
-                angle=angle,
-                axes=(1, 2),  # Rotar en plano axial (H, W)
-                reshape=False,  # Mantener shape original (64,64,64)
-                order=1,  # Interpolación bilineal (buen balance calidad/velocidad)
-                mode="nearest",  # Relleno de bordes con valor más cercano
+        # ── Aug. 3: Rotaciones 3D ±15° en los 3 planos ─────────────────────
+        # Después de flips para evitar duplicar el suavizado de interpolación.
+        # axial=(1,2), coronal=(0,2), sagital=(0,1)
+        for axes in [(1, 2), (0, 2), (0, 1)]:
+            angle = random.uniform(-15.0, 15.0)
+            if abs(angle) > 0.5:
+                volume = scipy_rotate(
+                    volume,
+                    angle=angle,
+                    axes=axes,
+                    reshape=False,
+                    order=1,
+                    mode="nearest",
+                )
+
+        # ── Aug. 4: Escalado/Zoom aleatorio [0.80, 1.20] ────────────────────
+        # Simula variaciones en tamaño aparente del nódulo.
+        zoom_factor = random.uniform(0.80, 1.20)
+        zoomed = scipy_zoom(volume, zoom_factor, order=1)
+        zD = zoomed.shape[0]
+        if zD > D:
+            start = (zD - D) // 2
+            volume = zoomed[start : start + D, start : start + D, start : start + D]
+        elif zD < D:
+            pad_before = (D - zD) // 2
+            pad_after = D - zD - pad_before
+            volume = np.pad(
+                zoomed,
+                ((pad_before, pad_after),) * 3,
+                constant_values=0.0,
             )
+        else:
+            volume = zoomed
 
-        # --- 3. Variación de intensidad HU ---------------------------------
-        # Justificación: simulamos variabilidad inter-scanner en calibración HU.
-        # Offset ∈ [-20, +20] HU y escala ∈ [0.95, 1.05] son realistas para
-        # diferencias entre equipos. Los valores están en escala normalizada:
-        # offset_normalizado = offset_HU / (max_HU - min_HU) = 20/1400 ≈ 0.014
-        offset_hu = random.uniform(-20.0, 20.0)
-        scale = random.uniform(0.95, 1.05)
-        # Convertir offset de HU a escala normalizada [0,1]
-        hu_range = 1400.0  # HU_LUNG_CLIP: (-1000, 400) → rango = 1400
-        offset_norm = offset_hu / hu_range
-        volume = volume * scale + offset_norm
-
-        # --- 4. Ruido gaussiano con P=0.3, σ~U(0, 0.02) -------------------
-        # Justificación: simula ruido de adquisición CT. σ=0.02 es sutil
-        # (~2% del rango normalizado), suficiente para regularizar sin
-        # destruir la señal diagnóstica de nódulos pequeños.
-        if random.random() < 0.3:
-            sigma = random.uniform(0.0, 0.02)
-            noise = np.random.normal(0.0, sigma, size=volume.shape).astype(np.float32)
-            volume = volume + noise
-
-        # Asegurar que el volumen mantenga dtype float32 y un rango razonable
-        # (no clipear estrictamente a [0,1] para no perder información en bordes)
-        volume = np.ascontiguousarray(volume, dtype=np.float32)
-
-        # --- 5. Desplazamiento espacial aleatorio ±4 vóxeles ----------------
-        # Justificación: los parches están centrados en el candidato. Sin shift,
-        # el modelo puede aprender "objeto en el centro → nódulo" como atajo.
-        # np.roll es circular — los bordes del parche son aire (≈0.0 norm),
-        # así que el valor circular no introduce artefactos significativos.
+        # ── Aug. 5: Traslación aleatoria ±4 vóxeles (zero-padding) ─────────
+        # Fuerza robustez ante nódulos no perfectamente centrados.
         volume = self._random_spatial_shift(volume, max_shift=4)
 
-        # Clip suave post-augmentación: evita valores fuera del rango de entrenamiento
+        # ── Aug. 6: Deformación elástica 3D (P=0.5) ─────────────────────────
+        # σ∈[1,3] vóxeles, α∈[0,5] mm — simula deformaciones por respiración.
+        if random.random() < 0.5:
+            sigma = random.uniform(1.0, 3.0)
+            alpha = random.uniform(0.0, 5.0)
+            shape = volume.shape
+            dz = gaussian_filter((np.random.rand(*shape) * 2 - 1), sigma) * alpha
+            dy = gaussian_filter((np.random.rand(*shape) * 2 - 1), sigma) * alpha
+            dx = gaussian_filter((np.random.rand(*shape) * 2 - 1), sigma) * alpha
+            z_g, y_g, x_g = np.meshgrid(
+                np.arange(shape[0]),
+                np.arange(shape[1]),
+                np.arange(shape[2]),
+                indexing="ij",
+            )
+            volume = map_coordinates(
+                volume, [z_g + dz, y_g + dy, x_g + dx], order=1, mode="nearest"
+            ).astype(np.float32)
+
+        # ── Aug. 7: Augmentación de intensidad ──────────────────────────────
+        # Al final: el ruido cubre artefactos de interpolación de pasos anteriores.
+
+        # 7a. Ruido gaussiano aditivo σ∈[0, 25 HU] normalizado (P=0.5)
+        if random.random() < 0.5:
+            hu_range = 1400.0
+            sigma_noise = random.uniform(0.0, 25.0) / hu_range  # ≈ [0, 0.0179]
+            noise = np.random.normal(0.0, sigma_noise, size=volume.shape).astype(
+                np.float32
+            )
+            volume = volume + noise
+
+        # 7b. Ajuste de brillo/contraste: multiplicación aleatoria [0.9, 1.1]
+        scale = random.uniform(0.9, 1.1)
+        hu_range = 1400.0
+        offset_norm = random.uniform(-20.0, 20.0) / hu_range
+        volume = volume * scale + offset_norm
+
+        # 7c. Blur gaussiano ligero σ∈[0.1, 0.5] vóxeles (P=0.5)
+        # Simula diferentes parámetros de reconstrucción del CT.
+        if random.random() < 0.5:
+            sigma_blur = random.uniform(0.1, 0.5)
+            volume = gaussian_filter(volume, sigma=sigma_blur).astype(np.float32)
+
+        volume = np.ascontiguousarray(volume, dtype=np.float32)
+
+        # Clip final para mantener rango físico [0, 1]
         volume = np.clip(volume, 0.0, 1.0)
 
         return volume

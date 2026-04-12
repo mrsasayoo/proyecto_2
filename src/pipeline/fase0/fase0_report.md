@@ -73,7 +73,7 @@ python3 /mnt/hdd/datasets/carlos_andres_ferro/proyecto_2/src/pipeline/fase1/fase
     --isic_train_csv datasets/isic_2019/splits/isic_train.csv \
     --isic_val_csv datasets/isic_2019/splits/isic_val.csv \
     --isic_test_csv datasets/isic_2019/splits/isic_test.csv \
-    --isic_imgs datasets/isic_2019/isic_images \
+    --isic_imgs datasets/isic_2019/ISIC_2019_Training_Input \
     --oa_root datasets/osteoarthritis/oa_splits \
     --luna_patches_dir datasets/luna_lung_cancer/patches \
     --luna_csv datasets/luna_lung_cancer/candidates_V2/candidates_V2.csv \

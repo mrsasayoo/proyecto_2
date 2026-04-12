@@ -19,6 +19,7 @@ import shutil
 import subprocess
 import sys
 import time
+import zipfile
 from pathlib import Path
 
 # ── psutil: instalar si no está ──────────────────────────────────────────────
@@ -42,7 +43,31 @@ ZENODO_LUNA_URL_PART1 = (
 ZENODO_LUNA_URL_PART2 = (
     "https://zenodo.org/records/2596479/files/subset{i}.zip?download=1"
 )
-ZENODO_PANCREAS_URL = "https://zenodo.org/records/13715870/files/batch_1.zip?download=1"
+# Batches 1-4 son registros Zenodo independientes (CC-BY-NC 4.0)
+# Batch 1: zenodo.org/records/13715870  Batch 2: zenodo.org/records/13742336
+# Batch 3: zenodo.org/records/11034011  Batch 4: zenodo.org/records/10999754
+ZENODO_PANCREAS_BATCHES = {
+    1: {
+        "url": "https://zenodo.org/records/13715870/files/batch_1.zip?download=1",
+        "md5": "b3b3669a82696b954b449c27a9d85074",
+        "size_bytes": 49_338_585_294,
+    },
+    2: {
+        "url": "https://zenodo.org/records/13742336/files/batch_2.zip?download=1",
+        "md5": "9668a43c24d5eb3473fbaa979b1dbaf8",
+        "size_bytes": 49_284_974_263,
+    },
+    3: {
+        "url": "https://zenodo.org/records/11034011/files/batch_3.zip?download=1",
+        "md5": "9d852d09d750fd2e2a2e32a371d3bdd8",
+        "size_bytes": 49_287_047_956,
+    },
+    4: {
+        "url": "https://zenodo.org/records/10999754/files/batch_4.zip?download=1",
+        "md5": "f2820a214aa24fa90daeedbaf99d0609",
+        "size_bytes": 46_271_075_077,
+    },
+}
 
 PANORAMA_REPO = "https://github.com/DIAGNijmegen/panorama_labels.git"
 
@@ -53,11 +78,12 @@ MIN_ZIP_SIZES = {
     "oa": 200 * 1024**2,
     "luna_meta": 100 * 1024**2,
     "luna_ct": 4 * 1024**3,
-    "pancreas": 40 * 1024**3,
+    "pancreas": 40
+    * 1024**3,  # por batch; el más pequeño (batch_4) es 46.3 GB → 40 GB es safe
 }
 
 # Datasets que requieren kaggle CLI
-KAGGLE_DATASETS = {"isic", "oa", "luna"}
+KAGGLE_DATASETS = {"isic", "oa", "luna_meta"}
 
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
@@ -317,6 +343,17 @@ def download_nih(datasets_dir):
 
 def download_isic(datasets_dir):
     # type: (Path) -> bool
+    # Skip download if extracted data already present (BUG 2 fix)
+    isic_img_dir = datasets_dir / "isic_2019" / "ISIC_2019_Training_Input"
+    if isic_img_dir.is_dir():
+        jpg_count = len(list(isic_img_dir.glob("*.jpg")))
+        if jpg_count >= 25000:
+            log.info(
+                "[ISIC] Datos ya extraídos (%d JPGs en %s), saltando descarga.",
+                jpg_count,
+                isic_img_dir.name,
+            )
+            return True
     return download_kaggle_cli(
         "andrewmvd/isic-2019",
         datasets_dir / "isic_2019",
@@ -356,6 +393,19 @@ def download_luna_ct(datasets_dir, subsets):
     ct_dir.mkdir(parents=True, exist_ok=True)
     all_ok = True
     for i in subsets:
+        # Skip download if extracted subset already present (BUG 2 fix)
+        subset_dir = ct_dir / "subset{}".format(i)
+        if subset_dir.is_dir():
+            mhd_count = len(list(subset_dir.glob("*.mhd")))
+            raw_count = len(list(subset_dir.glob("*.raw")))
+            if mhd_count >= 88 and mhd_count == raw_count:
+                log.info(
+                    "[LUNA-CT%d] Datos ya extraídos (%d .mhd + %d .raw), saltando descarga.",
+                    i,
+                    mhd_count,
+                    raw_count,
+                )
+                continue
         url_template = ZENODO_LUNA_URL_PART1 if i <= 6 else ZENODO_LUNA_URL_PART2
         url = url_template.format(i=i)
         dest = ct_dir / "subset{}.zip".format(i)
@@ -367,21 +417,79 @@ def download_luna_ct(datasets_dir, subsets):
     return all_ok
 
 
-def download_pancreas(datasets_dir):
-    # type: (Path) -> bool
-    dest = datasets_dir / "zenodo_13715870" / "batch_1.zip"
-    return download_wget(
-        ZENODO_PANCREAS_URL,
-        dest,
-        "PANCREAS",
-        extra_flags=[
-            "--tries=5",
-            "--retry-connrefused",
-            "--waitretry=30",
-            "--timeout=120",
-        ],
-        min_size_bytes=MIN_ZIP_SIZES["pancreas"],
-    )
+def download_pancreas(datasets_dir, batches=None):
+    # type: (Path, list|None) -> bool
+    """Descarga uno o más batches de PANORAMA CT Pancreas desde Zenodo.
+
+    Args:
+        datasets_dir: directorio base de datasets
+        batches: lista de enteros [1..4]. Por defecto [1] (compatibilidad hacia atrás).
+
+    Returns:
+        True si todos los batches solicitados descargaron correctamente.
+    """
+    if batches is None:
+        batches = [1]
+    all_ok = True
+    dest_dir = datasets_dir / "zenodo_13715870"
+    dest_dir.mkdir(parents=True, exist_ok=True)
+    for batch_num in batches:
+        info = ZENODO_PANCREAS_BATCHES.get(batch_num)
+        if info is None:
+            log.error("[PANCREAS] Batch %d no reconocido (válidos: 1-4).", batch_num)
+            all_ok = False
+            continue
+        dest = dest_dir / "batch_{}.zip".format(batch_num)
+        tag = "PANCREAS-B{}".format(batch_num)
+
+        # Skip download if ZIP absent but batch data already extracted (BUG 2 fix).
+        # Read the ZIP manifest from a local copy if it exists; otherwise,
+        # fall back to a conservative per-batch minimum file count.
+        if not dest.exists() or dest.stat().st_size == 0:
+            # ZIP not on disk — check if extracted .nii.gz are already present
+            # by attempting a count.  Each batch has ~550-600 nii.gz files;
+            # we use 100 as a safe per-batch minimum since without the ZIP
+            # manifest we can't know the exact file list.  However, if we find
+            # a substantial number, re-downloading is wasteful.
+            #
+            # To be more precise, we would need to keep a manifest on disk
+            # after extraction, but the conservative count avoids the
+            # 46+ GB re-download for the common case.
+            #
+            # We can't easily tell *which* .nii.gz belong to which batch
+            # without the ZIP manifest.  So we check the global count vs.
+            # what's expected for *all batches up to this one*.
+            nii_count = len(list(dest_dir.glob("*.nii.gz"))) if dest_dir.is_dir() else 0
+            # Expected minimum: 100 files per batch for batches <= batch_num
+            expected_min = 100 * batch_num
+            if nii_count >= expected_min:
+                log.info(
+                    "[%s] ZIP ausente pero %d .nii.gz presentes (>= %d esperados) — datos ya extraídos, saltando descarga.",
+                    tag,
+                    nii_count,
+                    expected_min,
+                )
+                continue
+
+        ok = download_wget(
+            info["url"],
+            dest,
+            tag,
+            extra_flags=[
+                "--tries=5",
+                "--retry-connrefused",
+                "--waitretry=30",
+                "--timeout=120",
+            ],
+            min_size_bytes=MIN_ZIP_SIZES["pancreas"],
+        )
+        if ok:
+            log.info(
+                "[PANCREAS-B%d] Descarga OK — MD5 esperado: %s", batch_num, info["md5"]
+            )
+        else:
+            all_ok = False
+    return all_ok
 
 
 def _panorama_is_valid_repo(repo_dir):
@@ -450,22 +558,34 @@ def download_panorama(datasets_dir):
 # ── Orquestador de descargas ──────────────────────────────────────────────────
 
 
-def run_downloads(datasets_dir, active, luna_subsets=None, dry_run=False):
-    # type: (Path, set, list|None, bool) -> dict
+def run_downloads(
+    datasets_dir, active, luna_subsets=None, dry_run=False, pancreas_batches=None
+):
+    # type: (Path, set, list|None, bool, list|None) -> dict
     """Ejecuta descargas para los datasets activos. Retorna {ds_id: bool}."""
     results = {}
+    if pancreas_batches is None:
+        pancreas_batches = [1, 2, 3, 4]
 
     download_map = {
         "nih": lambda: download_nih(datasets_dir),
         "isic": lambda: download_isic(datasets_dir),
         "oa": lambda: download_oa(datasets_dir),
-        "luna": lambda: download_luna_meta(datasets_dir),
+        "luna_meta": lambda: download_luna_meta(datasets_dir),
         "luna_ct": lambda: download_luna_ct(datasets_dir, luna_subsets),
-        "pancreas": lambda: download_pancreas(datasets_dir),
+        "pancreas": lambda: download_pancreas(datasets_dir, batches=pancreas_batches),
         "panorama": lambda: download_panorama(datasets_dir),
     }
 
-    download_order = ["oa", "luna", "isic", "panorama", "nih", "luna_ct", "pancreas"]
+    download_order = [
+        "oa",
+        "luna_meta",
+        "isic",
+        "panorama",
+        "nih",
+        "luna_ct",
+        "pancreas",
+    ]
 
     for ds_id in download_order:
         if ds_id not in active:

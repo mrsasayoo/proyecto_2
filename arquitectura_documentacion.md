@@ -17,6 +17,7 @@
 9. [Optimización de hardware](#9-optimización-de-hardware)
 10. [Métricas de evaluación y umbrales mínimos](#10-métricas-de-evaluación-y-umbrales-mínimos)
 11. [Restricciones de penalización](#11-restricciones-de-penalización)
+12. [Incidencias y Notas Técnicas](#12-incidencias-y-notas-técnicas)
 
 ---
 
@@ -52,6 +53,7 @@ Los expertos 0–4 se entrenan con su dataset propio. El experto 5 (CAE) se entr
 > - Los modelos **ViT, CvT y Swin** se construyen **desde cero** con arquitectura predefinida (no son pesos preentrenados de ImageNet ni HuggingFace como punto de partida).
 > - **DenseNet** es una arquitectura **propia/custom** diseñada desde cero para este proyecto.
 > - **Paso 4.1 (Entrenar backbones — ✅ completado):** antes de extraer embeddings, cada backbone se entrena end-to-end con una **tarea proxy de clasificación de dominio médico** (5 clases = `expert_id` 0–4, `CrossEntropyLoss`). La cabeza lineal (`LinearHead(d_model→5)`) se descarta tras el entrenamiento; solo los pesos del backbone se guardan en `checkpoints/backbone_0X_<nombre>/backbone.pth`. El Paso 4.2 carga ese checkpoint y congela el backbone antes de extraer embeddings.
+> - **Paso 4.2 (Generar embeddings — ✅ implementado):** `fase1_pipeline.py` verificado con `--dry-run` (EXIT 0, 2026-04-06). Los checkpoints `.pth` aún no existen en disco (Paso 4.1 no ejecutado en producción), lo cual es esperado — el pipeline emite WARNING y usa pesos aleatorios en dry-run. Listo para producción una vez que Paso 4.1 genere los checkpoints.
 > - **Fix en `transform_2d.py` (2026-04-05):** durante el dry-run de Pasos 5.1/5.2, se detectó que el import de `fase1_config` en `src/pipeline/fase1/transform_2d.py` fallaba cuando se invocaba desde el contexto de Fase 2. Corregido con `try/except` que intenta `from . import fase1_config` y como fallback `from fase1 import fase1_config`, preservando compatibilidad hacia atrás.
 
 ### 1.3 Restricción absoluta: solo píxeles
@@ -99,7 +101,7 @@ Router: softmax(W·z + b) → distribución sobre 6 expertos
 | 2 | Extraer archivos | Descompresión de ZIPs, tarballs, NIfTI | Fase 0 – Paso 2 | ✅ Completado |
 | 3 | Preparar datos | Splits 80/10/10, preprocesado por dominio, etiquetas | Fase 0 – Pasos 3–5 | 🔄 En progreso — verificar con re-ejecución (Pancreas previamente con error, datos ya disponibles) |
 | 4.1 | Entrenar backbones | Entrenamiento end-to-end de los 4 backbones desde cero con tarea proxy (clasificación de dominio médico, 5 clases). Produce `backbone.pth` en `checkpoints/backbone_0X_<nombre>/` | Fase 1 | ✅ Completado (2026-04-05) |
-| 4.2 | Generar embeddings | Backbone congelado (cargado desde checkpoint de Paso 4.1) extrae CLS tokens → `.npy` | Fase 1 | ⏳ Pendiente |
+| 4.2 | Generar embeddings | Backbone congelado (cargado desde checkpoint de Paso 4.1) extrae CLS tokens → `.npy` | Fase 1 | ✅ Implementado (dry-run verificado EXIT 0, 2026-04-06) |
 | 5.1 | Entrenar Experto 1 | Chest — ConvNeXt-Tiny (~27.8M params), BCEWithLogitsLoss(pos_weight), 14 clases multilabel. Archivos: `expert1_config.py`, `models/expert1_convnext.py`, `dataloader_expert1.py`, `train_expert1.py`. Checkpoint: `checkpoints/expert_00_convnext_tiny/expert1_best.pt` | Fase 2 | ✅ Script implementado — dry-run verificado |
 | 5.2 | Entrenar Experto 2 | ISIC — EfficientNet-B3 (~10.7M params), CrossEntropyLoss(class_weights), 9 clases (8 train + UNK). Archivos: `expert2_config.py`, `models/expert2_efficientnet.py`, `dataloader_expert2.py`, `train_expert2.py`. Checkpoint: `checkpoints/expert_01_efficientnet_b3/expert2_best.pt` | Fase 2 | ✅ Script implementado — dry-run verificado |
 | 5.3 | Entrenar Experto 3 | OA — VGG16-BN (~134M params), CrossEntropyLoss(class_weights), 3 clases ordinales (KL→Normal/Leve/Severo). Archivos: `expert_oa_config.py`, `models/expert_oa_vgg16bn.py`, `dataloader_expert_oa.py`, `train_expert_oa.py`. Checkpoint: `checkpoints/expert_02_vgg16_bn/expert_oa_best.pt` | Fase 2 | ✅ Script implementado — dry-run verificado |
@@ -966,6 +968,67 @@ El proyecto tiene dos restricciones de evaluación con penalización explícita 
 **Implicación práctica:** si el router envía el 40% de las imágenes al experto Chest y solo el 10% al experto LUNA16, la ratio sería 4.0, violando masivamente el umbral. La L_aux penaliza activamente este desequilibrio durante el entrenamiento del router Linear.
 
 **Nota:** el experto 6 (CAE/OOD) no cuenta para el cálculo de balance de carga. Solo los expertos 0–4 de dominio participan en la ratio.
+
+---
+
+## 12. Incidencias y Notas Técnicas
+
+### 12.1 Registro de incidencias
+
+#### INC-03 — Pancreas: solo batch_1 descargado (29.9% de los CTs etiquetados)
+
+| Campo | Valor |
+|---|---|
+| **Ruta** | `datasets/zenodo_13715870/` |
+| **Descripción** | Solo `batch_1` (557 CTs) está en disco. El dataset PANORAMA tiene 4 batches con 1,864 CTs etiquetados en total. Los 1,307 casos sin CT son omitidos silenciosamente por `_build_pairs()` (A19 resuelto). |
+| **Batches restantes** | batch_2 (Zenodo `13742336`, 49.3 GB), batch_3 (Zenodo `11034011`, 49.3 GB), batch_4 (Zenodo `10999754`, 46.3 GB) |
+| **Tamaño adicional** | ~144 GB |
+| **Bloqueante** | No — pipeline funciona con los 557 CTs disponibles |
+| **Estado** | ⚠️ PARCIALMENTE RESUELTO (2026-04-06) — Soporte multi-batch implementado en `descargar.py` y `extraer.py`. Pendiente: ejecutar descarga real + regenerar `pancreas_splits.csv` con todos los batches. |
+
+#### INC-06 — Referencia obsoleta a `isic_images/` en documentación
+
+| Campo | Valor |
+|---|---|
+| **Ruta** | `docs/comandos_fases.md`, `src/pipeline/fase0/fase0_report.md` |
+| **Descripción** | Varias líneas de comandos de ejemplo referenciaban `datasets/isic_2019/isic_images/` como ruta de las imágenes ISIC. El directorio correcto en disco es `datasets/isic_2019/ISIC_2019_Training_Input/`. |
+| **Estado** | ✅ RESUELTO (2026-04-06) — El directorio `isic_images/` no existe en disco. Referencias obsoletas en `docs/comandos_fases.md` actualizadas a `ISIC_2019_Training_Input/`. Ningún código Python referencia `isic_images`. |
+
+#### INC-07 — Directorio huérfano `KLGrade/` en OA Knee
+
+| Campo | Valor |
+|---|---|
+| **Ruta** | `datasets/osteoarthritis/KLGrade/` |
+| **Descripción** | Directorio residual de una extracción anterior. No es consumido por ningún script del pipeline. |
+| **Estado** | ✅ RESUELTO (2026-04-06) — `KLGrade/` eliminado del disco (162 MB liberados). `extraer.py:295` actualizado: el check de extracción de OA ahora verifica `oa_splits/train/` en lugar de `KLGrade/`. |
+
+### 12.2 Notas técnicas
+
+#### LUNA16 — Normalización HU + ImageNet: cadena intencional (no es un bug)
+
+La pipeline de normalización para LUNA16 en `mode="embedding"` aplica dos pasos secuenciales:
+
+1. **`normalize_hu(-1000, 400)` — offline** (al momento de extraer patches, guardado en `.npy`):
+   `value = clip(HU, -1000, 400) / 1400` → rango **[0.0, 1.0]**
+
+2. **`(x - μ_ImageNet) / σ_ImageNet` — online** en `__getitem__` via `volume_to_vit_input()`:
+   normalización affine sobre los datos ya en [0, 1].
+
+Esto **no es doble normalización redundante**. El paso 1 codifica conocimiento de dominio CT
+(aire=0, tejido blando~0.7, hueso=1). El paso 2 adapta la distribución al backbone ViT
+pre-entrenado en ImageNet. Este patrón es el estándar para adaptar imágenes médicas a ViTs.
+En `mode="expert"` (Fase 2), solo se aplica el paso 1 — sin z-score, correcto para redes 3D
+especializadas que no esperan distribución ImageNet.
+
+**Estado: NO-ISSUE — cerrado (2026-04-06).**
+
+#### Correcciones de Augmentación — 2026-04-06
+
+| ID | Severidad | Descripción | Fix aplicado | Archivo |
+|---|---|---|---|---|
+| I-1 | Media | `build_2d_aug_transform()` definida pero nunca llamada desde `dataset_builder.py` → NIH ChestXray14 entrenaba **sin augmentación** (misma transform para train/val/test) | Importado `build_2d_aug_transform` y pasado como `aug_transform=aug_transform_2d` al constructor `chest_train` | `dataset_builder.py` |
+| I-2 | Baja | Docstring en `isic.py` declaraba `RandomVerticalFlip` y `RandomErasing (Cutout)` como activos, pero ambos fueron removidos del código previamente (cumplen spec de prohibiciones) | Actualizado el mensaje de log para reflejar el estado real del código | `isic.py` |
+| I-3 | Baja | Verificación de leakage por Patient ID (H2) en `ChestXray14Dataset` nunca ejecutaba: `patient_ids_other=None` siempre (parámetro no pasado desde `dataset_builder.py`) | `patient_ids_other=chest_train.patient_ids` pasado a `chest_val`; `patient_ids_other=chest_train.patient_ids \| chest_val.patient_ids` pasado a `chest_test` | `dataset_builder.py` |
 
 ---
 

@@ -137,10 +137,13 @@ def _embeddings_exist(output_dir, backbone_name):
     required_files = [
         "Z_train.npy",
         "y_train.npy",
+        "names_train.txt",
         "Z_val.npy",
         "y_val.npy",
+        "names_val.txt",
         "Z_test.npy",
         "y_test.npy",
+        "names_test.txt",
         "backbone_meta.json",
     ]
     for fname in required_files:
@@ -554,9 +557,6 @@ def main(args):
 
     # ── 7. Extraer embeddings por split ──
     os.makedirs(args.output_dir, exist_ok=True)
-
-    # Diccionario para acumular resultados de cada split
-    split_results = {}
 
     # --- TRAIN ---
     log.info("[FASE 1] Extrayendo embeddings de TRAIN...")

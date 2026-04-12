@@ -293,14 +293,18 @@ def paso0_prerequisites(active, dry_run=False):
 # ══════════════════════════════════════════════════════════════════════════════
 
 
-def paso1_descargar(active, luna_subsets=None, dry_run=False):
-    # type: (set, list|None, bool) -> dict
+def paso1_descargar(active, luna_subsets=None, dry_run=False, pancreas_batches=None):
+    # type: (set, list|None, bool, list|None) -> dict
     log.info("╔══ Paso 1: Descargar datasets ══╗")
     try:
         from descargar import run_downloads
 
         detail = run_downloads(
-            DATASETS_DIR, active, luna_subsets=luna_subsets, dry_run=dry_run
+            DATASETS_DIR,
+            active,
+            luna_subsets=luna_subsets,
+            dry_run=dry_run,
+            pancreas_batches=pancreas_batches,
         )
         all_ok = all(v for v in detail.values()) if detail else True
         return {"status": "✅" if all_ok else "⚠️", "detail": detail}
@@ -314,14 +318,20 @@ def paso1_descargar(active, luna_subsets=None, dry_run=False):
 # ══════════════════════════════════════════════════════════════════════════════
 
 
-def paso2_extraer(active, disco=False, luna_subsets=None, dry_run=False):
-    # type: (set, bool, list|None, bool) -> dict
+def paso2_extraer(
+    active, disco=False, luna_subsets=None, dry_run=False, pancreas_batches=None
+):
+    # type: (set, bool, list|None, bool, list|None) -> dict
     log.info("╔══ Paso 2: Extraer archivos ══╗")
     try:
         from extraer import run_extractions
 
         detail = run_extractions(
-            DATASETS_DIR, active, luna_subsets=luna_subsets, disco=disco
+            DATASETS_DIR,
+            active,
+            luna_subsets=luna_subsets,
+            disco=disco,
+            pancreas_batches=pancreas_batches,
         )
         all_ok = all(v for v in detail.values()) if detail else True
         return {"status": "✅" if all_ok else "⚠️", "detail": detail}
@@ -443,7 +453,7 @@ def paso4_pancreas_labels(active, dry_run=False):
     # Fix 8: volúmenes sin máscara → asumir PDAC negativo
     mask_ids = {r["case_id"] for r in rows if r is not None}
     if zenodo_dir.is_dir():
-        for nf in sorted(zenodo_dir.glob("*.nii.gz")):
+        for nf in sorted(zenodo_dir.rglob("*.nii.gz")):
             stem = nf.name.replace(".nii.gz", "")
             parts = stem.rsplit("_", 1)
             case_id = parts[0] if len(parts) > 1 else stem
@@ -509,9 +519,17 @@ def paso5_splits(active, dry_run=False):
 
 
 def paso6_pre_embeddings(
-    active, workers=6, neg_ratio=10, max_neg=None, luna_subsets=None, dry_run=False
+    active,
+    workers=6,
+    neg_ratio=10,
+    max_neg=None,
+    luna_subsets=None,
+    dry_run=False,
+    skip_zerocentering=False,
+    skip_augmentation=False,
+    skip_audit=False,
 ):
-    # type: (set, int, int, int|None, list|None, bool) -> dict
+    # type: (set, int, int, int|None, list|None, bool, bool, bool, bool) -> dict
     log.info("╔══ Paso 6: Datos 3D (LUNA + Páncreas) ══╗")
     try:
         from pre_embeddings import run_pre_embeddings
@@ -524,6 +542,9 @@ def paso6_pre_embeddings(
             max_neg=max_neg,
             luna_subsets=luna_subsets,
             dry_run=dry_run,
+            skip_zerocentering=skip_zerocentering,
+            skip_augmentation=skip_augmentation,
+            skip_audit=skip_audit,
         )
     except Exception as e:
         log.error("  Paso 6 falló: %s", e)
@@ -772,7 +793,33 @@ def main():
         action="store_true",
         help="Solo imprime lo que haría sin ejecutar",
     )
+    parser.add_argument(
+        "--pancreas_batches",
+        nargs="+",
+        type=int,
+        default=None,
+        help="Batches de páncreas a descargar/extraer (1-4, default: all 4)",
+    )
+    parser.add_argument(
+        "--skip_zerocentering",
+        action="store_true",
+        help="Skip zero-centering fix (paso 6b)",
+    )
+    parser.add_argument(
+        "--skip_augmentation",
+        action="store_true",
+        help="Skip train_aug creation (paso 6c)",
+    )
+    parser.add_argument(
+        "--skip_audit",
+        action="store_true",
+        help="Skip dataset audit (paso 6d)",
+    )
     args = parser.parse_args()
+
+    # When no pancreas_batches specified, default to all 4 batches
+    if args.pancreas_batches is None:
+        args.pancreas_batches = [1, 2, 3, 4]
 
     log.info("=" * 65)
     log.info("  FASE 0 — Preparación de Datos | Proyecto MoE Médico")
@@ -817,8 +864,23 @@ def main():
         log.error("Abortando — prerequisites bloqueantes.")
         return
 
-    run_paso(1, paso1_descargar, active, args.luna_subsets, args.dry_run)
-    run_paso(2, paso2_extraer, active, args.disco, args.luna_subsets, args.dry_run)
+    run_paso(
+        1,
+        paso1_descargar,
+        active,
+        args.luna_subsets,
+        args.dry_run,
+        args.pancreas_batches,
+    )
+    run_paso(
+        2,
+        paso2_extraer,
+        active,
+        args.disco,
+        args.luna_subsets,
+        args.dry_run,
+        args.pancreas_batches,
+    )
     run_paso(3, paso3_pre_chestxray14, active, args.dry_run)
     run_paso(4, paso4_pancreas_labels, active, args.dry_run)
     run_paso(5, paso5_splits, active, args.dry_run)
@@ -831,6 +893,9 @@ def main():
         args.max_neg,
         args.luna_subsets,
         args.dry_run,
+        skip_zerocentering=args.skip_zerocentering,
+        skip_augmentation=args.skip_augmentation,
+        skip_audit=args.skip_audit,
     )
     run_paso(7, paso7_cvt13, args.dry_run)
     run_paso(8, paso8_reporte, all_results, timings, active)

@@ -70,28 +70,36 @@ def check_7z():
     return False
 
 
-def _log_progress(tag, watch_dir, total_files, stop_event):
-    # type: (str, Path, int, threading.Event) -> None
-    """Hilo que reporta progreso de extracción cada 60 segundos con porcentaje y ETA."""
+def _log_progress(tag, watch_dir, total_files, stop_event, baseline_count=0):
+    # type: (str, Path, int, threading.Event, int) -> None
+    """Hilo que reporta progreso de extracción cada 60 segundos con porcentaje y ETA.
+
+    Args:
+        baseline_count: number of files already present in watch_dir before
+            extraction started.  Progress is computed as
+            (current_count - baseline_count) / total_files so that files from
+            prior batches do not inflate the percentage.
+    """
     t0 = time.time()
     while not stop_event.wait(60):
         elapsed_min = (time.time() - t0) / 60.0
         try:
-            file_count = sum(1 for f in Path(watch_dir).rglob("*") if f.is_file())
+            current_count = sum(1 for f in Path(watch_dir).rglob("*") if f.is_file())
         except Exception:
-            file_count = 0
+            current_count = 0
+        new_files = max(0, current_count - baseline_count)
         if total_files > 0:
-            pct = min(100.0, file_count / total_files * 100.0)
+            pct = min(100.0, new_files / total_files * 100.0)
             if pct > 0:
                 remaining_min = elapsed_min / pct * (100.0 - pct)
                 eta_str = "{:.0f} min restantes".format(remaining_min)
             else:
                 eta_str = "calculando ETA..."
             log.info(
-                "[%s] Progreso: %.1f min | %d/%d archivos | %.1f%% | %s",
+                "[%s] Progreso: %.1f min | %d/%d archivos nuevos | %.1f%% | %s",
                 tag,
                 elapsed_min,
-                file_count,
+                new_files,
                 total_files,
                 pct,
                 eta_str,
@@ -101,7 +109,7 @@ def _log_progress(tag, watch_dir, total_files, stop_event):
                 "[%s] Progreso: %.1f min | %d archivos extraídos",
                 tag,
                 elapsed_min,
-                file_count,
+                new_files,
             )
 
 
@@ -215,6 +223,14 @@ def smart_extract(archive, dest, tag, pause_mb, resume_mb):
         tag,
         archive_size_gb * 1000 / 1.4 / 60,
     )
+
+    # Snapshot file count *before* extraction so the progress monitor
+    # only counts newly extracted files (BUG 3 fix).
+    try:
+        baseline_count = sum(1 for f in watch_dir.rglob("*") if f.is_file())
+    except Exception:
+        baseline_count = 0
+
     t0 = time.time()
 
     # NOTA: NO usar -mmt=auto — es inválido para formato ZIP en p7zip y
@@ -228,7 +244,7 @@ def smart_extract(archive, dest, tag, pause_mb, resume_mb):
     progress_stop = threading.Event()
     progress_thread = threading.Thread(
         target=_log_progress,
-        args=(tag, watch_dir, total_files, progress_stop),
+        args=(tag, watch_dir, total_files, progress_stop, baseline_count),
         daemon=True,
     )
     progress_thread.start()
@@ -269,8 +285,8 @@ def smart_extract(archive, dest, tag, pause_mb, resume_mb):
 # ── Verificaciones de extracción ──────────────────────────────────────────────
 
 
-def is_extracted(datasets_dir, ds_id, luna_subsets=None):
-    # type: (Path, str, list|None) -> bool
+def is_extracted(datasets_dir, ds_id, luna_subsets=None, pancreas_batches=None):
+    # type: (Path, str, list|None, list|None) -> bool
     """Verifica si un dataset ya está extraído."""
     checks = {
         "nih": lambda: (
@@ -292,10 +308,14 @@ def is_extracted(datasets_dir, ds_id, luna_subsets=None):
         "isic": lambda: (
             datasets_dir / "isic_2019" / "ISIC_2019_Training_Input"
         ).is_dir(),
-        "oa": lambda: (datasets_dir / "osteoarthritis" / "KLGrade").is_dir(),
-        "luna": lambda: (datasets_dir / "luna_lung_cancer" / "candidates_V2").is_dir(),
+        "oa": lambda: (
+            datasets_dir / "osteoarthritis" / "oa_splits" / "train"
+        ).is_dir(),
+        "luna_meta": lambda: (
+            datasets_dir / "luna_lung_cancer" / "candidates_V2"
+        ).is_dir(),
         "luna_ct": lambda: _luna_ct_extracted(datasets_dir, luna_subsets or [0]),
-        "pancreas": lambda: _pancreas_extracted(datasets_dir),
+        "pancreas": lambda: _pancreas_extracted(datasets_dir, pancreas_batches),
     }
     checker = checks.get(ds_id)
     return checker() if checker else False
@@ -316,10 +336,40 @@ def _luna_ct_extracted(datasets_dir, subsets):
     return True
 
 
-def _pancreas_extracted(datasets_dir):
-    # type: (Path) -> bool
+def _pancreas_extracted(datasets_dir, batches=None):
+    # type: (Path, list|None) -> bool
+    """Verifica que los batches solicitados fueron extraídos.
+
+    Each batch ZIP extracts .nii.gz files into zenodo_13715870/.  Since all
+    batches share the same flat directory, we check whether the ZIP still
+    exists on disk: if the ZIP is present, we conservatively assume the batch
+    may not yet have been extracted.  If the ZIP is absent (already deleted by
+    --disco mode or never downloaded), we fall back to a global file-count
+    threshold as a best-effort check.
+
+    When *batches* is None we check all 4.
+    """
+    if batches is None:
+        batches = [1, 2, 3, 4]
     zenodo_dir = datasets_dir / "zenodo_13715870"
-    return len(list(zenodo_dir.rglob("*.nii.gz"))) >= 1
+    if not zenodo_dir.is_dir():
+        return False
+
+    # Per-batch check: if a batch ZIP still exists on disk, it hasn't been
+    # extracted yet (smart_extract does not delete the ZIP unless --disco).
+    for b in batches:
+        batch_zip = zenodo_dir / "batch_{}.zip".format(b)
+        if batch_zip.exists():
+            # ZIP present → not yet extracted (extraction removes nothing,
+            # but the orchestrator only calls us *before* attempting to
+            # extract, so the ZIP's presence means extraction hasn't run).
+            return False
+
+    # All requested batch ZIPs are gone — either extracted+disco or never
+    # downloaded.  Sanity-check: at least 100 .nii.gz per requested batch.
+    nii_count = len(list(zenodo_dir.rglob("*.nii.gz")))
+    expected_min = 100 * len(batches)
+    return nii_count >= expected_min
 
 
 def verify_luna_ct_subset(datasets_dir, subset_idx):
@@ -390,11 +440,19 @@ def _extract_nih_split_txts(data_zip_path, nih_dir):
 
 
 def run_extractions(
-    datasets_dir, active, luna_subsets=None, pause_mb=700, resume_mb=1400, disco=False
+    datasets_dir,
+    active,
+    luna_subsets=None,
+    pause_mb=700,
+    resume_mb=1400,
+    disco=False,
+    pancreas_batches=None,
 ):
-    # type: (Path, set, list|None, float, float, bool) -> dict
+    # type: (Path, set, list|None, float, float, bool, list|None) -> dict
     """Ejecuta las extracciones. Retorna {ds_id: bool}."""
     results = {}
+    if pancreas_batches is None:
+        pancreas_batches = [1, 2, 3, 4]
 
     # Orden: menor a mayor
     extraction_plan = [
@@ -405,7 +463,7 @@ def run_extractions(
             None,
         ),
         (
-            "luna",
+            "luna_meta",
             datasets_dir / "luna_lung_cancer" / "luna-lung-cancer-dataset.zip",
             datasets_dir / "luna_lung_cancer",
             None,
@@ -440,28 +498,95 @@ def run_extractions(
             ),
         )
 
-    extraction_plan.append(
-        (
-            "pancreas",
-            datasets_dir / "zenodo_13715870" / "batch_1.zip",
-            datasets_dir / "zenodo_13715870",
-            None,
-        ),
-    )
+    for _bnum in pancreas_batches:
+        extraction_plan.append(
+            (
+                "pancreas",
+                datasets_dir / "zenodo_13715870" / "batch_{}.zip".format(_bnum),
+                datasets_dir / "zenodo_13715870",
+                None,
+                _bnum,
+            ),
+        )
 
-    for ds_id, archive, dest, subset_override in extraction_plan:
+    for plan_entry in extraction_plan:
+        if len(plan_entry) == 5:
+            ds_id, archive, dest, subset_override, batch_num = plan_entry
+        else:
+            ds_id, archive, dest, subset_override = plan_entry
+            batch_num = None
         if ds_id not in active:
             continue
 
         tag = ds_id.upper()
         if ds_id == "luna_ct":
             tag = "LUNA-CT{}".format(archive.stem.replace("subset", ""))
+        elif ds_id == "pancreas" and batch_num is not None:
+            tag = "PANCREAS-B{}".format(batch_num)
 
-        check_subsets = subset_override if subset_override is not None else luna_subsets
-        if is_extracted(datasets_dir, ds_id, check_subsets):
-            log.info("[%s] Ya extraído, saltando.", tag)
-            results[ds_id] = results.get(ds_id, True)
-            continue
+        # Per-item idempotency: skip if already done
+        if ds_id == "pancreas":
+            # Per-batch check: read the ZIP manifest and count how many of
+            # its .nii.gz files are already on disk.  Only skip if the vast
+            # majority (>= 95%) are present — this catches partial
+            # extractions that a 5-file sample would miss.
+            if archive.exists():
+                try:
+                    with zipfile.ZipFile(archive, "r") as zf:
+                        nii_names = [
+                            n
+                            for n in zf.namelist()
+                            if n.endswith(".nii.gz") and not n.startswith("__MACOSX")
+                        ]
+                    if nii_names:
+                        zenodo_dir = datasets_dir / "zenodo_13715870"
+                        present = sum(
+                            1 for n in nii_names if (zenodo_dir / Path(n).name).exists()
+                        )
+                        total_in_zip = len(nii_names)
+                        ratio = present / total_in_zip if total_in_zip else 0.0
+                        if ratio >= 0.95:
+                            log.info(
+                                "[%s] Ya extraído (%d/%d archivos presentes, %.0f%%), saltando.",
+                                tag,
+                                present,
+                                total_in_zip,
+                                ratio * 100,
+                            )
+                            results[ds_id] = results.get(ds_id, True)
+                            continue
+                        else:
+                            log.warning(
+                                "[%s] Extracción parcial detectada: %d/%d archivos (%.0f%%) — re-extrayendo.",
+                                tag,
+                                present,
+                                total_in_zip,
+                                ratio * 100,
+                            )
+                except Exception:
+                    pass  # Can't read ZIP central directory — proceed to extract
+            else:
+                # ZIP absent: either never downloaded or deleted by --disco.
+                # If .nii.gz files exist, assume extraction was done.
+                zenodo_dir = datasets_dir / "zenodo_13715870"
+                if (
+                    zenodo_dir.is_dir()
+                    and len(list(zenodo_dir.rglob("*.nii.gz"))) >= 100
+                ):
+                    log.info(
+                        "[%s] Ya extraído (ZIP ausente, .nii.gz presentes), saltando.",
+                        tag,
+                    )
+                    results[ds_id] = results.get(ds_id, True)
+                    continue
+        else:
+            check_subsets = (
+                subset_override if subset_override is not None else luna_subsets
+            )
+            if is_extracted(datasets_dir, ds_id, check_subsets, pancreas_batches):
+                log.info("[%s] Ya extraído, saltando.", tag)
+                results[ds_id] = results.get(ds_id, True)
+                continue
 
         if not archive.exists():
             log.warning("[%s] %s no encontrado — pendiente.", tag, archive.name)

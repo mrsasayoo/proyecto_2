@@ -24,7 +24,7 @@ from datasets.luna import LUNA16Dataset
 from datasets.pancreas import PancreasDataset, PanoramaLabelLoader
 
 # Transforms de este paquete (importados via sys.path → src/pipeline/fase1/)
-from transform_2d import build_2d_transform
+from transform_2d import build_2d_transform, build_2d_aug_transform
 from transform_domain import apply_circular_crop, apply_clahe  # noqa: F401
 from transform_3d import full_3d_pipeline, volume_to_vit_input  # noqa: F401
 from fase1_config import MAX_IMBALANCE, PANCREAS_FOLD, IMG_SIZE
@@ -82,6 +82,7 @@ def build_datasets(cfg):
     """
     img_size = cfg.get("img_size", IMG_SIZE)
     transform_2d = build_2d_transform(img_size=img_size)
+    aug_transform_2d = build_2d_aug_transform(img_size=img_size)
     isic_transform = _make_isic_transform(img_size)
 
     train_datasets = []
@@ -98,6 +99,7 @@ def build_datasets(cfg):
             img_dir=cfg["chest_imgs"],
             file_list=cfg["nih_train_list"],
             transform=transform_2d,
+            aug_transform=aug_transform_2d,
             mode="embedding",
             filter_view=view_filter,
         )
@@ -109,6 +111,7 @@ def build_datasets(cfg):
             mode="embedding",
             split="val",
             filter_view=view_filter,
+            patient_ids_other=chest_train.patient_ids,
         )
         chest_test = ChestXray14Dataset(
             csv_path=cfg["chest_csv"],
@@ -118,6 +121,7 @@ def build_datasets(cfg):
             mode="embedding",
             split="test",
             filter_view=view_filter,
+            patient_ids_other=chest_train.patient_ids | chest_val.patient_ids,
         )
         train_datasets.append(chest_train)
         val_datasets.append(chest_val)
