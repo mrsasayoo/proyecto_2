@@ -21,7 +21,7 @@ from pathlib import Path
 import pandas as pd
 
 from config import EXPERT_IDS, IMAGENET_MEAN, IMAGENET_STD
-from preprocessing import apply_circular_crop
+from fase1.transform_domain import apply_circular_crop
 
 log = logging.getLogger("fase0")
 

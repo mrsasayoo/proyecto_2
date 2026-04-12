@@ -30,7 +30,7 @@ import SimpleITK as sitk
 from scipy.ndimage import rotate as scipy_rotate
 
 from config import EXPERT_IDS, HU_LUNG_CLIP
-from preprocessing import normalize_hu, resize_volume_3d, volume_to_vit_input
+from fase1.transform_3d import normalize_hu, resize_volume_3d, volume_to_vit_input
 
 log = logging.getLogger("fase0")
 

@@ -1100,7 +1100,7 @@ def _paso6c_create_aug(patches_dir, dry_run=False):
             log.warning("[6c] Could not read manifest for idempotence check: %s", e)
 
     # Run create_augmented_train.py as subprocess
-    script_path = Path(__file__).resolve().parent.parent / "create_augmented_train.py"
+    script_path = Path(__file__).resolve().parent / "create_augmented_train.py"
     if not script_path.exists():
         log.error("[6c] Script not found: %s", script_path)
         return {
@@ -1171,7 +1171,7 @@ def _paso6d_audit(patches_dir, dry_run=False):
         return {"status": "⏭️", "dry_run": True}
 
     # Run audit_dataset.py as subprocess
-    script_path = Path(__file__).resolve().parent.parent / "audit_dataset.py"
+    script_path = Path(__file__).resolve().parent / "audit_dataset.py"
     if not script_path.exists():
         log.error("[6d] Script not found: %s", script_path)
         return {

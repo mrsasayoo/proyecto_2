@@ -65,3 +65,4 @@ checkpoints/expert_03_vivit_tiny/augmentations
 checkpoints/expert_03_vivit_tiny/transformscheckpoints/expert_03_vivit_tiny/archivos_generados/best_luna_model.pth
 checkpoints/expert_03_vivit_tiny/archivos_generados/best_luna_model.pth
 checkpoints/expert_03_vivit_tiny/archivos_generados/best_luna_model.pth
+*.nii.gz
