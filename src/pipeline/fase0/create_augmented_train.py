@@ -42,7 +42,7 @@ warnings.filterwarnings("ignore", category=RuntimeWarning)
 TARGET_RATIO = 2  # desired neg:pos ratio
 GLOBAL_MEAN: float = 0.09921630471944809
 
-BASE_DIR = Path(__file__).resolve().parents[2]  # proyecto_2/
+BASE_DIR = Path(__file__).resolve().parents[3]  # proyecto_2/
 PATCHES_DIR = BASE_DIR / "datasets" / "luna_lung_cancer" / "patches"
 TRAIN_DIR = PATCHES_DIR / "train"
 OUTPUT_DIR = PATCHES_DIR / "train_aug"

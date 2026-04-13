@@ -4,14 +4,14 @@
 
 | Paso | Descripción | Estado | Tiempo |
 |------|-------------|--------|--------|
-| 0 | Prerequisites | ✅ | 0.1s |
-| 1 | Descargar datasets | ✅ | 1430.6s |
+| 0 | Prerequisites | ✅ | 0.2s |
+| 1 | Descargar datasets | ✅ | 0.4s |
 | 2 | Extraer archivos | ✅ | 1.0s |
-| 3 | Post-procesado NIH | ✅ | 5.6s |
+| 3 | Post-procesado NIH | ✅ | 5.7s |
 | 4 | Etiquetas páncreas | ✅ | 0.0s |
-| 5 | Splits 80/10/10 | ✅ | 1.8s |
-| 6 | Datos 3D | — | 1560.9s |
-| 7 | DenseNet3D | ✅ | 2.6s |
+| 5 | Splits 80/10/10 | ✅ | 1.5s |
+| 6 | Datos 3D | — | 2208.2s |
+| 7 | DenseNet3D | ✅ | 3.3s |
 | 8 | Reporte | — | — |
 
 ## Datasets activos
