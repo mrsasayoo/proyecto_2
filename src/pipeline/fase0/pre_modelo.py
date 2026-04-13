@@ -85,7 +85,14 @@ def split_nih(datasets_dir):
     img2pid = dict(zip(df["Image Index"], df["Patient ID"]))
     img2labels = dict(zip(df["Image Index"], df["Finding Labels"]))
 
-    # Verificar si el test oficial excede 12% del total
+    # Verificar si el test oficial excede 12% del total.
+    # Umbral elegido: el test oficial NIH contiene ~12,000 imágenes de ~112,000 total
+    # (~10.7%). Si en alguna ejecución el test > 12%, se reduce dinámicamente
+    # moviendo pacientes sobrantes al pool train_val.
+    # Referencia de splits esperados (ejecución canónica):
+    #   train=88,999 | val=11,349 | test=11,772 (total=112,120)
+    # La tolerancia 1.05× en la selección de pacientes de test evita cortes en
+    # la mitad de un grupo de imágenes del mismo paciente.
     test_pct = len(te_imgs) / total
     if test_pct > 0.12:
         log.info(
@@ -199,7 +206,7 @@ def split_nih(datasets_dir):
 # ══════════════════════════════════════════════════════════════════════════════
 
 
-def split_isic(datasets_dir):
+def build_lesion_split(datasets_dir):
     # type: (Path) -> dict
     """Genera splits 80/10/10 por lesion_id con estratificación por clase."""
     CLASS_TO_IDX = {
@@ -761,17 +768,66 @@ def split_luna(datasets_dir):
         len(mhd_files),
     )
 
-    rng = np.random.default_rng(SEED)
-    uids_arr = np.array(all_uids)
-    rng.shuffle(uids_arr)
+    # Estratificación por presencia de nódulos (positivo = UID en annotations.csv)
+    annotations_path = luna_dir / "annotations.csv"
+    if annotations_path.exists():
+        try:
+            ann = pd.read_csv(annotations_path)
+            positive_uids = set(ann["seriesuid"].unique())
+        except Exception:
+            positive_uids = set()
+        log.info(
+            "[LUNA] %d UIDs positivos (con nódulos), %d negativos",
+            len([u for u in all_uids if u in positive_uids]),
+            len([u for u in all_uids if u not in positive_uids]),
+        )
+    else:
+        positive_uids = set()
+        log.warning("[LUNA] annotations.csv no encontrado — split sin estratificación")
 
-    n_total = len(uids_arr)
-    n_test = int(0.10 * n_total)
-    n_val = int(0.10 * n_total)
+    # Estratificar si hay suficientes positivos; fallback a shuffle aleatorio
+    labels = np.array([1 if u in positive_uids else 0 for u in all_uids])
+    n_positive = int(labels.sum())
+    min_needed = 3  # mínimo para StratifiedShuffleSplit
 
-    test_uids = uids_arr[:n_test].tolist()
-    val_uids = uids_arr[n_test : n_test + n_val].tolist()
-    train_uids = uids_arr[n_test + n_val :].tolist()
+    if n_positive >= min_needed and (len(all_uids) - n_positive) >= min_needed:
+        from sklearn.model_selection import StratifiedShuffleSplit
+
+        # Test split estratificado (10%)
+        sss_test = StratifiedShuffleSplit(n_splits=1, test_size=0.10, random_state=SEED)
+        trainval_idx, test_idx = next(sss_test.split(all_uids, labels))
+
+        trainval_uids = [all_uids[i] for i in trainval_idx]
+        trainval_labels = labels[trainval_idx]
+        test_uids_list = [all_uids[i] for i in test_idx]
+
+        # Val split estratificado (10% del total ≈ 11.1% de trainval)
+        val_ratio = 0.10 / 0.90
+        sss_val = StratifiedShuffleSplit(
+            n_splits=1, test_size=val_ratio, random_state=SEED
+        )
+        train_idx_local, val_idx_local = next(
+            sss_val.split(trainval_uids, trainval_labels)
+        )
+
+        train_uids = [trainval_uids[i] for i in train_idx_local]
+        val_uids = [trainval_uids[i] for i in val_idx_local]
+        test_uids = test_uids_list
+        log.info("[LUNA] Split estratificado por presencia de nódulos aplicado.")
+    else:
+        log.warning(
+            "[LUNA] Insuficientes positivos (%d) para estratificar — split aleatorio.",
+            n_positive,
+        )
+        rng = np.random.default_rng(SEED)
+        uids_arr = np.array(all_uids)
+        rng.shuffle(uids_arr)
+        n_total = len(uids_arr)
+        n_test = int(0.10 * n_total)
+        n_val = int(0.10 * n_total)
+        test_uids = uids_arr[:n_test].tolist()
+        val_uids = uids_arr[n_test : n_test + n_val].tolist()
+        train_uids = uids_arr[n_test + n_val :].tolist()
 
     # Verificar no-overlap
     assert not (set(train_uids) & set(val_uids)), "Overlap LUNA train/val!"
@@ -1036,26 +1092,35 @@ def build_cae_splits(datasets_dir):
                 )
 
     # Pancreas (volúmenes .nii.gz con preprocesado on-the-fly)
+    # IMPORTANTE: pancreas_splits.csv tiene múltiples filas por case_id (k-fold).
+    # Se usa SOLO fold1 (split='fold1_train' | 'fold1_val' | 'test') para evitar
+    # que el mismo volumen aparezca como train Y val en el CAE.
     pancreas_splits = datasets_dir / "pancreas_splits.csv"
     if pancreas_splits.exists():
         pdf = pd.read_csv(pancreas_splits)
         zenodo_dir = datasets_dir / "zenodo_13715870"
-        for _, prow in pdf.iterrows():
-            split_tag = prow["split"]
-            # Normalizar: test, fold*_train -> train, fold*_val -> val
-            if split_tag == "test":
-                norm_split = "test"
-            elif "train" in split_tag:
-                norm_split = "train"
-            else:
-                norm_split = "val"
 
-            # Buscar el archivo .nii.gz correspondiente
+        # Seleccionar solo fold1 y test (un único rol por volumen)
+        fold1_mask = pdf["split"].isin(["fold1_train", "fold1_val", "test"])
+        pdf_canonical = pdf[fold1_mask].copy()
+
+        # Normalizar split names
+        pdf_canonical["norm_split"] = pdf_canonical["split"].map(
+            {"fold1_train": "train", "fold1_val": "val", "test": "test"}
+        )
+
+        seen_paths: set = set()
+        for _, prow in pdf_canonical.iterrows():
+            norm_split = prow["norm_split"]
             nii_candidates = list(zenodo_dir.glob("{}*.nii.gz".format(prow["case_id"])))
             for nii in nii_candidates:
+                nii_str = str(nii)
+                if nii_str in seen_paths:
+                    continue  # deduplicar por ruta
+                seen_paths.add(nii_str)
                 rows.append(
                     {
-                        "ruta_imagen": str(nii),
+                        "ruta_imagen": nii_str,
                         "dataset_origen": "pancreas",
                         "split": norm_split,
                         "expert_id": 4,
@@ -1105,7 +1170,7 @@ def run_splits(datasets_dir, active):
 
     if "isic" in active:
         try:
-            results["isic"] = split_isic(datasets_dir)
+            results["isic"] = build_lesion_split(datasets_dir)
         except Exception as e:
             log.error("[ISIC] Error en split: %s", e)
             results["isic"] = {"status": "error", "error": str(e)}
@@ -1132,6 +1197,18 @@ def run_splits(datasets_dir, active):
             results["pancreas"] = {"status": "error", "error": str(e)}
 
     # CAE — después de todos los splits individuales
+    # Verificar que no hay errores bloqueantes antes de construir el manifiesto
+    failed_splits = [
+        k
+        for k, v in results.items()
+        if isinstance(v, dict) and v.get("status") == "error"
+    ]
+    if failed_splits:
+        log.warning(
+            "[CAE] Los siguientes splits fallaron: %s — "
+            "cae_splits.csv se generará con datos parciales.",
+            failed_splits,
+        )
     try:
         results["cae"] = build_cae_splits(datasets_dir)
     except Exception as e:

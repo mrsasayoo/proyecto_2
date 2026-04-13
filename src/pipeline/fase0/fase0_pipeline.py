@@ -15,7 +15,7 @@ Pasos:
   4 — Etiquetas páncreas          [integrado aquí]
   5 — Splits 80/10/10             [pre_modelo.py]
   6 — Datos 3D (LUNA + páncreas)  [pre_embeddings.py]
-  7 — CvT-13 instalar/verificar   [integrado aquí]
+  7 — DenseNet3D verificar         [integrado aquí]
   8 — Reporte final               [integrado aquí]
 
 Uso:
@@ -265,6 +265,20 @@ def paso0_prerequisites(active, dry_run=False):
         else:
             log.warning("  ⚠ kaggle CLI no disponible")
             issues.append(("WARNING", "kaggle CLI no disponible"))
+
+    # SimpleITK — necesario para Paso 6 (extracción de parches 3D)
+    if any(d in active for d in {"luna_ct", "pancreas"}):
+        try:
+            import SimpleITK  # noqa: F401
+
+            log.info("  ✓ SimpleITK disponible")
+        except ImportError:
+            msg = (
+                "SimpleITK no instalado — Paso 6 fallará. "
+                "Instalar: pip install SimpleITK"
+            )
+            log.error("  ✗ %s", msg)
+            issues.append(("BLOQUEANTE", msg))
 
     # Espacio en disco
     try:
@@ -552,72 +566,94 @@ def paso6_pre_embeddings(
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-#  Paso 7 — CvT-13
+#  Paso 7 — DenseNet3D
 # ══════════════════════════════════════════════════════════════════════════════
 
-CVT13_MODULE_PATH = SCRIPTS_DIR / "cvt13_backbone.py"
+DENSENET3D_MODULE_PATH = (
+    PROJECT_ROOT / "src" / "pipeline" / "fase1" / "backbone_densenet3d.py"
+)
 
 
-def paso7_cvt13(dry_run=False):
+def paso7_densenet3d(dry_run=False):
     # type: (bool) -> dict
-    log.info("╔══ Paso 7: CvT-13 ══╗")
+    """
+    Verifica que el backbone DenseNet3D esté disponible para Fase 1.
+    Arquitectura: DenseNet-121 3D — 11.14M params, entrada [B,1,64,64,64], salida [B,2].
+    Ref: luna16-online-aug.ipynb — growth_rate=32, block_config=(6,12,24,16).
+    """
+    log.info("╔══ Paso 7: DenseNet3D backbone ══╗")
 
-    # 7a: Instalar dependencias
-    for pkg in ["transformers", "einops"]:
-        try:
-            __import__(pkg)
-            log.info("  ✓ %s ya instalado", pkg)
-        except ImportError:
-            log.info("  → Instalando %s...", pkg)
-            subprocess.check_call(
-                [sys.executable, "-m", "pip", "install", pkg, "--quiet"],
-            )
-
-    # 7b: Escribir cvt13_backbone.py si no existe o si es referencia vieja
-    if CVT13_MODULE_PATH.exists():
-        log.info("  ✓ cvt13_backbone.py ya existe")
-    else:
+    # 7a: Verificar módulo nativo en Fase 1
+    if DENSENET3D_MODULE_PATH.exists():
         log.info(
-            "  Paso 7: backbone CvT-13 gestionado nativamente en Fase 1 — script externo no requerido"
+            "  ✓ backbone_densenet3d.py encontrado en src/pipeline/fase1/ (nativo)"
         )
+        # 7b: Sanity check — importar DenseNet3D y verificar forward pass
+        if not dry_run:
+            try:
+                import importlib.util
+                import sys as _sys
 
-    # 7c: Compatibilidad CvT-13 ahora es código nativo en Fase 1
-    _cvt13_native = PROJECT_ROOT / "src" / "pipeline" / "fase1" / "backbone_cvt13.py"
-    if _cvt13_native.exists():
-        log.info(
-            "  ✓ Compatibilidad CvT-13 → src/pipeline/fase1/backbone_cvt13.py (nativo)"
-        )
-        return {"status": "✅", "native": True}
-    else:
-        log.info(
-            "  ⚠ backbone_cvt13.py no encontrado en src/pipeline/fase1/ — "
-            "ejecutar la refactorización de Fase 1"
-        )
+                spec = importlib.util.spec_from_file_location(
+                    "backbone_densenet3d", str(DENSENET3D_MODULE_PATH)
+                )
+                mod = importlib.util.module_from_spec(spec)
+                spec.loader.exec_module(mod)  # type: ignore[union-attr]
+                DenseNet3D = mod.DenseNet3D  # noqa: N806
+                import torch
 
-    # 7d: Verificar CvT-13 con test de sanidad
-    if dry_run:
-        log.info("  [DRY-RUN] Saltando test de sanidad CvT-13")
+                model = DenseNet3D(
+                    growth_rate=32,
+                    block_config=(6, 12, 24, 16),
+                    num_init_features=32,
+                    bn_size=4,
+                    dropout_rate=0.2,
+                    fc_dropout=0.4,
+                    num_classes=2,
+                    compression_rate=0.5,
+                )
+                dummy = torch.zeros(1, 1, 64, 64, 64)
+                with torch.no_grad():
+                    out = model(dummy)
+                assert out.shape == (1, 2), "Shape esperado (1,2), got {}".format(
+                    out.shape
+                )
+                n_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
+                log.info(
+                    "  ✓ DenseNet3D forward pass OK — %s params entrenables",
+                    "{:,.0f}".format(n_params),
+                )
+                return {"status": "✅", "n_params": n_params}
+            except ImportError:
+                log.info("  ⚠ torch no instalado — verificación forward pass omitida")
+                return {"status": "✅", "note": "torch ausente, skip sanity"}
+            except Exception as exc:
+                log.error("  ✗ DenseNet3D sanity check falló: %s", exc)
+                return {"status": "❌", "error": str(exc)}
         return {"status": "✅", "dry_run": True}
 
-    if CVT13_MODULE_PATH.exists():
-        result = subprocess.run(
-            [sys.executable, str(CVT13_MODULE_PATH)],
-            cwd=str(PROJECT_ROOT),
-            capture_output=True,
-            text=True,
+    # 7c: Verificar checkpoint preentrenado como fallback
+    ckpt_path = (
+        PROJECT_ROOT / "checkpoints" / "expert_03_vivit_tiny" / "expert3_best.pt"
+    )
+    if ckpt_path.exists():
+        log.info(
+            "  ⚠ backbone_densenet3d.py no encontrado pero checkpoint existe: %s",
+            ckpt_path,
         )
-        if result.returncode == 0:
-            for line in result.stdout.strip().splitlines():
-                log.info("    %s", line)
-            log.info("  ✓ Test de sanidad CvT-13 OK")
-            return {"status": "✅"}
-        else:
-            log.error("  ✗ Test de sanidad CvT-13 FALLÓ")
-            for line in (result.stdout + result.stderr).strip().splitlines():
-                log.error("    %s", line)
-            return {"status": "❌", "error": "test de sanidad falló"}
+        log.info(
+            "  → Ejecutar refactorización de Fase 1 para generar backbone_densenet3d.py"
+        )
+        return {
+            "status": "⚠️",
+            "reason": "backbone_densenet3d.py ausente, checkpoint disponible",
+        }
 
-    return {"status": "⚠️", "reason": "cvt13_backbone.py no disponible"}
+    log.warning(
+        "  ✗ backbone_densenet3d.py no encontrado en src/pipeline/fase1/. "
+        "Fase 1 no podrá cargar el expert LUNA."
+    )
+    return {"status": "⚠️", "reason": "backbone_densenet3d.py no disponible"}
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -652,7 +688,7 @@ def paso8_reporte(all_results, timings, active):
         4: "Etiquetas páncreas",
         5: "Splits 80/10/10",
         6: "Datos 3D",
-        7: "CvT-13",
+        7: "DenseNet3D",
         8: "Reporte",
     }
 
@@ -897,7 +933,7 @@ def main():
         skip_augmentation=args.skip_augmentation,
         skip_audit=args.skip_audit,
     )
-    run_paso(7, paso7_cvt13, args.dry_run)
+    run_paso(7, paso7_densenet3d, args.dry_run)
     run_paso(8, paso8_reporte, all_results, timings, active)
 
     # Resumen final

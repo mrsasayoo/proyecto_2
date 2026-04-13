@@ -52,6 +52,10 @@ log = logging.getLogger("fase0")
 #   -1000 HU es la densidad del aire puro. Preservarlo asegura que el fondo
 #   del parche tenga siempre el mismo valor absoluto = 0.0 tras la normalización.
 
+# Zero-centering global mean — computed on LUNA16 train split (pre_embeddings.py Step 6)
+# Patches on disk are in range [-_LUNA_GLOBAL_MEAN, 1.0 - _LUNA_GLOBAL_MEAN] ≈ [-0.099, 0.901]
+_LUNA_GLOBAL_MEAN: float = 0.09921630471944809
+
 
 def verify_hu_normalization(patches_dir: str, n_sample: int = 3) -> None:
     """
@@ -720,7 +724,7 @@ class LUNA16Dataset(Dataset):
           6. Augmentación de intensidad: ruido gaussiano + brillo/contraste + blur
           (Aug.1 Oversampling se gestiona a nivel Dataset en __init__)
 
-        Entrada y salida: ndarray float32 shape (64,64,64), rango [0,1].
+        Entrada y salida: ndarray float32 shape (64,64,64), rango [-_LUNA_GLOBAL_MEAN, 1-_LUNA_GLOBAL_MEAN] (zero-centered).
         """
         from scipy.ndimage import zoom as scipy_zoom
         from scipy.ndimage import gaussian_filter, map_coordinates
@@ -816,8 +820,8 @@ class LUNA16Dataset(Dataset):
 
         volume = np.ascontiguousarray(volume, dtype=np.float32)
 
-        # Clip final para mantener rango físico [0, 1]
-        volume = np.clip(volume, 0.0, 1.0)
+        # Clip final para mantener rango físico zero-centered
+        volume = np.clip(volume, -_LUNA_GLOBAL_MEAN, 1.0 - _LUNA_GLOBAL_MEAN)
 
         return volume
 

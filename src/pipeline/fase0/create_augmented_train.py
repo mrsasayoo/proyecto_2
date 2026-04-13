@@ -140,7 +140,11 @@ def augment_patch(volume: np.ndarray) -> np.ndarray:
         sigma_b = random.uniform(0.1, 0.5)
         volume = gaussian_filter(volume, sigma=sigma_b).astype(np.float32)
 
-    return np.clip(np.ascontiguousarray(volume, dtype=np.float32), 0.0, 1.0)
+    return np.clip(
+        np.ascontiguousarray(volume, dtype=np.float32),
+        -GLOBAL_MEAN,
+        1.0 - GLOBAL_MEAN,
+    )
 
 
 # ---------------------------------------------------------------------------

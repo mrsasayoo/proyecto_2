@@ -115,6 +115,69 @@ def world_to_voxel(coord_world, origin, spacing, direction):
     return np.round(coord_voxel[::-1]).astype(int)  # [iz, iy, ix]
 
 
+def _preprocess_ct(mhd_path, seg_dir, clip_hu=HU_LUNG_CLIP):
+    """Pasos 1-5 del pipeline LUNA16: load CT, resamplear isotrópico, máscara de pulmón, clip HU, normalizar.
+
+    Args:
+        mhd_path: ruta al archivo .mhd del CT
+        seg_dir:  ruta al directorio de segmentaciones
+        clip_hu:  tupla (min_hu, max_hu), por defecto HU_LUNG_CLIP
+
+    Returns:
+        tuple (array, origin, spacing, direc) donde array es float32 [0,1] a 1mm isotropic
+    """
+    import SimpleITK as sitk
+    from scipy.ndimage import zoom as scipy_zoom
+
+    # Step 1: Load + HU conversion
+    image = sitk.ReadImage(str(mhd_path))
+    origin = np.array(image.GetOrigin())
+    spacing = np.array(image.GetSpacing())  # [sx, sy, sz] XYZ
+    direc = np.array(image.GetDirection())
+    array = sitk.GetArrayFromImage(image).astype(np.float32)  # [Z, Y, X]
+    array[array < -1000] = -1000.0
+
+    # Step 2: Isotropic resampling to 1×1×1 mm³
+    zoom_factors = (spacing[2], spacing[1], spacing[0])  # (z, y, x)
+    array = scipy_zoom(array, zoom_factors, order=1)
+
+    # Step 3: Apply lung segmentation mask
+    uid = Path(mhd_path).stem
+    seg_path = Path(seg_dir) / (uid + ".mhd")
+    if seg_path.exists():
+        try:
+            mask_img = sitk.ReadImage(str(seg_path))
+            mask_arr = sitk.GetArrayFromImage(mask_img).astype(np.float32)
+            mask_arr = scipy_zoom(mask_arr, zoom_factors, order=0)
+            mask_arr = (mask_arr > 0.5).astype(np.uint8)
+            min_z = min(array.shape[0], mask_arr.shape[0])
+            min_y = min(array.shape[1], mask_arr.shape[1])
+            min_x = min(array.shape[2], mask_arr.shape[2])
+            array[:min_z, :min_y, :min_x][
+                mask_arr[:min_z, :min_y, :min_x] == 0
+            ] = -1000.0
+            if min_z < array.shape[0]:
+                array[min_z:, :, :] = -1000.0
+            if min_y < array.shape[1]:
+                array[:, min_y:, :] = -1000.0
+            if min_x < array.shape[2]:
+                array[:, :, min_x:] = -1000.0
+        except Exception as e:
+            log.warning(
+                "[_preprocess_ct] Error loading mask for %s: %s — continuing without mask",
+                uid,
+                e,
+            )
+
+    # Step 4: Clip HU
+    array = np.clip(array, clip_hu[0], clip_hu[1])
+
+    # Step 5: Min-max normalization to [0, 1]
+    array = (array - clip_hu[0]) / (clip_hu[1] - clip_hu[0])
+
+    return array, origin, spacing, direc
+
+
 def extract_patch(mhd_path, coord_world, seg_dir, clip_hu=HU_LUNG_CLIP):
     """Extrae parche 64×64×64 a 1mm isotrópico centrado en coord_world.
 
@@ -136,48 +199,8 @@ def extract_patch(mhd_path, coord_world, seg_dir, clip_hu=HU_LUNG_CLIP):
     Returns:
         float32 ndarray (64, 64, 64) en rango [0, 1]
     """
-    import SimpleITK as sitk
-    from scipy.ndimage import zoom as scipy_zoom
-
-    # ── Step 1: Load + HU conversion ────────────────────────────────────
-    image = sitk.ReadImage(str(mhd_path))
-    origin = np.array(image.GetOrigin())  # [x, y, z] mm
-    spacing = np.array(image.GetSpacing())  # [sx, sy, sz] mm/voxel (XYZ)
-    direc = np.array(image.GetDirection())
-    array = sitk.GetArrayFromImage(image).astype(np.float32)  # [Z, Y, X]
-    array[array < -1000] = -1000.0  # clamp outside-FOV
-
-    # ── Step 2: Isotropic resampling to 1×1×1 mm³ ───────────────────────
-    zoom_factors = (spacing[2], spacing[1], spacing[0])  # (z, y, x)
-    array = scipy_zoom(array, zoom_factors, order=1)
-
-    # ── Step 3: Apply lung segmentation mask ─────────────────────────────
-    seg_dir = Path(seg_dir)
-    uid = Path(mhd_path).stem
-    seg_path = seg_dir / (uid + ".mhd")
-    if seg_path.exists():
-        mask_img = sitk.ReadImage(str(seg_path))
-        mask_arr = sitk.GetArrayFromImage(mask_img)  # [Z, Y, X]
-        mask_arr = scipy_zoom(mask_arr.astype(np.float32), zoom_factors, order=0)
-        mask_arr = (mask_arr > 0.5).astype(np.uint8)  # binarize after zoom
-        # Trim or pad mask if shapes differ slightly due to rounding
-        min_z = min(array.shape[0], mask_arr.shape[0])
-        min_y = min(array.shape[1], mask_arr.shape[1])
-        min_x = min(array.shape[2], mask_arr.shape[2])
-        array[:min_z, :min_y, :min_x][mask_arr[:min_z, :min_y, :min_x] == 0] = -1000.0
-        # If mask is smaller, set the remainder to air
-        if min_z < array.shape[0]:
-            array[min_z:, :, :] = -1000.0
-        if min_y < array.shape[1]:
-            array[:, min_y:, :] = -1000.0
-        if min_x < array.shape[2]:
-            array[:, :, min_x:] = -1000.0
-
-    # ── Step 4: Clip HU ─────────────────────────────────────────────────
-    array = np.clip(array, clip_hu[0], clip_hu[1])
-
-    # ── Step 5: Min-max normalization to [0, 1] ─────────────────────────
-    array = (array - clip_hu[0]) / (clip_hu[1] - clip_hu[0])
+    # ── Steps 1-5: Load, resample, mask, clip, normalize ────────────────
+    array, origin, spacing, direc = _preprocess_ct(mhd_path, seg_dir, clip_hu)
 
     # ── Step 7: Extract 64×64×64 voxel patch ────────────────────────────
     # Convert world→voxel in ORIGINAL space, then scale to resampled space
@@ -239,67 +262,16 @@ def _worker(args_tuple):
     Carga y resamplea CT + máscara UNA VEZ por CT, luego extrae todos los parches.
     Retorna lista de (row_idx, out_path, label, status, mean_val).
     """
-    import SimpleITK as sitk
-    from scipy.ndimage import zoom as scipy_zoom
-
     mhd_path, candidates_batch, out_dir, seg_dir = args_tuple
     results = []
 
-    # ── Step 1: Load + HU conversion ────────────────────────────────────
+    # ── Steps 1-5: Load, resample, mask, clip, normalize ────────────────
     try:
-        image = sitk.ReadImage(str(mhd_path))
-        origin = np.array(image.GetOrigin())
-        spacing = np.array(image.GetSpacing())  # [sx, sy, sz] XYZ
-        direc = np.array(image.GetDirection())
-        array = sitk.GetArrayFromImage(image).astype(np.float32)  # [Z, Y, X]
-        array[array < -1000] = -1000.0
+        array, origin, spacing, direc = _preprocess_ct(mhd_path, seg_dir)
     except Exception as e:
         for row_idx, _cx, _cy, _cz, label in candidates_batch:
-            results.append((row_idx, None, label, "ERROR_READ:{}".format(e), 0.0))
+            results.append((row_idx, None, label, "ERROR_PREPROCESS:{}".format(e), 0.0))
         return results
-
-    # ── Step 2: Isotropic resampling to 1×1×1 mm³ ───────────────────────
-    zoom_factors = (spacing[2], spacing[1], spacing[0])  # (z, y, x)
-    try:
-        array = scipy_zoom(array, zoom_factors, order=1)
-    except Exception as e:
-        for row_idx, _cx, _cy, _cz, label in candidates_batch:
-            results.append((row_idx, None, label, "ERROR_RESAMPLE:{}".format(e), 0.0))
-        return results
-
-    # ── Step 3: Apply lung segmentation mask ─────────────────────────────
-    uid = Path(mhd_path).stem
-    seg_path = Path(seg_dir) / (uid + ".mhd")
-    if seg_path.exists():
-        try:
-            mask_img = sitk.ReadImage(str(seg_path))
-            mask_arr = sitk.GetArrayFromImage(mask_img).astype(np.float32)
-            mask_arr = scipy_zoom(mask_arr, zoom_factors, order=0)
-            mask_arr = (mask_arr > 0.5).astype(np.uint8)
-            min_z = min(array.shape[0], mask_arr.shape[0])
-            min_y = min(array.shape[1], mask_arr.shape[1])
-            min_x = min(array.shape[2], mask_arr.shape[2])
-            array[:min_z, :min_y, :min_x][
-                mask_arr[:min_z, :min_y, :min_x] == 0
-            ] = -1000.0
-            if min_z < array.shape[0]:
-                array[min_z:, :, :] = -1000.0
-            if min_y < array.shape[1]:
-                array[:, min_y:, :] = -1000.0
-            if min_x < array.shape[2]:
-                array[:, :, min_x:] = -1000.0
-        except Exception as e:
-            log.warning(
-                "[Worker] Error loading mask for %s: %s — continuing without mask",
-                uid,
-                e,
-            )
-
-    # ── Step 4: Clip HU ─────────────────────────────────────────────────
-    array = np.clip(array, HU_LUNG_CLIP[0], HU_LUNG_CLIP[1])
-
-    # ── Step 5: Min-max normalization to [0, 1] ─────────────────────────
-    array = (array - HU_LUNG_CLIP[0]) / (HU_LUNG_CLIP[1] - HU_LUNG_CLIP[0])
 
     # ── Step 7: Extract patches for each candidate ──────────────────────
     half = PATCH_HALF  # 32
@@ -581,9 +553,15 @@ def run_luna_patches(
             return "val"
         if uid in test_uids:
             return "test"
-        return "train"  # fallback para UIDs no en splits
+        return None  # excluir UIDs desconocidos
 
     df_sub["split"] = df_sub["seriesuid"].apply(uid_to_split)
+    n_excluded = df_sub["split"].isna().sum()
+    if n_excluded > 0:
+        log.warning(
+            "[LUNA] %d candidatos excluidos (UIDs no en luna_splits.json)", n_excluded
+        )
+    df_sub = df_sub[df_sub["split"].notna()].copy()
 
     # Crear directorios
     for sp in ["train", "val", "test"]:
@@ -753,22 +731,45 @@ def run_luna_patches(
     np.save(global_mean_path, global_mean)
     log.info("[LUNA] Saved global mean to %s", global_mean_path)
 
-    # Apply zero-centering (subtract global_mean) to ALL patches in-place
-    log.info(
-        "[LUNA] Applying zero-centering (subtracting global_mean=%.6f) to all patches...",
-        global_mean,
-    )
-    for sp in ["train", "val", "test"]:
-        sp_dir = patches_dir / sp
-        sp_patches = list(sp_dir.glob("candidate_*.npy"))
-        for pp in sp_patches:
-            try:
-                arr = np.load(pp).astype(np.float32)
-                arr = arr - global_mean
-                np.save(pp, arr)
-            except Exception as e:
-                log.warning("[LUNA] Error zero-centering %s: %s", pp.name, e)
-        log.info("[LUNA] Zero-centered %d patches in %s/", len(sp_patches), sp)
+    # ── Idempotency check ────────────────────────────────────────────────────
+    # If patches are already zero-centered (sample mean ≈ 0), skip application.
+    _IDEMPOTENCY_SAMPLE = min(50, len(train_patches))
+    _already_centered = False
+    if train_patches and _IDEMPOTENCY_SAMPLE > 0:
+        import random as _rnd
+
+        _sample = _rnd.sample(train_patches, _IDEMPOTENCY_SAMPLE)
+        _sample_mean = float(np.mean([np.load(pp).mean() for pp in _sample]))
+        if abs(_sample_mean) < 0.01:
+            _already_centered = True
+            log.info(
+                "[LUNA] Zero-centering SKIPPED — patches already centered "
+                "(sample_mean=%.4f). Idempotency guard active.",
+                _sample_mean,
+            )
+        else:
+            log.info(
+                "[LUNA] Zero-centering will be applied (sample_mean=%.4f).",
+                _sample_mean,
+            )
+
+    if not _already_centered:
+        # Apply zero-centering (subtract global_mean) to ALL patches in-place
+        log.info(
+            "[LUNA] Applying zero-centering (subtracting global_mean=%.6f) to all patches...",
+            global_mean,
+        )
+        for sp in ["train", "val", "test"]:
+            sp_dir = patches_dir / sp
+            sp_patches = list(sp_dir.glob("candidate_*.npy"))
+            for pp in sp_patches:
+                try:
+                    arr = np.load(pp).astype(np.float32)
+                    arr = arr - global_mean
+                    np.save(pp, arr)
+                except Exception as e:
+                    log.warning("[LUNA] Error zero-centering %s: %s", pp.name, e)
+            log.info("[LUNA] Zero-centered %d patches in %s/", len(sp_patches), sp)
 
     # Reporte
     report = {
@@ -996,7 +997,13 @@ def _paso6b_fix_zerocentering(patches_dir, dry_run=False):
         total = len(files)
         log.info("[6b] Processing split=%s  files=%d", split, total)
 
-        counters = {"total": total, "fixed": 0, "ok": 0, "corrupt": 0}
+        counters = {
+            "total": total,
+            "fixed": 0,
+            "ok": 0,
+            "corrupt": 0,
+            "corrupt_files": [],
+        }
         processed = 0
 
         with ctx.Pool(processes=_ZC_NUM_WORKERS) as pool:
@@ -1009,6 +1016,7 @@ def _paso6b_fix_zerocentering(patches_dir, dry_run=False):
                     counters["ok"] += 1
                 else:
                     counters["corrupt"] += 1
+                    counters["corrupt_files"].append(Path(path_str).name)
 
                 processed += 1
                 if processed % _ZC_PROGRESS_EVERY == 0:
@@ -1026,6 +1034,7 @@ def _paso6b_fix_zerocentering(patches_dir, dry_run=False):
             "fixed": counters["fixed"],
             "ok": counters["ok"],
             "corrupt": counters["corrupt"],
+            "corrupt_files": counters["corrupt_files"],  # lista de nombres de archivo
         }
         total_fixed_all += counters["fixed"]
         log.info(
