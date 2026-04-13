@@ -804,13 +804,341 @@ def run_luna_patches(
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-#  Páncreas — Validación de preprocesado isotrópico
+#  Páncreas — Constantes del pipeline offline
+# ══════════════════════════════════════════════════════════════════════════════
+
+# Ventana abdominal CECT — diferente a LUNA que usa [-1000, +400]
+PANCREAS_HU_MIN = -150
+PANCREAS_HU_MAX = 250
+PANCREAS_HU_RANGE = PANCREAS_HU_MAX - PANCREAS_HU_MIN  # 400
+
+# Resolución de salida del pipeline de 7 pasos
+PANCREAS_OUTPUT_SIZE = 64  # volumen completo tras resize trilineal
+PANCREAS_CROP_SIZE = 48  # crop final centrado en región pancreática
+
+# Semilla reproducible para muestreo de validación
+_PAN_SEED = 42
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+#  Páncreas — Pipeline offline de 7 pasos (por volumen)
+# ══════════════════════════════════════════════════════════════════════════════
+
+
+def _pancreas_preprocess_one(nii_path):
+    # type: (str) -> tuple
+    """
+    Aplica los 7 pasos del pipeline offline de páncreas a un volumen .nii.gz.
+
+    Pasos:
+      1. SimpleITK — carga NIfTI + lee spacing real del header
+      2. Remuestreo isotrópico 1×1×1 mm³ con interpolador B-spline (order=3)
+      3. Clip HU a [-150, +250] (ventana abdominal CECT)
+      4. Min-max normalización a [0, 1]: (HU + 150) / 400
+      5. Resize trilineal a 64×64×64 con scipy.ndimage.zoom order=1
+      6. Centroide pancreático: sin máscaras disponibles → fallback [32,32,32]
+      7. Crop 48³ centrado en centroide (center crop del volumen 64³)
+
+    Returns:
+        (crop48, meta_dict) donde:
+          crop48   — float32 ndarray (48, 48, 48)
+          meta_dict — dict con spacing_orig, shape_orig, centroid, case_id
+    """
+    import SimpleITK as sitk
+    from scipy.ndimage import zoom as scipy_zoom
+
+    nii_path = str(nii_path)
+
+    # ── Paso 1: Carga con SimpleITK (lee spacing del header NIfTI) ───────────
+    image = sitk.ReadImage(nii_path)
+    spacing = np.array(image.GetSpacing(), dtype=np.float64)  # [sx, sy, sz] XYZ
+    array = sitk.GetArrayFromImage(image).astype(np.float32)  # [Z, Y, X]
+    shape_orig = array.shape  # (D, H, W) antes de cualquier transformación
+
+    # ── Paso 2: Remuestreo isotrópico a 1×1×1 mm³ (B-spline, order=3) ────────
+    # spacing en SimpleITK es [x, y, z]; array está en [Z, Y, X]
+    # → zoom_factors en orden [z, y, x] = [spacing[2], spacing[1], spacing[0]]
+    zoom_factors = (spacing[2], spacing[1], spacing[0])
+    array = scipy_zoom(array, zoom_factors, order=3)
+
+    # ── Paso 3: Clip HU a [-150, +250] (ventana abdominal CECT) ──────────────
+    array = np.clip(array, PANCREAS_HU_MIN, PANCREAS_HU_MAX)
+
+    # ── Paso 4: Min-max normalización a [0, 1] ────────────────────────────────
+    # (HU + 150) / 400 → 0.0 = tejido blando mínimo, 1.0 = máximo abdominal
+    array = (array - PANCREAS_HU_MIN) / float(PANCREAS_HU_RANGE)
+
+    # ── Paso 5: Resize trilineal a 64×64×64 (scipy.ndimage.zoom, order=1) ─────
+    d, h, w = array.shape
+    target = float(PANCREAS_OUTPUT_SIZE)
+    final_zoom = (target / d, target / h, target / w)
+    array = scipy_zoom(array, final_zoom, order=1)
+    # Garantizar shape exacto (errores de redondeo ±1 vóxel)
+    if array.shape != (PANCREAS_OUTPUT_SIZE,) * 3:
+        from skimage.transform import resize as sk_resize
+
+        array = sk_resize(
+            array,
+            (PANCREAS_OUTPUT_SIZE,) * 3,
+            order=1,
+            mode="reflect",
+            anti_aliasing=False,
+            preserve_range=True,
+        ).astype(np.float32)
+
+    # ── Paso 6: Centroide pancreático ─────────────────────────────────────────
+    # Sin máscaras de segmentación disponibles en disco → fallback centro geométrico
+    cx = cy = cz = PANCREAS_OUTPUT_SIZE // 2  # = 32
+    centroid = [cz, cy, cx]  # en orden [D, H, W]
+
+    # ── Paso 7: Crop 48³ centrado en centroide ────────────────────────────────
+    half = PANCREAS_CROP_SIZE // 2  # = 24
+    d0 = max(0, centroid[0] - half)
+    d1 = min(PANCREAS_OUTPUT_SIZE, centroid[0] + half)
+    h0 = max(0, centroid[1] - half)
+    h1 = min(PANCREAS_OUTPUT_SIZE, centroid[1] + half)
+    w0 = max(0, centroid[2] - half)
+    w1 = min(PANCREAS_OUTPUT_SIZE, centroid[2] + half)
+
+    crop = array[d0:d1, h0:h1, w0:w1]
+
+    # Zero-pad si el crop es menor que 48³ (solo en bordes del volumen)
+    if crop.shape != (PANCREAS_CROP_SIZE,) * 3:
+        pd_d = PANCREAS_CROP_SIZE - crop.shape[0]
+        pd_h = PANCREAS_CROP_SIZE - crop.shape[1]
+        pd_w = PANCREAS_CROP_SIZE - crop.shape[2]
+        crop = np.pad(
+            crop,
+            (
+                (pd_d // 2, pd_d - pd_d // 2),
+                (pd_h // 2, pd_h - pd_h // 2),
+                (pd_w // 2, pd_w - pd_w // 2),
+            ),
+            constant_values=0.0,
+        )
+
+    meta = {
+        "spacing_orig": spacing.tolist(),
+        "shape_orig": list(shape_orig),
+        "centroid_fallback": True,  # True = no había máscara, se usó centro geométrico
+        "centroid": centroid,
+    }
+
+    return crop.astype(np.float32), meta
+
+
+def _pancreas_worker(args_tuple):
+    # type: (tuple) -> tuple
+    """Worker pickleable para ProcessPoolExecutor.
+
+    Args:
+        args_tuple: (nii_path_str, out_npy_str, case_id)
+
+    Returns:
+        (case_id, status, error_msg)  donde status in {"OK","SKIP","ERROR"}
+    """
+    nii_path_str, out_npy_str, case_id = args_tuple
+    out_npy = Path(out_npy_str)
+
+    # Idempotencia: si ya existe y tiene shape correcta, saltar
+    if out_npy.exists():
+        try:
+            arr = np.load(str(out_npy), mmap_mode="r")
+            if arr.shape == (PANCREAS_CROP_SIZE,) * 3:
+                return (case_id, "SKIP", "")
+            else:
+                out_npy.unlink()
+        except Exception:
+            try:
+                out_npy.unlink()
+            except Exception:
+                pass
+
+    try:
+        crop, _meta = _pancreas_preprocess_one(nii_path_str)
+        np.save(str(out_npy), crop)
+        return (case_id, "OK", "")
+    except Exception as e:
+        return (case_id, "ERROR", str(e))
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+#  Páncreas — Orquestador offline (procesa todos los volúmenes)
+# ══════════════════════════════════════════════════════════════════════════════
+
+
+def run_pancreas_preprocessing(datasets_dir, workers=4):
+    # type: (Path, int) -> dict
+    """
+    Ejecuta el pipeline offline de 7 pasos sobre los 2238 volúmenes de páncreas.
+
+    Guarda en: datasets/zenodo_13715870/preprocessed/{case_id}.npy
+    Formato de salida: float32 ndarray shape (48, 48, 48) = PANCREAS_CROP_SIZE³
+
+    Idempotencia: si preprocessed/ ya tiene ≥90% de los archivos esperados,
+    salta el procesamiento completo.
+
+    Args:
+        datasets_dir: Path al directorio datasets/
+        workers:      Número de workers paralelos (default: 4)
+
+    Returns:
+        dict con status, n_ok, n_skip, n_error, n_total, preprocessed_dir
+    """
+    zenodo_dir = datasets_dir / "zenodo_13715870"
+    preprocessed_dir = zenodo_dir / "preprocessed"
+
+    if not zenodo_dir.is_dir():
+        log.warning("[PANCREAS-OFFLINE] zenodo_13715870/ no encontrado.")
+        return {"status": "⚠️", "reason": "zenodo_13715870/ no encontrado"}
+
+    # Descubrir todos los volúmenes CT (solo archivos _0000.nii.gz)
+    all_nii = sorted(f for f in zenodo_dir.rglob("*.nii.gz") if "_0000" in f.name)
+    if not all_nii:
+        log.warning("[PANCREAS-OFFLINE] Sin archivos *_0000.nii.gz en zenodo_13715870/")
+        return {"status": "⚠️", "reason": "sin volúmenes CT"}
+
+    n_total = len(all_nii)
+    log.info("[PANCREAS-OFFLINE] %d volúmenes encontrados", n_total)
+
+    preprocessed_dir.mkdir(parents=True, exist_ok=True)
+
+    # ── Idempotencia global ────────────────────────────────────────────────────
+    existing_npy = list(preprocessed_dir.glob("*.npy"))
+    n_existing = len(existing_npy)
+    if n_existing >= int(0.90 * n_total):
+        log.info(
+            "[PANCREAS-OFFLINE] preprocessed/ ya tiene %d/%d archivos (≥90%%) — saltando.",
+            n_existing,
+            n_total,
+        )
+        return {
+            "status": "✅",
+            "skipped": True,
+            "n_existing": n_existing,
+            "n_total": n_total,
+            "preprocessed_dir": str(preprocessed_dir),
+        }
+
+    # ── Construir lista de tareas ──────────────────────────────────────────────
+    # case_id = parte del filename sin _0000.nii.gz
+    # Ejemplo: "100000_00001_0000.nii.gz" → case_id = "100000_00001"
+    tasks = []
+    for nii_path in all_nii:
+        stem = nii_path.name.replace(".nii.gz", "")
+        # Remover sufijo _0000 del stem
+        if stem.endswith("_0000"):
+            case_id = stem[:-5]
+        else:
+            case_id = stem
+        out_npy = preprocessed_dir / "{}.npy".format(case_id)
+        tasks.append((str(nii_path), str(out_npy), case_id))
+
+    log.info(
+        "[PANCREAS-OFFLINE] Procesando %d volúmenes con %d workers...",
+        len(tasks),
+        workers,
+    )
+
+    t0 = time.time()
+    n_ok = n_skip = n_error = 0
+    errors = []
+
+    with ProcessPoolExecutor(max_workers=workers) as exe:
+        futures = {exe.submit(_pancreas_worker, t): t for t in tasks}
+        done_count = 0
+        for fut in as_completed(futures):
+            done_count += 1
+            try:
+                case_id, status, err_msg = fut.result()
+            except Exception as e:
+                n_error += 1
+                errors.append(("UNKNOWN", str(e)))
+                continue
+
+            if status == "OK":
+                n_ok += 1
+            elif status == "SKIP":
+                n_skip += 1
+            else:
+                n_error += 1
+                errors.append((case_id, err_msg))
+
+            if done_count % 100 == 0 or done_count == len(tasks):
+                elapsed = time.time() - t0
+                rate = done_count / max(elapsed, 1)
+                log.info(
+                    "  [PANCREAS-OFFLINE] %d/%d (%.1f%%) | %.1f vol/s | "
+                    "OK=%d SKIP=%d ERR=%d",
+                    done_count,
+                    len(tasks),
+                    100 * done_count / len(tasks),
+                    rate,
+                    n_ok,
+                    n_skip,
+                    n_error,
+                )
+
+    elapsed = time.time() - t0
+    log.info(
+        "[PANCREAS-OFFLINE] Completado en %.0fs | OK=%d SKIP=%d ERR=%d",
+        elapsed,
+        n_ok,
+        n_skip,
+        n_error,
+    )
+
+    if errors:
+        log.warning("[PANCREAS-OFFLINE] Primeros 10 errores:")
+        for case_id, msg in errors[:10]:
+            log.warning("  %s: %s", case_id, msg[:200])
+
+    # ── Guardar reporte JSON ──────────────────────────────────────────────────
+    report = {
+        "n_total": n_total,
+        "n_ok": n_ok,
+        "n_skip": n_skip,
+        "n_error": n_error,
+        "elapsed_s": round(elapsed, 1),
+        "output_shape": [PANCREAS_CROP_SIZE, PANCREAS_CROP_SIZE, PANCREAS_CROP_SIZE],
+        "hu_clip": [PANCREAS_HU_MIN, PANCREAS_HU_MAX],
+        "resize_to": PANCREAS_OUTPUT_SIZE,
+        "crop_size": PANCREAS_CROP_SIZE,
+        "centroid_strategy": "geometric_center_fallback",
+        "workers": workers,
+        "errors_sample": errors[:20],
+    }
+    report_path = preprocessed_dir / "pancreas_preprocess_report.json"
+    with open(str(report_path), "w") as f:
+        json.dump(report, f, indent=2)
+    log.info("[PANCREAS-OFFLINE] Reporte: %s", report_path)
+
+    n_success = n_ok + n_skip
+    status = "✅" if n_success >= int(0.90 * n_total) else "⚠️"
+    return {
+        "status": status,
+        "n_ok": n_ok,
+        "n_skip": n_skip,
+        "n_error": n_error,
+        "n_total": n_total,
+        "preprocessed_dir": str(preprocessed_dir),
+    }
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+#  Páncreas — Validación de preprocesado isotrópico (on-the-fly, legado)
 # ══════════════════════════════════════════════════════════════════════════════
 
 
 def preprocess_pancreas_volume(nii_path):
     # type: (str) -> np.ndarray
-    """Retorna array float32 [64,64,64] normalizado a [0,1]."""
+    """
+    Pipeline on-the-fly (legado). Retorna array float32 [64,64,64] normalizado a [0,1].
+
+    NOTA: Este método aplica HU_MIN=-100/HU_MAX=400 y no persiste nada a disco.
+    Para el pipeline offline completo de 7 pasos (HU_MIN=-150, crop 48³, guardado
+    como .npy), usar run_pancreas_preprocessing() en su lugar.
+    """
     import nibabel as nib
     import scipy.ndimage as ndimage
 
@@ -1297,9 +1625,11 @@ def run_pre_embeddings(
 
     if "pancreas" in active:
         try:
-            results["pancreas"] = validar_preprocesado_pancreas(datasets_dir)
+            results["pancreas"] = run_pancreas_preprocessing(
+                datasets_dir, workers=workers
+            )
         except Exception as e:
-            log.error("[PANCREAS] Error en validación: %s", e)
+            log.error("[PANCREAS] Error en preprocesado offline: %s", e)
             results["pancreas"] = {"status": "error", "error": str(e)}
 
     # ── Sub-steps 6b, 6c, 6d (LUNA16 post-processing) ────────────────────
