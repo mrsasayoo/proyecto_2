@@ -1,88 +1,91 @@
 """
-Expert OA — VGG16-BN para clasificación ordinal de osteoartritis de rodilla.
+Expert OA — EfficientNet-B0 para clasificación de osteoartritis de rodilla (KL 0-4).
 
 Arquitectura:
-    Backbone: torchvision.models.vgg16_bn (Simonyan & Zisserman, 2015 + Batch Norm)
-    Entrada:  [B, 3, 224, 224] — radiografía de rodilla RGB (CLAHE aplicado)
-    Salida:   [B, 3] — logits para 3 clases ordinales
+    Backbone: torchvision.models.efficientnet_b0 (preentrenado ImageNet1K)
+    16 bloques MBConv con Squeeze-and-Excitation → [B, 1280, 7, 7]
+    AdaptiveAvgPool2d(1) → [B, 1280]
+    Classifier (HEAD reemplazada):
+        Dropout(p=0.4)
+        Linear(1280 → 5)
+    Salida: [B, 5] — logits para 5 grados Kellgren-Lawrence
 
-Clases (Kellgren-Lawrence consolidado):
-    0 = Normal  (KL 0)
-    1 = Leve    (KL 1-2)
-    2 = Severo  (KL 3-4)
+Clases (Kellgren-Lawrence):
+    0 = KL 0 — Normal
+    1 = KL 1 — Dudoso
+    2 = KL 2 — Leve
+    3 = KL 3 — Moderado
+    4 = KL 4 — Severo
 
-Adaptaciones respecto al VGG16-BN original (ImageNet, 1000 clases):
-    1. Sin pesos preentrenados (weights=None) — entrenamiento desde cero.
-    2. Clasificador modificado: 1000 → 3 clases con BN + Dropout agresivo (0.5).
-    3. BN en las capas FC para estabilizar entrenamiento en dataset pequeño.
+Adaptaciones respecto al EfficientNet-B0 original (ImageNet, 1000 clases):
+    1. Pesos preentrenados ImageNet1K (transfer learning).
+    2. Clasificador reemplazado: 1000 → 5 clases con Dropout(0.4).
 
-Parámetros: ~131M entrenables (VGG16-BN con clasificador adaptado).
+Parámetros: ~5.3M totales (EfficientNet-B0 con head adaptada).
+
+Nota: el archivo conserva su nombre original (expert_oa_vgg16bn.py) para no
+romper imports existentes en el pipeline. La clase interna ahora es
+ExpertOAEfficientNetB0. Se exporta un alias ExpertOAVGG16BN para
+compatibilidad hacia atrás.
 """
 
 import torch
 import torch.nn as nn
-from torchvision.models import vgg16_bn
+from torchvision.models import efficientnet_b0, EfficientNet_B0_Weights
 
 
-class ExpertOAVGG16BN(nn.Module):
-    """
-    VGG16-BN adaptado para Osteoarthritis Knee — 3 clases ordinales.
+class ExpertOAEfficientNetB0(nn.Module):
+    """EfficientNet-B0 preentrenado adaptado para Osteoarthritis Knee — 5 grados KL.
+
+    Reemplaza el head original de 1000 clases por un clasificador ligero
+    (Dropout + Linear) ajustado para los 5 grados de Kellgren-Lawrence.
 
     Entrada:  [B, 3, 224, 224] — radiografía de rodilla con CLAHE, normalizada
-    Salida:   [B, 3] — logits crudos (antes de softmax)
+    Salida:   [B, 5] — logits crudos (antes de softmax)
 
     Args:
-        num_classes: número de clases de salida. Default: 3
-            (Normal, Leve, Severo).
-        dropout: probabilidad de Dropout en las capas FC del clasificador.
-            Default: 0.5 (agresivo por ratio alto parámetros/muestras).
+        num_classes: número de clases de salida. Default: 5
+            (KL 0, KL 1, KL 2, KL 3, KL 4).
+        dropout: probabilidad de Dropout en el clasificador.
+            Default: 0.4.
     """
 
     def __init__(
         self,
-        num_classes: int = 3,
-        dropout: float = 0.5,
-    ):
+        num_classes: int = 5,
+        dropout: float = 0.4,
+    ) -> None:
         super().__init__()
 
-        # ── Cargar backbone VGG16-BN sin pesos preentrenados ───────
-        base = vgg16_bn(weights=None)
+        # ── Cargar backbone EfficientNet-B0 con pesos ImageNet1K ───
+        self.model = efficientnet_b0(weights=EfficientNet_B0_Weights.IMAGENET1K_V1)
 
-        # ── Reusar features y avgpool del backbone ─────────────────
-        self.features = base.features
-        self.avgpool = base.avgpool
-
-        # ── Clasificador modificado: BN + Dropout agresivo ─────────
-        # VGG16-BN original: FC(25088→4096) → ReLU → Drop → FC(4096→4096) → ReLU → Drop → FC(4096→1000)
-        # Modificación: se agrega BN antes de ReLU en cada FC para
-        # estabilizar el entrenamiento en un dataset pequeño (~4.7K imgs).
-        self.classifier = nn.Sequential(
-            nn.Linear(25088, 4096),
-            nn.BatchNorm1d(4096),
-            nn.ReLU(inplace=True),
-            nn.Dropout(dropout),
-            nn.Linear(4096, 4096),
-            nn.BatchNorm1d(4096),
-            nn.ReLU(inplace=True),
-            nn.Dropout(dropout),
-            nn.Linear(4096, num_classes),
+        # ── Reemplazar classifier (head) ───────────────────────────
+        # Original: Sequential(Dropout(0.2), Linear(1280, 1000))
+        # Nueva:    Sequential(Dropout(0.4), Linear(1280, 5))
+        self.model.classifier = nn.Sequential(
+            nn.Dropout(p=dropout),
+            nn.Linear(1280, num_classes),
         )
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        """
-        Forward pass del modelo VGG16-BN.
+        """Forward pass del modelo EfficientNet-B0.
 
         Args:
-            x: tensor [B, 3, 224, 224] — imagen RGB normalizada
+            x: tensor [B, 3, 224, 224] — imagen RGB normalizada.
 
         Returns:
-            logits: tensor [B, 3] — logits crudos (antes de softmax)
+            logits: tensor [B, 5] — logits crudos (antes de softmax).
         """
-        x = self.features(x)
-        x = self.avgpool(x)
-        x = torch.flatten(x, 1)
-        x = self.classifier(x)
-        return x
+        return self.model(x)
+
+    def get_backbone_params(self) -> list[nn.Parameter]:
+        """Retorna los parámetros del backbone (features) para fine-tuning diferencial."""
+        return list(self.model.features.parameters())
+
+    def get_head_params(self) -> list[nn.Parameter]:
+        """Retorna los parámetros del clasificador (head) para fine-tuning diferencial."""
+        return list(self.model.classifier.parameters())
 
     def count_parameters(self) -> int:
         """Retorna el número total de parámetros entrenables del modelo."""
@@ -93,14 +96,20 @@ class ExpertOAVGG16BN(nn.Module):
         return sum(p.numel() for p in self.parameters())
 
 
-def _test_model():
+# ── Alias de compatibilidad hacia atrás ────────────────────────────
+# Otros módulos del pipeline importan `ExpertOAVGG16BN` desde este archivo.
+# Este alias evita romper esos imports mientras se migra gradualmente.
+ExpertOAVGG16BN = ExpertOAEfficientNetB0
+
+
+def _test_model() -> None:
     """Verificación rápida: instanciar, forward pass, conteo de parámetros."""
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    print(f"[ExpertOA/VGG16-BN] Dispositivo: {device}")
+    print(f"[ExpertOA/EfficientNet-B0] Dispositivo: {device}")
 
-    model = ExpertOAVGG16BN(
-        num_classes=3,
-        dropout=0.5,
+    model = ExpertOAEfficientNetB0(
+        num_classes=5,
+        dropout=0.4,
     ).to(device)
 
     # Forward pass con tensor dummy
@@ -110,17 +119,31 @@ def _test_model():
         out = model(dummy)
 
     n_params = model.count_parameters()
-    print(f"[ExpertOA/VGG16-BN] Input shape:  {list(dummy.shape)}")
-    print(f"[ExpertOA/VGG16-BN] Output shape: {list(out.shape)}")
-    print(f"[ExpertOA/VGG16-BN] Parámetros entrenables: {n_params:,}")
-    print(f"[ExpertOA/VGG16-BN] Output values: {out}")
+    print(f"[ExpertOA/EfficientNet-B0] Input shape:  {list(dummy.shape)}")
+    print(f"[ExpertOA/EfficientNet-B0] Output shape: {list(out.shape)}")
+    print(f"[ExpertOA/EfficientNet-B0] Parámetros entrenables: {n_params:,}")
+    print(f"[ExpertOA/EfficientNet-B0] Output values: {out}")
 
     # Validaciones
-    assert out.shape == (2, 3), (
-        f"Shape de salida incorrecto: {out.shape}, esperado (2, 3)"
+    assert out.shape == (2, 5), (
+        f"Shape de salida incorrecto: {out.shape}, esperado (2, 5)"
     )
     assert n_params > 0, "Modelo sin parámetros entrenables"
-    print(f"[ExpertOA/VGG16-BN] ✓ Verificación completada exitosamente")
+
+    # Verificar backbone y head params
+    backbone_p = sum(p.numel() for p in model.get_backbone_params())
+    head_p = sum(p.numel() for p in model.get_head_params())
+    print(f"[ExpertOA/EfficientNet-B0] Backbone params: {backbone_p:,}")
+    print(f"[ExpertOA/EfficientNet-B0] Head params:     {head_p:,}")
+
+    # Verificar alias de compatibilidad
+    alias_model = ExpertOAVGG16BN()
+    assert isinstance(alias_model, ExpertOAEfficientNetB0), (
+        "Alias ExpertOAVGG16BN no apunta a ExpertOAEfficientNetB0"
+    )
+    print("[ExpertOA/EfficientNet-B0] ✓ Alias ExpertOAVGG16BN OK")
+
+    print("[ExpertOA/EfficientNet-B0] ✓ Verificación completada exitosamente")
     return model
 
 

@@ -78,10 +78,25 @@ CHEST_BBOX_CLASSES = {
 
 
 # ── Osteoarthritis Knee ────────────────────────────────────
-OA_CLASS_NAMES = ["Normal (KL0)", "Leve (KL1-2)", "Severo (KL3-4)"]
-OA_N_CLASSES = 3
-# Reservado para FASE 2 — WeightedLoss con penalización ordinal
-OA_COST_MATRIX = np.array([[0, 1, 4], [1, 0, 1], [4, 1, 0]], dtype=np.float32)
+OA_CLASS_NAMES = [
+    "Normal (KL0)",
+    "Dudoso (KL1)",
+    "Leve (KL2)",
+    "Moderado (KL3)",
+    "Severo (KL4)",
+]
+OA_N_CLASSES = 5
+# Reservado para FASE 2 — WeightedLoss con penalización ordinal (|i-j|²)
+OA_COST_MATRIX = np.array(
+    [
+        [0, 1, 4, 9, 16],
+        [1, 0, 1, 4, 9],
+        [4, 1, 0, 1, 4],
+        [9, 4, 1, 0, 1],
+        [16, 9, 4, 1, 0],
+    ],
+    dtype=np.float32,
+)
 OA_BASE_IMG_COUNT = 8260
 
 
@@ -129,15 +144,15 @@ EXPERT_NOTES = {
         "UNK en inferencia → H(g) alta → Experto 5 OOD la captura."
     ),
     2: (
-        "OA Rodilla — ORDINAL (3 clases: Normal/Leve/Severo, consolidadas de KL 0-4). "
+        "OA Rodilla — ORDINAL (5 clases KL 0-4: Normal/Dudoso/Leve/Moderado/Severo). "
+        "Backbone: EfficientNet-B0 (timm). "
         "H1: Opción A (pragmática): CrossEntropyLoss con class_weights. "
-        "Opción B: OrdinalLoss(n_classes=3) — salida [B,2] logits. "
+        "Opción B: OrdinalLoss(n_classes=5) — salida [B,4] logits. "
         "Métrica principal: QWK — llamar OAKneeDataset.compute_qwk(y_true, y_pred) "
         "en cada época de validación. ⚠ NO usar Accuracy ni F1 como métricas principales para OA. "
-        "H2: Aug offline detectado → NO aug adicional en runtime. "
+        "H2: RandomAutocontrast en train (NO CLAHE); resize(224×224). "
         "H3: Sin Patient ID — documentar como limitación en el reporte. "
-        "H4: CLAHE SIEMPRE antes del resize (apply_clahe() → resize(224×224)). "
-        "H5: KL1 contamina Clase1 — frontera 0↔1 será la más difícil. "
+        "H4: KL1 (Dudoso) es la clase más ruidosa — fronteras 0↔1 y 1↔2 serán las más difíciles. "
         "Usar OAKneeDataset.evaluate_boundary_confusion() + log_boundary_confusion() "
         "en cada época de validación. ⚠ NUNCA RandomVerticalFlip."
     ),

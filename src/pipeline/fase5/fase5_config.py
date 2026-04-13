@@ -158,7 +158,7 @@ Estos checkpoints deben existir antes de ejecutar el fine-tuning real."""
 # NOTA sobre la estructura interna real de cada modelo:
 #   Expert0 (ConvNeXt): self.model.classifier  (wrapper: self.model es el backbone)
 #   Expert1 (EfficientNet): self.model.classifier  (wrapper: self.model)
-#   Expert2 (VGG16BN): self.classifier  (atributo directo)
+#   Expert2 (EfficientNet-B0): self.model.classifier  (wrapper: self.model es el backbone)
 #   Expert3 (MC3-18): self.classifier  (atributo directo)
 #   Expert4 (Swin3D): self.backbone.head  (wrapper: self.backbone)
 #   Expert5 (CAE): self.decoder_fc + self.decoder_conv  (no tiene "cabeza" clasica)
@@ -168,7 +168,7 @@ Estos checkpoints deben existir antes de ejecutar el fine-tuning real."""
 EXPERT_HEAD_PREFIXES = {
     0: ["model.classifier"],  # Expert1ConvNeXtTiny
     1: ["model.classifier"],  # Expert2EfficientNetB3
-    2: ["classifier"],  # ExpertOAVGG16BN
+    2: ["model.classifier"],  # ExpertOAEfficientNetB0
     3: ["classifier"],  # Expert3MC318
     4: ["backbone.head"],  # ExpertPancreasSwin3D
     5: ["decoder_fc", "decoder_conv"],  # ConvAutoEncoder

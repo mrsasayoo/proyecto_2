@@ -1,13 +1,13 @@
 """
-DataLoader para Expert OA — Osteoarthritis Knee (3 clases ordinales).
+DataLoader para Expert OA — Osteoarthritis Knee (5 clases KL 0-4).
 
-Construye DataLoaders para train, val y test del Expert OA (VGG16-BN).
-Los splits están organizados en carpetas: {root_dir}/{train,val,test}/{0,1,2}/
+Construye DataLoaders para train, val y test del Expert OA (EfficientNet-B0, 5 clases KL 0-4).
+Los splits están organizados en carpetas: {root_dir}/{train,val,test}/{0,1,2,3,4}/
 
 Transforms:
     - TODOS los transforms son internos al OAKneeDataset.
-    - OAKneeDataset aplica CLAHE antes del resize (H4).
-    - En mode="expert", split="train": augmentation online (HFlip, Rotation, ColorJitter)
+    - Train: Resize(256)→RandomCrop(224)→HFlip→Rotation(±15°)→ColorJitter→RandomAutocontrast→Normalize
+    - Val/Test: Resize(224)→Normalize  (sin CLAHE, sin augmentation)
       a menos que se detecte augmentation offline (H2).
     - En mode="expert", split="val"/"test": solo base_transform (ToTensor + Normalize).
     - NO se pasan transforms externos al constructor de OAKneeDataset.
@@ -37,7 +37,11 @@ if str(_PIPELINE_ROOT) not in sys.path:
     sys.path.insert(0, str(_PIPELINE_ROOT))
 
 from datasets.osteoarthritis import OAKneeDataset
-from fase2.expert_oa_config import EXPERT_OA_BATCH_SIZE, EXPERT_OA_IMG_SIZE
+from fase2.expert_oa_config import (
+    EXPERT_OA_BATCH_SIZE,
+    EXPERT_OA_IMG_SIZE,
+    EXPERT_OA_NUM_CLASSES,
+)
 
 log = logging.getLogger("expert_oa_dataloader")
 
@@ -68,7 +72,7 @@ def get_oa_dataloaders(
 
     Returns:
         (train_loader, val_loader, test_loader, class_weights)
-        - class_weights: Tensor[3] con pesos de clase para CrossEntropyLoss
+        - class_weights: Tensor[5] con pesos de clase para CrossEntropyLoss (KL 0-4)
     """
     root_dir = Path(root_dir) if root_dir else _OA_ROOT_DIR
     batch_size = batch_size or EXPERT_OA_BATCH_SIZE
@@ -124,7 +128,7 @@ def get_oa_dataloaders(
             "[ExpertOA/DataLoader] OAKneeDataset no tiene class_weights. "
             "Usando pesos uniformes."
         )
-        class_weights = torch.ones(3, dtype=torch.float32)
+        class_weights = torch.ones(EXPERT_OA_NUM_CLASSES, dtype=torch.float32)
 
     # ── Crear DataLoaders ──────────────────────────────────────────
     train_loader = DataLoader(

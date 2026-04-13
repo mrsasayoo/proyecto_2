@@ -43,7 +43,7 @@ N_EXPERTS_TOTAL = 6
 EXPERT_LABELS = [
     "Expert 0\nChest X-Ray\n(ConvNeXt-Tiny)",
     "Expert 1\nISIC 2019\n(EfficientNet-B3)",
-    "Expert 2\nOA Knee\n(VGG16-BN)",
+    "Expert 2\nOA Knee\n(EfficientNet-B0)",
     "Expert 3\nLUNA16\n(MC3-18)",
     "Expert 4\nPáncreas\n(Swin3D-Tiny)",
     "Expert 5\nCAE / OOD\n(ConvAutoEncoder)",
@@ -900,7 +900,7 @@ def generate_figure5_attention_heatmap(
         },
         {
             "name": "Fondo de Ojo (Fundus)",
-            "expert": "Expert 2 (VGG16-BN)",
+            "expert": "Expert 2 (EfficientNet-B0)",
             "base_color": np.array([0.35, 0.12, 0.08]),  # rojo oscuro
             "attn_center": (0.48, 0.52),
             "attn_sigma": 40,

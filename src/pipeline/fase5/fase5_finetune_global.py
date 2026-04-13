@@ -262,7 +262,7 @@ def _dry_run_stage(
     expert_configs = {
         0: {"shape": (2, 3, 224, 224), "name": "Expert0/ConvNeXt"},
         1: {"shape": (2, 3, 224, 224), "name": "Expert1/EfficientNet"},
-        2: {"shape": (2, 3, 224, 224), "name": "Expert2/VGG16BN"},
+        2: {"shape": (2, 3, 224, 224), "name": "Expert2/EfficientNetB0"},
         3: {"shape": (2, 1, 64, 64, 64), "name": "Expert3/MC3-18"},
         4: {"shape": (1, 1, 64, 64, 64), "name": "Expert4/Swin3D"},
         5: {"shape": (2, 3, 224, 224), "name": "Expert5/CAE"},

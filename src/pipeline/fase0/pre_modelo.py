@@ -518,7 +518,9 @@ def _group_by_similarity(files, threshold=0.12, fingerprint_size=16):
 def split_oa(datasets_dir, similarity_threshold=0.12, fingerprint_size=16):
     # type: (Path, float, int) -> dict
     """
-    Genera splits 80/10/10 por clase consolidada (KL0→0, KL1+KL2→1, KL3+KL4→2).
+    Genera splits 80/10/10 por grado KL directo (5 clases: 0–4, sin remapeo).
+
+    Clases: 0=Normal, 1=Dudoso, 2=Leve, 3=Moderado, 4=Severo.
 
     Dado que el dataset OAI no incluye patient_id, la unidad de splitting se
     infiere mediante similitud de imagen (fingerprint 16×16 L2-normalizado +
@@ -526,7 +528,7 @@ def split_oa(datasets_dir, similarity_threshold=0.12, fingerprint_size=16):
     consideran del mismo paciente/rodilla y van al mismo split.
 
     Pasos:
-      1. Recopilar imágenes por clase consolidada.
+      1. Recopilar imágenes por grado KL directo (carpetas 0–4).
       2. Por cada clase, agrupar imágenes por similitud (_group_by_similarity).
       3. Aplicar train_test_split estratificado a nivel de GRUPO (no imagen).
          La clase de un grupo = clase de su primera imagen (todas son iguales
@@ -552,6 +554,10 @@ def split_oa(datasets_dir, similarity_threshold=0.12, fingerprint_size=16):
     splits_dir = oa_dir / "oa_splits"
 
     # ── Idempotencia ──────────────────────────────────────────────────────────
+    # ADVERTENCIA: si oa_splits/ contiene splits de una versión anterior
+    # (3 clases consolidadas con carpetas {0,1,2}), hay que borrar el
+    # directorio manualmente antes de re-ejecutar para regenerar con 5 clases
+    # KL directas (carpetas {0,1,2,3,4}).
     if splits_dir.is_dir() and any((splits_dir / "train").rglob("*.*")):
         log.info("[OA] oa_splits/ ya existe con imágenes, saltando.")
         return {"status": "✅", "skipped": True}
@@ -573,11 +579,12 @@ def split_oa(datasets_dir, similarity_threshold=0.12, fingerprint_size=16):
 
     log.info("[OA] Fuente: %s", src)
 
-    # ── Recopilar imágenes por clase consolidada ───────────────────────────────
-    mapping = {"0": 0, "1": 1, "2": 1, "3": 2, "4": 2}
-    all_files = {0: [], 1: [], 2: []}
+    # ── Recopilar imágenes por grado KL directo (5 clases, sin remapeo) ──────
+    kl_grades = ["0", "1", "2", "3", "4"]
+    all_files = {i: [] for i in range(5)}
 
-    for kl_str, cls in mapping.items():
+    for kl_str in kl_grades:
+        cls = int(kl_str)
         kl_dir = src / kl_str
         if not kl_dir.exists():
             continue
@@ -590,7 +597,7 @@ def split_oa(datasets_dir, similarity_threshold=0.12, fingerprint_size=16):
         log.warning("[OA] No se encontraron imágenes en KLGrade/.")
         return {"status": "⚠️", "reason": "sin imágenes"}
 
-    log.info("[OA] Total imágenes: %d en 3 clases", total_images)
+    log.info("[OA] Total imágenes: %d en 5 clases KL directas", total_images)
 
     # ── Limpieza previa ───────────────────────────────────────────────────────
     if splits_dir.exists():

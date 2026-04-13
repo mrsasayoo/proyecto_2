@@ -58,11 +58,17 @@ EXPERT_METADATA: dict[int, dict] = {
     },
     2: {
         "name": "Experto 3 — OA Knee",
-        "architecture": "VGG16-BN",
+        "architecture": "EfficientNet-B0",
         "dataset": "Osteoarthritis Knee",
-        "n_classes": 3,
+        "n_classes": 5,
         "modality": "2D",
-        "class_names": ["Normal (KL0)", "Leve (KL1-2)", "Severo (KL3-4)"],
+        "class_names": [
+            "Normal (KL0)",
+            "Dudoso (KL1)",
+            "Leve (KL2)",
+            "Moderado (KL3)",
+            "Severo (KL4)",
+        ],
     },
     3: {
         "name": "Experto 4 — Nódulos Pulmonares (LUNA16)",
