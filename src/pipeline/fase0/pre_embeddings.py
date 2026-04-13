@@ -707,14 +707,21 @@ def run_luna_patches(
     train_patches = list(train_dir.glob("candidate_*.npy"))
     global_mean_path = patches_dir / "global_mean.npy"
 
+    _gm_ok = False
     if global_mean_path.exists():
-        global_mean = np.float32(np.load(global_mean_path))
-        log.info(
-            "[LUNA] global_mean already exists at %s — loaded %.6f (skipping recomputation)",
-            global_mean_path,
-            global_mean,
-        )
-    else:
+        _candidate = np.float32(np.load(global_mean_path))
+        if _candidate >= 0.05:
+            global_mean = _candidate
+            _gm_ok = True
+            log.info("[LUNA] global_mean cargado desde caché: %.6f", global_mean)
+        else:
+            log.warning(
+                "[LUNA] global_mean.npy contiene valor %.6f < 0.05 — corrupto, se recomputa",
+                _candidate,
+            )
+            global_mean_path.unlink()
+
+    if not _gm_ok:
         log.info("[LUNA] Computing global mean over training patches...")
         global_mean = np.float32(0.0)
         if train_patches:
@@ -825,8 +832,8 @@ _PAN_SEED = 42
 # ══════════════════════════════════════════════════════════════════════════════
 
 
-def _pancreas_preprocess_one(nii_path):
-    # type: (str) -> tuple
+def _pancreas_preprocess_one(nii_path, panorama_dir=None):
+    # type: (str, ...) -> tuple
     """
     Aplica los 7 pasos del pipeline offline de páncreas a un volumen .nii.gz.
 
@@ -836,7 +843,8 @@ def _pancreas_preprocess_one(nii_path):
       3. Clip HU a [-150, +250] (ventana abdominal CECT)
       4. Min-max normalización a [0, 1]: (HU + 150) / 400
       5. Resize trilineal a 64×64×64 con scipy.ndimage.zoom order=1
-      6. Centroide pancreático: sin máscaras disponibles → fallback [32,32,32]
+      6. Centroide pancreático: desde máscara (label==3) en panorama_labels/;
+         fallback a [32,32,32] si panorama_dir=None o máscara falla
       7. Crop 48³ centrado en centroide (center crop del volumen 64³)
 
     Returns:
@@ -870,6 +878,11 @@ def _pancreas_preprocess_one(nii_path):
 
     # ── Paso 5: Resize trilineal a 64×64×64 (scipy.ndimage.zoom, order=1) ─────
     d, h, w = array.shape
+    d_iso, h_iso, w_iso = (
+        d,
+        h,
+        w,
+    )  # dims ANTES del resize final, para proyectar centroide
     target = float(PANCREAS_OUTPUT_SIZE)
     final_zoom = (target / d, target / h, target / w)
     array = scipy_zoom(array, final_zoom, order=1)
@@ -886,10 +899,47 @@ def _pancreas_preprocess_one(nii_path):
             preserve_range=True,
         ).astype(np.float32)
 
-    # ── Paso 6: Centroide pancreático ─────────────────────────────────────────
-    # Sin máscaras de segmentación disponibles en disco → fallback centro geométrico
-    cx = cy = cz = PANCREAS_OUTPUT_SIZE // 2  # = 32
-    centroid = [cz, cy, cx]  # en orden [D, H, W]
+    # ── Paso 6: Centroide pancreático desde máscara de segmentación ───────────
+    _half_crop = PANCREAS_CROP_SIZE // 2  # = 24
+    _clamp_lo = _half_crop  # = 24   (mínimo centroide para que crop quepa)
+    _clamp_hi = PANCREAS_OUTPUT_SIZE - _half_crop  # = 40
+
+    _centroid_fallback = True
+    cz = cy = cx = PANCREAS_OUTPUT_SIZE // 2  # fallback: centro geométrico = 32
+
+    if panorama_dir is not None:
+        _stem = Path(nii_path).name.replace(".nii.gz", "")
+        _case_id_local = _stem[:-5] if _stem.endswith("_0000") else _stem
+        _mask_name = _case_id_local + ".nii.gz"
+        _mask_path = Path(panorama_dir) / "automatic_labels" / _mask_name
+        if not _mask_path.exists():
+            _mask_path = Path(panorama_dir) / "manual_labels" / _mask_name
+
+        if _mask_path.exists():
+            try:
+                _mask_img = sitk.ReadImage(str(_mask_path))
+                _mask_arr = sitk.GetArrayFromImage(_mask_img)  # [Z, Y, X], enteros
+                _panc_vox = np.argwhere(_mask_arr == 3)  # voxels del páncreas
+                if len(_panc_vox) > 0:
+                    _c_orig = np.mean(
+                        _panc_vox, axis=0
+                    )  # centroide en espacio original [Z,Y,X]
+                    # Proyectar al espacio isotrópico (Paso 2): multiplicar por zoom_factors
+                    # zoom_factors = (spacing[2], spacing[1], spacing[0]) orden [Z, Y, X]
+                    _c_iso = _c_orig * np.array(zoom_factors)
+                    # Proyectar al espacio 64³ (Paso 5): escalar por (64 / dim_iso)
+                    _cz64 = _c_iso[0] * (PANCREAS_OUTPUT_SIZE / d_iso)
+                    _cy64 = _c_iso[1] * (PANCREAS_OUTPUT_SIZE / h_iso)
+                    _cx64 = _c_iso[2] * (PANCREAS_OUTPUT_SIZE / w_iso)
+                    # Clamp: el crop 48³ debe caber dentro del volumen 64³
+                    cz = int(np.clip(round(_cz64), _clamp_lo, _clamp_hi))
+                    cy = int(np.clip(round(_cy64), _clamp_lo, _clamp_hi))
+                    cx = int(np.clip(round(_cx64), _clamp_lo, _clamp_hi))
+                    _centroid_fallback = False
+            except Exception:
+                pass  # fallback silencioso al centro geométrico
+
+    centroid = [cz, cy, cx]  # orden [D, H, W]
 
     # ── Paso 7: Crop 48³ centrado en centroide ────────────────────────────────
     half = PANCREAS_CROP_SIZE // 2  # = 24
@@ -920,7 +970,7 @@ def _pancreas_preprocess_one(nii_path):
     meta = {
         "spacing_orig": spacing.tolist(),
         "shape_orig": list(shape_orig),
-        "centroid_fallback": True,  # True = no había máscara, se usó centro geométrico
+        "centroid_fallback": _centroid_fallback,
         "centroid": centroid,
     }
 
@@ -932,12 +982,12 @@ def _pancreas_worker(args_tuple):
     """Worker pickleable para ProcessPoolExecutor.
 
     Args:
-        args_tuple: (nii_path_str, out_npy_str, case_id)
+        args_tuple: (nii_path_str, out_npy_str, case_id, panorama_dir_str)
 
     Returns:
         (case_id, status, error_msg)  donde status in {"OK","SKIP","ERROR"}
     """
-    nii_path_str, out_npy_str, case_id = args_tuple
+    nii_path_str, out_npy_str, case_id, panorama_dir_str = args_tuple
     out_npy = Path(out_npy_str)
 
     # Idempotencia: si ya existe y tiene shape correcta, saltar
@@ -955,7 +1005,10 @@ def _pancreas_worker(args_tuple):
                 pass
 
     try:
-        crop, _meta = _pancreas_preprocess_one(nii_path_str)
+        crop, _meta = _pancreas_preprocess_one(
+            nii_path_str,
+            panorama_dir=Path(panorama_dir_str) if panorama_dir_str else None,
+        )
         np.save(str(out_npy), crop)
         return (case_id, "OK", "")
     except Exception as e:
@@ -1003,6 +1056,29 @@ def run_pancreas_preprocessing(datasets_dir, workers=4):
 
     preprocessed_dir.mkdir(parents=True, exist_ok=True)
 
+    # ── Resolver directorio de máscaras ───────────────────────────────────────
+    panorama_dir = datasets_dir / "panorama_labels"
+    _masks_available = (panorama_dir / "automatic_labels").is_dir()
+
+    # ── Invalidar caché si fue creado con centroide geométrico ────────────────
+    _strategy_file = preprocessed_dir / "centroid_strategy.txt"
+    _new_strategy = (
+        "mask_centroid_real" if _masks_available else "geometric_center_fallback"
+    )
+    if _strategy_file.exists():
+        _old_strategy = _strategy_file.read_text().strip()
+        if _old_strategy != _new_strategy:
+            log.info(
+                "[PANCREAS-OFFLINE] Estrategia de centroide cambió (%s → %s) — "
+                "invalidando %d archivos previos",
+                _old_strategy,
+                _new_strategy,
+                len(list(preprocessed_dir.glob("*.npy"))),
+            )
+            for _old_npy in preprocessed_dir.glob("*.npy"):
+                _old_npy.unlink()
+            _strategy_file.unlink()
+
     # ── Idempotencia global ────────────────────────────────────────────────────
     existing_npy = list(preprocessed_dir.glob("*.npy"))
     n_existing = len(existing_npy)
@@ -1032,7 +1108,14 @@ def run_pancreas_preprocessing(datasets_dir, workers=4):
         else:
             case_id = stem
         out_npy = preprocessed_dir / "{}.npy".format(case_id)
-        tasks.append((str(nii_path), str(out_npy), case_id))
+        tasks.append(
+            (
+                str(nii_path),
+                str(out_npy),
+                case_id,
+                str(panorama_dir) if _masks_available else "",
+            )
+        )
 
     log.info(
         "[PANCREAS-OFFLINE] Procesando %d volúmenes con %d workers...",
@@ -1104,7 +1187,7 @@ def run_pancreas_preprocessing(datasets_dir, workers=4):
         "hu_clip": [PANCREAS_HU_MIN, PANCREAS_HU_MAX],
         "resize_to": PANCREAS_OUTPUT_SIZE,
         "crop_size": PANCREAS_CROP_SIZE,
-        "centroid_strategy": "geometric_center_fallback",
+        "centroid_strategy": _new_strategy,
         "workers": workers,
         "errors_sample": errors[:20],
     }
@@ -1112,6 +1195,9 @@ def run_pancreas_preprocessing(datasets_dir, workers=4):
     with open(str(report_path), "w") as f:
         json.dump(report, f, indent=2)
     log.info("[PANCREAS-OFFLINE] Reporte: %s", report_path)
+
+    # Persistir estrategia de centroide para invalidación futura de caché
+    _strategy_file.write_text(_new_strategy)
 
     n_success = n_ok + n_skip
     status = "✅" if n_success >= int(0.90 * n_total) else "⚠️"

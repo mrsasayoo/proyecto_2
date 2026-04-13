@@ -343,10 +343,11 @@ volume = gaussian_filter(volume, sigma=sigma_blur)
 #### Final Clipping
 
 ```python
-volume = np.clip(volume, 0.0, 1.0)
+volume = np.clip(volume, -GLOBAL_MEAN, 1.0 - GLOBAL_MEAN)
+# ≈ np.clip(volume, -0.099, 0.901)
 ```
 
-All augmented volumes are clipped to [0, 1] to prevent out-of-range values from cascading into loss computation.
+All augmented volumes are clipped to `[-GLOBAL_MEAN, 1.0 - GLOBAL_MEAN]` (≈ `[-0.099, 0.901]`). The clipping respects the post-zero-centering space: since the global mean has already been subtracted, the valid intensity range is no longer `[0, 1]` but shifted to `[-GLOBAL_MEAN, 1.0 - GLOBAL_MEAN]`. This prevents out-of-range values from cascading into loss computation while preserving the zero-centered distribution.
 
 ---
 
@@ -480,7 +481,7 @@ def _safe_load(path: Path) -> np.ndarray | None:
 
 **Problem:** 1,839 patches were assigned to the wrong train/val/test split due to an incorrect UID-to-split mapping (some series UIDs were present in multiple splits, or fallback logic assigned unknown UIDs to `train` when they should have been excluded).
 
-**Resolution:** The affected patches were moved to a quarantine directory `_LEAKED_DO_NOT_USE/` and excluded from all training, validation, and evaluation. The `fix_luna_leakage.py` script (present in `fase0/`) handles the identification and isolation. The split assignment logic in `pre_embeddings.py` was corrected to use `luna_splits.json` as the single source of truth, with no fallback assignment for UIDs not present in the splits file.
+**Resolution:** The affected patches were moved to a quarantine directory `train_stale_backup/` and excluded from all training, validation, and evaluation. The `fix_luna_leakage.py` script (present in `fase0/`) handles the identification and isolation. The split assignment logic in `pre_embeddings.py` was corrected to use `luna_splits.json` as the single source of truth, with no fallback assignment for UIDs not present in the splits file.
 
 **Impact:** If these patches were used in training, the model could have memorized information from val/test patients, producing artificially inflated evaluation metrics. Quarantining them ensures clean evaluation.
 

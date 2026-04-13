@@ -2,7 +2,7 @@
 
 > **Comando:** `python3 src/pipeline/fase0/fase0_pipeline.py`
 > **Fecha de análisis:** 2026-04-10
-> **Última actualización:** 2026-04-11
+> **Última actualización:** 2026-04-13
 
 > **⚠️ Nota sobre el modelo entrenado:** El notebook `luna_training_kaggle.ipynb` entrena
 > un **3D Faster R-CNN (MC3-18 backbone)**, no el ViViT-Tiny originalmente planificado.
@@ -131,10 +131,10 @@ retornará `{"status": "✅"}` inmediatamente.
 
 | Split | Parches |
 |-------|---------|
-| train | 13,878 |
-| val | 1,155 |
-| test | 2,013 |
-| train_aug | 17,571 |
+| train | 13,880 |
+| val | 1,156 |
+| test | 2,014 |
+| train_aug | 17,669 |
 
 - **luna_splits.json:** `train_uids=712`, `val_uids=88`, `test_uids=88`
 - **Idempotencia:** Cada parche se verifica con `if out_path.exists()` → retorna `SKIPPED`.
@@ -144,10 +144,12 @@ Aunque los parches se saltan individualmente, el código **primero carga cada CT
 memoria** (SimpleITK read + scipy resample a 1 mm isotrópico) antes de verificar los parches.
 Esto consume ~30–90 minutos procesando 888 CTs innecesariamente.
 
-**Segundo riesgo:** Después de la extracción (aunque sea idempotente), el pipeline en
-`run_luna_patches()` **recalcula `global_mean` y aplica zero-centering a TODOS los parches**,
-restando `0.09922` otra vez a parches que ya están centrados. El sub-paso 6b lo corregirá
-después, pero introduce trabajo circular e innecesario.
+**Segundo riesgo — ~~RESUELTO (2026-04-13)~~:** ~~Después de la extracción, `run_luna_patches()`
+recalculaba `global_mean` y aplicaba zero-centering a TODOS los parches, restando `0.09922`
+otra vez a parches ya centrados.~~ **Corregido:** el código ahora incluye un idempotency guard
+(líneas ~750–770 de `pre_embeddings.py`) que muestrea 50 parches de train; si `abs(sample_mean) < 0.01`,
+detecta que ya están centrados y **salta la aplicación**. El sub-paso 6b ya no es necesario
+como corrector de 6a.
 
 **Tiempo estimado:** ~30–90 min (dominado por carga de 888 CTs aunque no haya trabajo real).
 
@@ -173,7 +175,7 @@ que detecte parches existentes antes de cargar CTs.
 
 ### Sub-paso 6c — Crear train_aug
 
-- `train_aug/` existe con **17,571 parches** ✅
+- `train_aug/` existe con **17,669 parches** ✅
 - `train_aug_manifest.csv` existe ✅
 - **Idempotencia:** Verifica `n_rows >= 15,000` → **SALTARÁ inmediatamente**.
 
@@ -231,7 +233,7 @@ que detecte parches existentes antes de cargar CTs.
 | 4 | < 1 s | `pancreas_labels_binary.csv` ya existe — skip inmediato |
 | 5 | < 30 s | Splits ya existen para todos los datasets |
 | **6a** | **~30–90 min** | **🔴 CUELLO DE BOTELLA: carga 888 CTs aunque todos los parches se saltan** |
-| 6b | ~3–5 min | Escanea ~34,600 parches con 8 workers |
+| 6b | ~3–5 min | Escanea ~34,719 parches con 8 workers |
 | 6c | < 1 s | Idempotente — train_aug ya existe con ≥15,000 filas |
 | 6d | ~2–3 min | Audit sobre muestra de 200 por split |
 | 7 | < 30 s | backbone_cvt13.py encontrado |
@@ -248,10 +250,10 @@ Los datos de LUNA16 están **completamente listos para entrenamiento**.
 
 | Split | Total parches | Positivos | Negativos | Ratio neg:pos |
 |-------|--------------|-----------|-----------|---------------|
-| train | 13,878 | 1,263 | 12,615 | 9.99:1 |
-| val | 1,155 | 105 | 1,050 | 10.0:1 |
-| test | 2,013 | 183 | 1,830 | 10.0:1 |
-| train_aug | 17,571 | 5,052 | 12,519 | 2.48:1 |
+| train | 13,880 | 1,263 | 12,617 | 9.99:1 |
+| val | 1,156 | 105 | 1,051 | 10.0:1 |
+| test | 2,014 | 183 | 1,831 | 10.0:1 |
+| train_aug | 17,669 | 5,052 | 12,617 | 2.50:1 |
 
 ### Especificaciones técnicas
 - **Shape:** `(64, 64, 64)` float32 — cubo de 64 mm³ a 1 mm isotrópico
@@ -279,8 +281,8 @@ Los datos de LUNA16 están **completamente listos para entrenamiento**.
 | NIH ChestXray14 | ✅ 112,120 imgs | ✅ | ✅ 88,999/11,349/11,772 | ✅ |
 | ISIC 2019 | ✅ 25,333 imgs | ✅ | ✅ ~20,409/2,474/2,448 | ✅ |
 | Osteoarthritis | ✅ | ✅ KLGrade/ | Parcial | ~⚠️ |
-| LUNA16 | ✅ 888 CTs | ✅ 34,617 parches | ✅ 712/88/88 UIDs | ✅ |
-| Páncreas (Zenodo) | ✅ NIfTI volumes | N/A | ✅ `pancreas_splits.csv` | ✅ |
+| LUNA16 | ✅ 888 CTs | ✅ 34,719 parches | ✅ 712/88/88 UIDs | ✅ |
+| Páncreas (Zenodo) | ✅ NIfTI volumes | ⏳ 152/2,238 `.npy` preprocesados | ✅ `pancreas_splits.csv` | ⏳ En progreso |
 | Panorama labels | ✅ masks | N/A | N/A | ✅ |
 
 ---
@@ -293,10 +295,10 @@ Los datos de LUNA16 están **completamente listos para entrenamiento**.
    **Solución sin modificar código:** ejecutar con `--solo_pasos 0 1 2 3 4 5 7 8`
    para saltarte el paso 6 completamente (los datos de LUNA16 ya están listos).
 
-2. **🔴 Paso 6a re-aplica zero-centering a parches ya centrados.**
-   `run_luna_patches()` recalcula `global_mean` sobre train y luego resta ese valor a TODOS
-   los parches existentes, dejando mean ≈ -0.099. El paso 6b lo corrige después, pero genera
-   trabajo circular. Si ejecutas el pipeline completo, 6b limpiará el daño de 6a.
+2. **~~🔴 Paso 6a re-aplica zero-centering a parches ya centrados.~~ ✅ RESUELTO (2026-04-13)**
+   `run_luna_patches()` ahora incluye un idempotency guard que muestrea 50 parches de train
+   y verifica `abs(sample_mean) < 0.01`. Si los parches ya están centrados, salta la aplicación
+   de zero-centering. Ya no genera trabajo circular ni corrupción de parches.
 
 3. **⚠️ Espacio en disco: 100 GB libres (de 932 GB, 90% usado).**
    No hay descargas pendientes pero es ajustado. El pipeline emitirá advertencia de espacio
