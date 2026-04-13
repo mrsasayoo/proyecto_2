@@ -4,14 +4,14 @@
 
 | Paso | Descripción | Estado | Tiempo |
 |------|-------------|--------|--------|
-| 0 | Prerequisites | ✅ | 0.0s |
-| 1 | Descargar datasets | ✅ | 0.1s |
-| 2 | Extraer archivos | ✅ | 0.5s |
-| 3 | Post-procesado NIH | ✅ | 23.4s |
+| 0 | Prerequisites | ✅ | 0.1s |
+| 1 | Descargar datasets | ✅ | 1430.6s |
+| 2 | Extraer archivos | ✅ | 1.0s |
+| 3 | Post-procesado NIH | ✅ | 5.6s |
 | 4 | Etiquetas páncreas | ✅ | 0.0s |
-| 5 | Splits 80/10/10 | — | 2.1s |
-| 6 | Datos 3D | — | 3421.6s |
-| 7 | CvT-13 | ✅ | 2.7s |
+| 5 | Splits 80/10/10 | ✅ | 1.8s |
+| 6 | Datos 3D | — | 1560.9s |
+| 7 | DenseNet3D | ✅ | 2.6s |
 | 8 | Reporte | — | — |
 
 ## Datasets activos
@@ -59,7 +59,7 @@
 > **Nota:** El backbone mostrado es el valor por defecto (`vit_tiny_patch16_224`). Editar antes de ejecutar si se desea usar `swin_tiny_patch4_window7_224` o `cvt_13`.
 
 ```bash
-python3 /mnt/hdd/datasets/carlos_andres_ferro/proyecto_2/src/pipeline/fase1/fase1_pipeline.py \
+python3 /mnt/ssd_m2/almacenamiento/carlos_andres_ferro/proyecto_2/src/pipeline/fase1/fase1_pipeline.py \
     --backbone vit_tiny_patch16_224 \
     --batch_size 256 --workers 8 \
     --output_dir embeddings/vit_tiny \

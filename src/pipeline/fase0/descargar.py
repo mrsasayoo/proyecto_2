@@ -365,6 +365,23 @@ def download_isic(datasets_dir):
 
 def download_oa(datasets_dir):
     # type: (Path) -> bool
+    # Skip download if extracted data already present (mismo patrón que download_isic).
+    # KLGrade/ es la salida directa de la extracción del ZIP — si tiene imágenes,
+    # el dataset ya está en disco y no necesitamos volver a descargar los ~9.8 GB.
+    oa_klgrade_dir = datasets_dir / "osteoarthritis" / "KLGrade"
+    if oa_klgrade_dir.is_dir():
+        img_count = sum(
+            1
+            for p in oa_klgrade_dir.rglob("*")
+            if p.suffix.lower() in {".jpg", ".jpeg", ".png"}
+        )
+        if img_count >= 1000:
+            log.info(
+                "[OA] Datos ya extraídos (%d imágenes en %s), saltando descarga.",
+                img_count,
+                oa_klgrade_dir.name,
+            )
+            return True
     return download_kaggle_cli(
         "dhruvacube/osteoarthritis",
         datasets_dir / "osteoarthritis",
@@ -459,7 +476,9 @@ def download_pancreas(datasets_dir, batches=None):
             # We can't easily tell *which* .nii.gz belong to which batch
             # without the ZIP manifest.  So we check the global count vs.
             # what's expected for *all batches up to this one*.
-            nii_count = len(list(dest_dir.glob("*.nii.gz"))) if dest_dir.is_dir() else 0
+            nii_count = (
+                len(list(dest_dir.rglob("*.nii.gz"))) if dest_dir.is_dir() else 0
+            )
             # Expected minimum: 100 files per batch for batches <= batch_num
             expected_min = 100 * batch_num
             if nii_count >= expected_min:

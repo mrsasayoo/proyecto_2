@@ -308,9 +308,19 @@ def is_extracted(datasets_dir, ds_id, luna_subsets=None, pancreas_batches=None):
         "isic": lambda: (
             datasets_dir / "isic_2019" / "ISIC_2019_Training_Input"
         ).is_dir(),
+        # KLGrade/ es la salida directa del ZIP — más robusto que oa_splits/train/
+        # que se genera en paso5 (downstream). Así el check de extracción no
+        # depende de que el split ya haya sido generado.
         "oa": lambda: (
-            datasets_dir / "osteoarthritis" / "oa_splits" / "train"
-        ).is_dir(),
+            sum(
+                1
+                for p in (datasets_dir / "osteoarthritis" / "KLGrade").rglob("*")
+                if p.suffix.lower() in {".jpg", ".jpeg", ".png"}
+            )
+            >= 1000
+            if (datasets_dir / "osteoarthritis" / "KLGrade").is_dir()
+            else False
+        ),
         "luna_meta": lambda: (
             datasets_dir / "luna_lung_cancer" / "candidates_V2"
         ).is_dir(),

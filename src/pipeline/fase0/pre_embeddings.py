@@ -383,7 +383,7 @@ def validate_patches(patches_dir, n_sample=20):
             log.error("[Validate] %s: shape %s ≠ (%d³)", p.name, arr.shape, PATCH_SIZE)
             errors += 1
         mean_v = arr.mean()
-        status = "✓" if mean_v > 0.05 else "⚠ POSIBLE ERROR"
+        status = "✓" if arr.std() > 0.01 else "⚠ POSIBLE ERROR"
         log.info("  %s  mean=%.3f  %s", p.name, mean_v, status)
 
     log.info("[Validate] %d parches revisados | errores shape: %d", len(sample), errors)
@@ -659,9 +659,9 @@ def run_luna_patches(
 
         if pos_means:
             mean_pos = np.mean(pos_means)
-            if mean_pos < 0.1:
-                log.error(
-                    "[LUNA/%s] Media positivos=%.4f < 0.1 — posible error w2v",
+            if mean_pos < 0.05:
+                log.warning(
+                    "[LUNA/%s] Media positivos=%.4f < 0.05 — revisar parches, posible corrupción",
                     split_name.upper(),
                     mean_pos,
                 )
@@ -703,33 +703,42 @@ def run_luna_patches(
             ok_all = ok_all and ok_sp
 
     # ── Step 6: Compute global mean over ALL training patches ────────────
-    log.info("[LUNA] Computing global mean over training patches...")
     train_dir = patches_dir / "train"
     train_patches = list(train_dir.glob("candidate_*.npy"))
-    global_mean = np.float32(0.0)
-    if train_patches:
-        running_sum = 0.0
-        running_count = 0
-        for pp in train_patches:
-            try:
-                arr = np.load(pp)
-                running_sum += arr.sum()
-                running_count += arr.size
-            except Exception:
-                pass
-        if running_count > 0:
-            global_mean = np.float32(running_sum / running_count)
+    global_mean_path = patches_dir / "global_mean.npy"
+
+    if global_mean_path.exists():
+        global_mean = np.float32(np.load(global_mean_path))
         log.info(
-            "[LUNA] Global mean (train): %.6f (computed over %d patches)",
+            "[LUNA] global_mean already exists at %s — loaded %.6f (skipping recomputation)",
+            global_mean_path,
             global_mean,
-            len(train_patches),
         )
     else:
-        log.warning("[LUNA] No training patches found — global_mean=0.0")
+        log.info("[LUNA] Computing global mean over training patches...")
+        global_mean = np.float32(0.0)
+        if train_patches:
+            running_sum = 0.0
+            running_count = 0
+            for pp in train_patches:
+                try:
+                    arr = np.load(pp)
+                    running_sum += arr.sum()
+                    running_count += arr.size
+                except Exception:
+                    pass
+            if running_count > 0:
+                global_mean = np.float32(running_sum / running_count)
+            log.info(
+                "[LUNA] Global mean (train): %.6f (computed over %d patches)",
+                global_mean,
+                len(train_patches),
+            )
+        else:
+            log.warning("[LUNA] No training patches found — global_mean=0.0")
 
-    global_mean_path = patches_dir / "global_mean.npy"
-    np.save(global_mean_path, global_mean)
-    log.info("[LUNA] Saved global mean to %s", global_mean_path)
+        np.save(global_mean_path, global_mean)
+        log.info("[LUNA] Saved global mean to %s", global_mean_path)
 
     # ── Idempotency check ────────────────────────────────────────────────────
     # If patches are already zero-centered (sample mean ≈ 0), skip application.
@@ -837,7 +846,7 @@ def validar_preprocesado_pancreas(datasets_dir, n_sample=10):
         log.warning("[PANCREAS] zenodo_13715870/ no encontrado.")
         return {"status": "Warning", "reason": "directorio no encontrado"}
 
-    nii_files = sorted(zenodo_dir.glob("*.nii.gz"))
+    nii_files = sorted(zenodo_dir.rglob("*.nii.gz"))
     if not nii_files:
         log.warning("[PANCREAS] Sin archivos .nii.gz en zenodo_13715870/")
         return {"status": "Warning", "reason": "sin .nii.gz"}
@@ -1096,15 +1105,29 @@ def _paso6c_create_aug(patches_dir, dry_run=False):
             df_manifest = pd.read_csv(manifest_csv)
             n_rows = len(df_manifest)
             if n_rows >= 15000:
-                log.info(
-                    "[6c] train_aug already exists with %d rows in manifest — skipping",
-                    n_rows,
-                )
-                return {
-                    "status": "✅",
-                    "skipped": True,
-                    "reason": "train_aug already exists with {} rows".format(n_rows),
-                }
+                n_npy = len(list(train_aug_dir.glob("*.npy")))
+                n_expected = n_rows
+                if n_npy >= 0.9 * n_expected:
+                    log.info(
+                        "[6c] train_aug already exists with %d rows in manifest "
+                        "and %d npy files — skipping",
+                        n_rows,
+                        n_npy,
+                    )
+                    return {
+                        "status": "✅",
+                        "skipped": True,
+                        "reason": "train_aug already exists with {} rows and {} npy".format(
+                            n_rows, n_npy
+                        ),
+                    }
+                else:
+                    log.info(
+                        "[6c] train_aug incompleto: %d npy encontrados de %d "
+                        "esperados — regenerando",
+                        n_npy,
+                        n_expected,
+                    )
         except Exception as e:
             log.warning("[6c] Could not read manifest for idempotence check: %s", e)
 

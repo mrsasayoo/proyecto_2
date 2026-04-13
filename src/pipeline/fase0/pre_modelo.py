@@ -1112,7 +1112,9 @@ def build_cae_splits(datasets_dir):
         seen_paths: set = set()
         for _, prow in pdf_canonical.iterrows():
             norm_split = prow["norm_split"]
-            nii_candidates = list(zenodo_dir.glob("{}*.nii.gz".format(prow["case_id"])))
+            nii_candidates = list(
+                zenodo_dir.rglob("{}*.nii.gz".format(prow["case_id"]))
+            )
             for nii in nii_candidates:
                 nii_str = str(nii)
                 if nii_str in seen_paths:

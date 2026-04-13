@@ -27,13 +27,17 @@ import numpy as np
 import pandas as pd
 
 # ── Constants ────────────────────────────────────────────────────────────────
+PROJECT_ROOT = (
+    Path(__file__).resolve().parents[3]
+)  # fase0 → pipeline → src → proyecto_2
 GLOBAL_MEAN_EXPECTED = 0.09921630471944809
-PATCHES_DIR = Path(
-    "/mnt/hdd/datasets/carlos_andres_ferro/proyecto_2/datasets/luna_lung_cancer/patches"
-)
-CANDIDATES_CSV = Path(
-    "/mnt/hdd/datasets/carlos_andres_ferro/proyecto_2"
-    "/datasets/luna_lung_cancer/candidates_V2/candidates_V2.csv"
+PATCHES_DIR = PROJECT_ROOT / "datasets" / "luna_lung_cancer" / "patches"
+CANDIDATES_CSV = (
+    PROJECT_ROOT
+    / "datasets"
+    / "luna_lung_cancer"
+    / "candidates_V2"
+    / "candidates_V2.csv"
 )
 REPORT_PATH = PATCHES_DIR / "audit_report.json"
 SPLITS = ("train", "val", "test", "train_aug")
