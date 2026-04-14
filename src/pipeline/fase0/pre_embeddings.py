@@ -1059,9 +1059,16 @@ def _pancreas_preprocess_one(nii_path, panorama_dir=None):
         if _mask_path.exists():
             try:
                 _mask_img = sitk.ReadImage(str(_mask_path))
-                _mask_arr = sitk.GetArrayFromImage(_mask_img)  # [Z, Y, X], enteros
-                _panc_vox = np.argwhere(_mask_arr == 3)  # voxels del páncreas
+                # PANORAMA masks are stored as float64 (8 B/voxel) but contain
+                # only integer labels 0-3.  Cast to uint8 (1 B/voxel) *before*
+                # GetArrayFromImage to cut peak RAM by ~7× on large volumes and
+                # avoid OOM kills on the 13 GB machine.
+                _mask_img = sitk.Cast(_mask_img, sitk.sitkUInt8)
+                _mask_arr = sitk.GetArrayFromImage(_mask_img)  # [Z, Y, X], uint8
                 del _mask_img
+                gc.collect()
+                _panc_vox = np.argwhere(_mask_arr == 3)  # voxels del páncreas
+                del _mask_arr
                 if len(_panc_vox) > 0:
                     _c_orig = np.mean(
                         _panc_vox, axis=0
