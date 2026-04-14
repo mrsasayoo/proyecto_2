@@ -24,6 +24,7 @@ import subprocess
 import sys
 import time
 import warnings
+import concurrent.futures
 from concurrent.futures import ProcessPoolExecutor, as_completed
 from pathlib import Path
 
@@ -1156,6 +1157,47 @@ def _validate_pancreas_sample(preprocessed_dir, n_sample=100):
     return (pass_rate, corrupt)
 
 
+def _compute_safe_workers(requested_workers, gb_per_worker=2.5):
+    # type: (int, float) -> tuple[int, str]
+    """Calcula un número seguro de workers adaptativo a la RAM disponible.
+
+    Intenta usar psutil para leer la RAM disponible y limita los workers
+    para evitar OOM kills del OS al cargar volúmenes CT grandes.
+
+    Args:
+        requested_workers: Número de workers solicitados.
+        gb_per_worker: Estimación conservadora de RAM por worker (GB).
+
+    Returns:
+        (safe_workers, reason) donde reason explica el ajuste si hubo alguno.
+    """
+    try:
+        import psutil
+
+        available_bytes = psutil.virtual_memory().available
+        available_gb = available_bytes / (1024**3)
+        safe_workers = max(1, min(requested_workers, int(available_gb / gb_per_worker)))
+        if safe_workers < requested_workers:
+            reason = (
+                "RAM adaptativa: {:.1f} GB disponible, ~{:.1f} GB/worker → "
+                "{} workers (solicitados: {})".format(
+                    available_gb, gb_per_worker, safe_workers, requested_workers
+                )
+            )
+        else:
+            reason = "RAM suficiente ({:.1f} GB disponible) para {} workers".format(
+                available_gb, requested_workers
+            )
+        return (safe_workers, reason)
+    except ImportError:
+        safe_workers = min(requested_workers, 2)
+        reason = (
+            "psutil no disponible — fallback conservador: "
+            "{} workers (solicitados: {})".format(safe_workers, requested_workers)
+        )
+        return (safe_workers, reason)
+
+
 def run_pancreas_preprocessing(datasets_dir, workers=4, dry_run=False):
     # type: (Path, int, bool) -> dict
     """
@@ -1297,50 +1339,71 @@ def run_pancreas_preprocessing(datasets_dir, workers=4, dry_run=False):
             )
         )
 
+    # ── Workers adaptativos a la RAM disponible ─────────────────────────────
+    effective_workers, workers_reason = _compute_safe_workers(workers)
+    if effective_workers != workers:
+        log.warning("[PANCREAS-OFFLINE] %s", workers_reason)
+    else:
+        log.info("[PANCREAS-OFFLINE] %s", workers_reason)
+
     log.info(
         "[PANCREAS-OFFLINE] Procesando %d volúmenes con %d workers...",
         len(tasks),
-        workers,
+        effective_workers,
     )
 
     t0 = time.time()
     n_ok = n_skip = n_error = 0
     errors = []
 
-    with ProcessPoolExecutor(max_workers=workers) as exe:
-        futures = {exe.submit(_pancreas_worker, t): t for t in tasks}
-        done_count = 0
-        for fut in as_completed(futures):
-            done_count += 1
-            try:
-                case_id, status, err_msg = fut.result()
-            except Exception as e:
-                n_error += 1
-                errors.append(("UNKNOWN", str(e)))
-                continue
+    def _run_pool(n_workers):
+        nonlocal n_ok, n_skip, n_error, errors
+        with ProcessPoolExecutor(max_workers=n_workers) as exe:
+            futures = {exe.submit(_pancreas_worker, t): t for t in tasks}
+            done_count = 0
+            for fut in as_completed(futures):
+                done_count += 1
+                try:
+                    case_id, status, err_msg = fut.result()
+                except Exception as e:
+                    n_error += 1
+                    errors.append(("UNKNOWN", str(e)))
+                    continue
 
-            if status == "OK":
-                n_ok += 1
-            elif status == "SKIP":
-                n_skip += 1
-            else:
-                n_error += 1
-                errors.append((case_id, err_msg))
+                if status == "OK":
+                    n_ok += 1
+                elif status == "SKIP":
+                    n_skip += 1
+                else:
+                    n_error += 1
+                    errors.append((case_id, err_msg))
 
-            if done_count % 100 == 0 or done_count == len(tasks):
-                elapsed = time.time() - t0
-                rate = done_count / max(elapsed, 1)
-                log.info(
-                    "  [PANCREAS-OFFLINE] %d/%d (%.1f%%) | %.1f vol/s | "
-                    "OK=%d SKIP=%d ERR=%d",
-                    done_count,
-                    len(tasks),
-                    100 * done_count / len(tasks),
-                    rate,
-                    n_ok,
-                    n_skip,
-                    n_error,
-                )
+                if done_count % 100 == 0 or done_count == len(tasks):
+                    elapsed = time.time() - t0
+                    rate = done_count / max(elapsed, 1)
+                    log.info(
+                        "  [PANCREAS-OFFLINE] %d/%d (%.1f%%) | %.1f vol/s | "
+                        "OK=%d SKIP=%d ERR=%d",
+                        done_count,
+                        len(tasks),
+                        100 * done_count / len(tasks),
+                        rate,
+                        n_ok,
+                        n_skip,
+                        n_error,
+                    )
+
+    try:
+        _run_pool(effective_workers)
+    except concurrent.futures.process.BrokenProcessPool:
+        log.error(
+            "[PANCREAS-OFFLINE] BrokenProcessPool con %d workers (probable OOM). "
+            "Reintentando con 1 worker...",
+            effective_workers,
+        )
+        n_ok = n_skip = n_error = 0
+        errors = []
+        _run_pool(1)
 
     elapsed = time.time() - t0
     log.info(
@@ -1368,7 +1431,8 @@ def run_pancreas_preprocessing(datasets_dir, workers=4, dry_run=False):
         "resize_to": PANCREAS_OUTPUT_SIZE,
         "crop_size": PANCREAS_CROP_SIZE,
         "centroid_strategy": _new_strategy,
-        "workers": workers,
+        "workers_requested": workers,
+        "workers_effective": effective_workers,
         "errors_sample": errors[:20],
     }
     report_path = preprocessed_dir / "pancreas_preprocess_report.json"
@@ -1920,5 +1984,23 @@ def run_pre_embeddings(
         results["paso_6d_audit"] = _paso6d_audit(patches_dir, dry_run)
     else:
         results["paso_6d_audit"] = {"status": "⏭️", "skipped": True}
+
+    # ── Determinar status top-level para que run_paso() lo muestre ────────
+    _has_error = any(
+        r.get("status") in ("error", "❌")
+        for r in results.values()
+        if isinstance(r, dict)
+    )
+    _has_warning = any(
+        r.get("status") in ("⚠️", "Warning")
+        for r in results.values()
+        if isinstance(r, dict)
+    )
+    if _has_error:
+        results["status"] = "⚠️"
+    elif _has_warning:
+        results["status"] = "⚠️"
+    else:
+        results["status"] = "✅"
 
     return results

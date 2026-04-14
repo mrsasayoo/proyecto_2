@@ -557,7 +557,7 @@ def paso6_isic_preprocess(active, dry_run=False):
         from pre_isic import preprocess_isic_dataset
 
         result = preprocess_isic_dataset(img_dir, out_dir, gt_csv)
-        return {"status": "ok", "out_dir": str(out_dir), "detail": result}
+        return {"status": "✅", "out_dir": str(out_dir), "detail": result}
     except Exception as e:
         log.error("  Paso 6 falló: %s", e)
         return {"status": "error", "msg": str(e)}
