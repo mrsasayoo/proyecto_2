@@ -281,7 +281,10 @@ def _worker(args_tuple):
         if out_path.exists():
             try:
                 arr = np.load(out_path, mmap_mode="r")
-                if arr.shape == (PATCH_SIZE, PATCH_SIZE, PATCH_SIZE):
+                if (
+                    arr.shape == (PATCH_SIZE, PATCH_SIZE, PATCH_SIZE)
+                    and arr.std() > 0.01
+                ):
                     results.append((row_idx, str(out_path), label, "SKIPPED", -1.0))
                     continue
                 else:
@@ -390,6 +393,54 @@ def validate_patches(patches_dir, n_sample=20):
     return errors == 0
 
 
+def _validate_luna_patches_sample(patches_dir, n_sample=100):
+    # type: (Path, int) -> tuple[float, list[Path]]
+    """Validate a random sample of LUNA patches numerically.
+
+    Checks shape, dtype, std, mean, NaN and Inf for up to *n_sample*
+    ``candidate_*.npy`` files found under *patches_dir* (including
+    subdirectories such as train/, val/, test/).
+
+    Returns:
+        (pass_rate, corrupt_paths) where *pass_rate* is the fraction of
+        sampled files that passed all checks and *corrupt_paths* lists
+        the paths that failed.
+    """
+    candidates = list(Path(patches_dir).rglob("candidate_*.npy"))
+    if not candidates:
+        return (0.0, [])
+
+    random.seed(RANDOM_SEED)
+    sample = random.sample(candidates, min(n_sample, len(candidates)))
+
+    corrupt: list[Path] = []
+    for p in sample:
+        try:
+            arr = np.load(p)
+            if arr.shape != (PATCH_SIZE, PATCH_SIZE, PATCH_SIZE):
+                corrupt.append(p)
+                continue
+            if arr.dtype != np.float32:
+                corrupt.append(p)
+                continue
+            if np.isnan(arr).any() or np.isinf(arr).any():
+                corrupt.append(p)
+                continue
+            if arr.std() <= 0.01:
+                corrupt.append(p)
+                continue
+            if abs(float(arr.mean())) >= 0.15:
+                corrupt.append(p)
+                continue
+        except Exception:
+            corrupt.append(p)
+            continue
+
+    n_ok = len(sample) - len(corrupt)
+    pass_rate = n_ok / len(sample) if sample else 0.0
+    return (pass_rate, corrupt)
+
+
 # ══════════════════════════════════════════════════════════════════════════════
 #  LUNA16 — Extracción principal de parches
 # ══════════════════════════════════════════════════════════════════════════════
@@ -414,6 +465,33 @@ def run_luna_patches(
     splits_file = luna_dir / "luna_splits.json"
     patches_dir = luna_dir / "patches"
     seg_dir = luna_dir / SEG_DIR_NAME / SEG_DIR_NAME
+
+    # ── Upfront numerical validation — skip if data already valid ────────
+    _manifests_ok = all(
+        (patches_dir / sp / "manifest.csv").exists() for sp in ("train", "val", "test")
+    )
+    if _manifests_ok and patches_dir.is_dir():
+        _luna_pass_rate, _luna_corrupt = _validate_luna_patches_sample(patches_dir)
+        if _luna_pass_rate >= 0.95:
+            log.info(
+                "[LUNA] Upfront validation PASSED (pass_rate=%.2f) — "
+                "all manifests present. Skipping extraction entirely.",
+                _luna_pass_rate,
+            )
+            return {"status": "✅", "skipped": True, "pass_rate": _luna_pass_rate}
+        else:
+            log.warning(
+                "[LUNA] Upfront validation FAILED (pass_rate=%.2f, %d corrupt). "
+                "Removing corrupt files and continuing with extraction.",
+                _luna_pass_rate,
+                len(_luna_corrupt),
+            )
+            for _cp in _luna_corrupt:
+                try:
+                    _cp.unlink()
+                    log.info("[LUNA] Removed corrupt patch: %s", _cp)
+                except Exception:
+                    pass
 
     # Descubrir subsets
     available = sorted(
@@ -990,11 +1068,17 @@ def _pancreas_worker(args_tuple):
     nii_path_str, out_npy_str, case_id, panorama_dir_str = args_tuple
     out_npy = Path(out_npy_str)
 
-    # Idempotencia: si ya existe y tiene shape correcta, saltar
+    # Idempotencia: si ya existe, tiene shape correcta y contenido válido, saltar
     if out_npy.exists():
         try:
             arr = np.load(str(out_npy), mmap_mode="r")
-            if arr.shape == (PANCREAS_CROP_SIZE,) * 3:
+            _arr_std = float(arr.std())
+            _arr_mean = float(arr.mean())
+            if (
+                arr.shape == (PANCREAS_CROP_SIZE,) * 3
+                and _arr_std > 0.005
+                and 0.0 <= _arr_mean <= 1.0
+            ):
                 return (case_id, "SKIP", "")
             else:
                 out_npy.unlink()
@@ -1020,20 +1104,74 @@ def _pancreas_worker(args_tuple):
 # ══════════════════════════════════════════════════════════════════════════════
 
 
-def run_pancreas_preprocessing(datasets_dir, workers=4):
-    # type: (Path, int) -> dict
+def _validate_pancreas_sample(preprocessed_dir, n_sample=100):
+    # type: (Path, int) -> tuple[float, list[Path]]
+    """Validate a random sample of preprocessed pancreas volumes numerically.
+
+    Checks shape ``(48, 48, 48)``, dtype ``float32``, range ``[0, 1]``,
+    ``std > 0.01``, ``0.1 <= mean <= 0.7``, and absence of NaN/Inf.
+
+    Returns:
+        (pass_rate, corrupt_paths)
+    """
+    npy_files = list(Path(preprocessed_dir).glob("*.npy"))
+    if not npy_files:
+        return (0.0, [])
+
+    random.seed(_PAN_SEED)
+    sample = random.sample(npy_files, min(n_sample, len(npy_files)))
+
+    corrupt: list[Path] = []
+    for p in sample:
+        try:
+            arr = np.load(p)
+            if arr.shape != (PANCREAS_CROP_SIZE,) * 3:
+                corrupt.append(p)
+                continue
+            if arr.dtype != np.float32:
+                corrupt.append(p)
+                continue
+            if np.isnan(arr).any() or np.isinf(arr).any():
+                corrupt.append(p)
+                continue
+            arr_min = float(arr.min())
+            arr_max = float(arr.max())
+            arr_std = float(arr.std())
+            arr_mean = float(arr.mean())
+            if arr_min < 0.0 or arr_max > 1.0:
+                corrupt.append(p)
+                continue
+            if arr_std <= 0.01:
+                corrupt.append(p)
+                continue
+            if arr_mean < 0.1 or arr_mean > 0.7:
+                corrupt.append(p)
+                continue
+        except Exception:
+            corrupt.append(p)
+            continue
+
+    n_ok = len(sample) - len(corrupt)
+    pass_rate = n_ok / len(sample) if sample else 0.0
+    return (pass_rate, corrupt)
+
+
+def run_pancreas_preprocessing(datasets_dir, workers=4, dry_run=False):
+    # type: (Path, int, bool) -> dict
     """
     Ejecuta el pipeline offline de 7 pasos sobre los 2238 volúmenes de páncreas.
 
     Guarda en: datasets/zenodo_13715870/preprocessed/{case_id}.npy
     Formato de salida: float32 ndarray shape (48, 48, 48) = PANCREAS_CROP_SIZE³
 
-    Idempotencia: si preprocessed/ ya tiene ≥90% de los archivos esperados,
+    Idempotencia: si preprocessed/ ya tiene ≥90% de los archivos esperados
+    **y** una validación numérica de muestra retorna pass_rate ≥ 0.95,
     salta el procesamiento completo.
 
     Args:
         datasets_dir: Path al directorio datasets/
         workers:      Número de workers paralelos (default: 4)
+        dry_run:      Si True, solo estima trabajo sin ejecutar
 
     Returns:
         dict con status, n_ok, n_skip, n_error, n_total, preprocessed_dir
@@ -1053,6 +1191,13 @@ def run_pancreas_preprocessing(datasets_dir, workers=4):
 
     n_total = len(all_nii)
     log.info("[PANCREAS-OFFLINE] %d volúmenes encontrados", n_total)
+
+    if dry_run:
+        log.info(
+            "[PANCREAS-OFFLINE DRY-RUN] %d volúmenes por procesar — no se ejecuta.",
+            n_total,
+        )
+        return {"status": "Info", "dry_run": True, "n_total": n_total}
 
     preprocessed_dir.mkdir(parents=True, exist_ok=True)
 
@@ -1079,22 +1224,57 @@ def run_pancreas_preprocessing(datasets_dir, workers=4):
                 _old_npy.unlink()
             _strategy_file.unlink()
 
-    # ── Idempotencia global ────────────────────────────────────────────────────
+    # ── Idempotencia global con validación numérica ─────────────────────────
     existing_npy = list(preprocessed_dir.glob("*.npy"))
     n_existing = len(existing_npy)
     if n_existing >= int(0.90 * n_total):
-        log.info(
-            "[PANCREAS-OFFLINE] preprocessed/ ya tiene %d/%d archivos (≥90%%) — saltando.",
-            n_existing,
-            n_total,
-        )
-        return {
-            "status": "✅",
-            "skipped": True,
-            "n_existing": n_existing,
-            "n_total": n_total,
-            "preprocessed_dir": str(preprocessed_dir),
-        }
+        _pan_pass_rate, _pan_corrupt = _validate_pancreas_sample(preprocessed_dir)
+        if _pan_pass_rate >= 0.95:
+            log.info(
+                "[PANCREAS-OFFLINE] preprocessed/ ya tiene %d/%d archivos (≥90%%) "
+                "y pass_rate=%.2f (≥0.95) — saltando.",
+                n_existing,
+                n_total,
+                _pan_pass_rate,
+            )
+            return {
+                "status": "✅",
+                "skipped": True,
+                "n_existing": n_existing,
+                "n_total": n_total,
+                "pass_rate": _pan_pass_rate,
+                "preprocessed_dir": str(preprocessed_dir),
+            }
+        elif _pan_pass_rate < 0.50:
+            log.warning(
+                "[PANCREAS-OFFLINE] pass_rate=%.2f < 0.50 — %d archivos corruptos "
+                "detectados. Forzando reprocesamiento TOTAL.",
+                _pan_pass_rate,
+                len(_pan_corrupt),
+            )
+            for _cp in _pan_corrupt:
+                try:
+                    _cp.unlink()
+                except Exception:
+                    pass
+            # Force full reprocessing: clear all existing npy files
+            for _old in preprocessed_dir.glob("*.npy"):
+                try:
+                    _old.unlink()
+                except Exception:
+                    pass
+        else:
+            log.warning(
+                "[PANCREAS-OFFLINE] pass_rate=%.2f < 0.95 — %d archivos corruptos "
+                "detectados. Eliminando corruptos y continuando.",
+                _pan_pass_rate,
+                len(_pan_corrupt),
+            )
+            for _cp in _pan_corrupt:
+                try:
+                    _cp.unlink()
+                except Exception:
+                    pass
 
     # ── Construir lista de tareas ──────────────────────────────────────────────
     # case_id = parte del filename sin _0000.nii.gz
@@ -1712,7 +1892,7 @@ def run_pre_embeddings(
     if "pancreas" in active:
         try:
             results["pancreas"] = run_pancreas_preprocessing(
-                datasets_dir, workers=workers
+                datasets_dir, workers=workers, dry_run=dry_run
             )
         except Exception as e:
             log.error("[PANCREAS] Error en preprocesado offline: %s", e)

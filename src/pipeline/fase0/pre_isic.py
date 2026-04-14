@@ -27,6 +27,7 @@ from __future__ import annotations
 import argparse
 import json
 import logging
+import random
 import time
 import warnings
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -215,6 +216,54 @@ def audit_isic_dataset(
     return df_audit
 
 
+def _validate_isic_sample(
+    out_dir: Path,
+    target_size: int = 224,
+    n_sample: int = 100,
+) -> tuple[float, list[Path]]:
+    """
+    Valida una muestra aleatoria de imágenes preprocesadas en out_dir.
+
+    Para cada archivo muestreado comprueba: apertura PIL sin excepción,
+    modo RGB, lado corto == target_size, y varianza > 5.0 (no constante).
+
+    Args:
+        out_dir: directorio con imágenes *_pp_224.jpg.
+        target_size: tamaño esperado del lado corto.
+        n_sample: cantidad máxima de archivos a muestrear.
+
+    Returns:
+        Tupla (pass_rate, corrupt_paths) donde pass_rate es la fracción
+        de archivos válidos y corrupt_paths lista las rutas que fallaron.
+    """
+    all_files = list(out_dir.glob(f"*_pp_{target_size}.jpg"))
+    if not all_files:
+        return 0.0, []
+
+    sample = random.sample(all_files, min(n_sample, len(all_files)))
+    corrupt: list[Path] = []
+
+    for fpath in sample:
+        try:
+            with Image.open(fpath) as img:
+                if img.mode != "RGB":
+                    corrupt.append(fpath)
+                    continue
+                if min(img.width, img.height) != target_size:
+                    corrupt.append(fpath)
+                    continue
+                arr = np.array(img)
+                if arr.std() <= 5.0:
+                    corrupt.append(fpath)
+                    continue
+        except Exception:
+            corrupt.append(fpath)
+
+    valid = len(sample) - len(corrupt)
+    pass_rate = valid / len(sample)
+    return pass_rate, corrupt
+
+
 def _process_single_image(
     image_id: str,
     img_dir: Path,
@@ -227,9 +276,22 @@ def _process_single_image(
     out_name = f"{image_id}_pp_{target_size}.jpg"
     out_path = out_dir / out_name
 
-    # Idempotente: saltar si ya existe
+    # Idempotente: saltar si ya existe Y es válida
     if out_path.exists():
-        return {"image_id": image_id, "status": "skipped", "error": None}
+        try:
+            with Image.open(out_path) as existing:
+                if (
+                    existing.mode == "RGB"
+                    and min(existing.width, existing.height) == target_size
+                ):
+                    return {"image_id": image_id, "status": "skipped", "error": None}
+            # Validación falló: eliminar archivo corrupto y reprocesar
+            out_path.unlink()
+            log.debug(f"Archivo corrupto eliminado para reproceso: {out_path.name}")
+        except Exception:
+            # PIL no pudo abrir: eliminar y reprocesar
+            out_path.unlink(missing_ok=True)
+            log.debug(f"Archivo ilegible eliminado para reproceso: {out_path.name}")
 
     src_path = img_dir / f"{image_id}.jpg"
     if not src_path.exists():
@@ -292,6 +354,63 @@ def preprocess_isic_dataset(
 
     df_gt = pd.read_csv(gt_csv)
     image_ids = df_gt["image"].tolist()
+    total_expected = len(image_ids)
+
+    # ── Validación upfront de caché existente ──────────────────────────
+    existing_files = list(out_dir.glob(f"*_pp_{target_size}.jpg"))
+    n_existing = len(existing_files)
+
+    if n_existing > 0:
+        coverage = n_existing / total_expected if total_expected > 0 else 0.0
+        log.info(
+            f"[Preprocess] Caché existente: {n_existing:,}/{total_expected:,} "
+            f"({100 * coverage:.1f}%) archivos encontrados"
+        )
+
+        if coverage >= 0.90:
+            pass_rate, corrupt_paths = _validate_isic_sample(
+                out_dir, target_size=target_size
+            )
+            log.info(
+                f"[Preprocess] Validación de muestra: pass_rate={pass_rate:.2%} "
+                f"({len(corrupt_paths)} corruptos en muestra)"
+            )
+
+            if pass_rate >= 0.95:
+                log.info(
+                    "[Preprocess] Caché válida (cobertura>=90%, "
+                    f"pass_rate={pass_rate:.2%}>=95%). Skip completo."
+                )
+                return {
+                    "total_images": total_expected,
+                    "processed_ok": 0,
+                    "skipped_existing": n_existing,
+                    "missing_source": 0,
+                    "errors": 0,
+                    "target_size": target_size,
+                    "jpeg_quality": quality,
+                    "hair_removal": apply_hair_removal,
+                    "elapsed_seconds": 0.0,
+                    "error_details": [],
+                    "validation_skip": True,
+                    "pass_rate": pass_rate,
+                }
+
+            # pass_rate < 0.95: eliminar corruptos y continuar
+            for p in corrupt_paths:
+                p.unlink(missing_ok=True)
+            log.warning(
+                f"[Preprocess] Eliminados {len(corrupt_paths)} archivos corruptos "
+                "de la muestra. Continuando con reproceso."
+            )
+
+            if pass_rate < 0.50:
+                log.warning(
+                    f"[Preprocess] ⚠ pass_rate MUY BAJO ({pass_rate:.2%}). "
+                    "Posible corrupción masiva del caché. Revisión recomendada."
+                )
+
+    # ── Fin validación upfront ─────────────────────────────────────────
 
     if dry_run:
         image_ids = image_ids[:10]
