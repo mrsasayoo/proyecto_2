@@ -44,7 +44,7 @@ log = logging.getLogger("expert4_dataloader")
 _SPLITS_CSV = _PROJECT_ROOT / "datasets" / "pancreas_splits.csv"
 _LABELS_CSV = _PROJECT_ROOT / "datasets" / "pancreas_labels_binary.csv"
 # Directorio raíz donde buscar volúmenes .nii.gz del páncreas
-_VOLUMES_DIR = _PROJECT_ROOT / "datasets" / "pancreas"
+_VOLUMES_DIR = _PROJECT_ROOT / "datasets" / "zenodo_13715870"
 
 _NUM_WORKERS = 2  # Volúmenes grandes → I/O limitante, 2 workers recomendado
 
@@ -165,7 +165,7 @@ def build_dataloaders_expert4(
         num_folds: número total de folds. Default: EXPERT4_NUM_FOLDS (5).
         splits_csv: ruta al CSV de splits. Default: datasets/pancreas_splits.csv.
         labels_csv: ruta al CSV de labels. Default: datasets/pancreas_labels_binary.csv.
-        volumes_dir: directorio con volúmenes .nii.gz. Default: datasets/pancreas/.
+        volumes_dir: directorio con volúmenes .nii.gz. Default: datasets/zenodo_13715870/.
         batch_size: batch size por GPU. Default: EXPERT4_BATCH_SIZE (2).
         num_workers: workers para DataLoader. Default: 2.
         roi_strategy: estrategia ROI ("A" o "B"). Default: "B".

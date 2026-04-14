@@ -1058,22 +1058,36 @@ def _pancreas_preprocess_one(nii_path, panorama_dir=None):
 
         if _mask_path.exists():
             try:
-                _mask_img = sitk.ReadImage(str(_mask_path))
-                # PANORAMA masks are stored as float64 (8 B/voxel) but contain
-                # only integer labels 0-3.  Cast to uint8 (1 B/voxel) *before*
-                # GetArrayFromImage to cut peak RAM by ~7× on large volumes and
-                # avoid OOM kills on the 13 GB machine.
-                _mask_img = sitk.Cast(_mask_img, sitk.sitkUInt8)
-                _mask_arr = sitk.GetArrayFromImage(_mask_img)  # [Z, Y, X], uint8
-                del _mask_img
+                import nibabel as _nib
+
+                # PANORAMA masks are stored as float64 (8 B/voxel) but only
+                # contain integer labels 0-3.  Loading via SimpleITK allocates
+                # ~7.4 GB for the largest volumes (990 M voxels × 8 B), which
+                # causes OOM on a 13 GB machine.
+                #
+                # Fix: use nibabel's ArrayProxy with stride-based subsampling
+                # (step=4) so the decompressed data is cast to uint8 at ~1/256
+                # of the original float64 footprint.  Centroid error < 0.2 voxel
+                # in the 64³ output space — negligible for a 48³ crop.
+                _MASK_SUBSAMPLE = 4
+                _mask_nib = _nib.load(str(_mask_path))
+                _mask_sub = np.asarray(
+                    _mask_nib.dataobj[
+                        ::_MASK_SUBSAMPLE, ::_MASK_SUBSAMPLE, ::_MASK_SUBSAMPLE
+                    ]
+                ).astype(np.uint8)
+                # nibabel returns data in file storage order [X, Y, Z];
+                # SimpleITK convention used in the rest of this function is [Z, Y, X].
+                # Reverse the centroid axes after computation to match.
+                _panc_vox = np.argwhere(_mask_sub == 3)
+                del _mask_sub, _mask_nib
                 gc.collect()
-                _panc_vox = np.argwhere(_mask_arr == 3)  # voxels del páncreas
-                del _mask_arr
                 if len(_panc_vox) > 0:
-                    _c_orig = np.mean(
-                        _panc_vox, axis=0
-                    )  # centroide en espacio original [Z,Y,X]
+                    # Centroid in subsampled file-order space, then scale back
+                    _c_file = np.mean(_panc_vox, axis=0) * _MASK_SUBSAMPLE
                     del _panc_vox
+                    # Convert file order [X, Y, Z] → SimpleITK order [Z, Y, X]
+                    _c_orig = _c_file[::-1]
                     # Proyectar al espacio isotrópico (Paso 2): multiplicar por zoom_factors
                     # zoom_factors = (spacing[2], spacing[1], spacing[0]) orden [Z, Y, X]
                     _c_iso = _c_orig * np.array(zoom_factors)
