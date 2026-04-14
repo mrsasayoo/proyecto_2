@@ -358,14 +358,28 @@ def validate(
     all_labels_np = torch.cat(all_labels, dim=0).numpy().astype(int)  # [N, 14]
     probs = torch.sigmoid(all_logits_t).numpy()  # [N, 14]
 
-    # AUC-ROC por clase (skip clases con una sola label en este split)
+    # AUC-ROC por clase (skip clases sin positivos o sin negativos en este split)
     auc_per_class: list[float] = []
     for c in range(EXPERT1_NUM_CLASSES):
-        try:
-            auc_per_class.append(roc_auc_score(all_labels_np[:, c], probs[:, c]))
-        except ValueError:
-            auc_per_class.append(0.0)
-    macro_auc = float(np.mean(auc_per_class))
+        y_true_c = all_labels_np[:, c]
+        # Necesitamos al menos 1 positivo y 1 negativo para calcular AUC
+        if y_true_c.sum() == 0 or y_true_c.sum() == len(y_true_c):
+            auc_per_class.append(float("nan"))
+        else:
+            try:
+                auc_per_class.append(roc_auc_score(y_true_c, probs[:, c]))
+            except ValueError:
+                auc_per_class.append(float("nan"))
+    # nanmean ignora clases sin positivos/negativos (NaN) para que el macro AUC
+    # refleje solo las clases evaluables. Funciona tanto en dry-run (pocos
+    # samples → muchas clases NaN) como en producción (dataset completo).
+    n_valid = sum(1 for a in auc_per_class if not np.isnan(a))
+    if n_valid < EXPERT1_NUM_CLASSES and is_main_process():
+        log.warning(
+            f"[Val] AUC calculado sobre {n_valid}/{EXPERT1_NUM_CLASSES} clases "
+            f"({EXPERT1_NUM_CLASSES - n_valid} sin positivos o sin negativos)"
+        )
+    macro_auc = float(np.nanmean(auc_per_class)) if n_valid > 0 else 0.0
 
     return {
         "val_loss": avg_loss,
@@ -934,17 +948,18 @@ def train(
         lr=EXPERT1_FT_LR,
         weight_decay=EXPERT1_WEIGHT_DECAY,
     )
+    # last_epoch=0: evita que __init__ llame step() antes de que el optimizer
+    # haya dado su primer paso, lo que dispara el warning de PyTorch ≥1.1:
+    #   "Detected call of lr_scheduler.step() before optimizer.step()"
+    # Con last_epoch=0, la primera llamada explícita a scheduler.step() en el
+    # loop de entrenamiento (después de optimizer.step()) avanza a epoch 1.
+    # Epoch 0 ya usa la LR inicial del optimizer (= EXPERT1_FT_LR), que es
+    # idéntica al valor que CosineAnnealingLR asignaría en epoch 0 (cos(0)=1).
     scheduler_ft = torch.optim.lr_scheduler.CosineAnnealingLR(
         optimizer_ft,
         T_max=EXPERT1_FT_EPOCHS,
-        last_epoch=-1,
+        last_epoch=0,
     )
-    # Evitar el warning "lr_scheduler.step() before optimizer.step()":
-    # El __init__ con last_epoch=-1 llama step() internamente antes de que
-    # el optimizer haya dado un paso, lo que dispara el warning de PyTorch.
-    # Marcamos _step_count = 1 para que PyTorch no emita el warning en la
-    # primera llamada explícita a scheduler.step() en el loop de entrenamiento.
-    scheduler_ft.optimizer._step_count = 1
 
     early_stopping = EarlyStoppingAUC(
         patience=EXPERT1_EARLY_STOPPING_PATIENCE,
@@ -1016,13 +1031,17 @@ def train(
 
         test_auc_per_class: list[float] = []
         for c in range(EXPERT1_NUM_CLASSES):
-            try:
-                auc_c = roc_auc_score(tta_labels_np[:, c], tta_probs[:, c])
-            except ValueError:
-                auc_c = 0.0
+            y_true_c = tta_labels_np[:, c]
+            if y_true_c.sum() == 0 or y_true_c.sum() == len(y_true_c):
+                auc_c = float("nan")
+            else:
+                try:
+                    auc_c = roc_auc_score(y_true_c, tta_probs[:, c])
+                except ValueError:
+                    auc_c = float("nan")
             test_auc_per_class.append(auc_c)
 
-        test_macro_auc = float(np.mean(test_auc_per_class))
+        test_macro_auc = float(np.nanmean(test_auc_per_class))
 
         # Reportar AUC por clase
         log.info("[TTA] AUC-ROC por clase:")
