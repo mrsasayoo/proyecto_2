@@ -88,6 +88,11 @@ BETA_L_ERROR = 0.1
 al Expert 5 CAE. Extension aprobada en arch_doc.
 L_total = L_task + alpha * L_aux + beta * L_error."""
 
+GAMMA_L_BALANCE = 1.0
+"""Coeficiente de la penalizacion cuadratica de balance de carga.
+Penaliza expertos que reciben mas de 2/K de los samples.
+Termino: gamma * sum_k max(0, f_k - 2/K)^2."""
+
 
 # =====================================================================
 # Mixed precision

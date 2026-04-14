@@ -1,9 +1,9 @@
 """
-Script de entrenamiento para Expert 4 — Swin3D-Tiny sobre Páncreas CT.
+Script de entrenamiento para Expert 4 — ResNet 3D (R3D-18) sobre Páncreas CT.
 
 Pipeline completo:
     1. Carga hiperparámetros desde expert4_config.py (fuente de verdad)
-    2. Construye modelo Swin3D-Tiny adaptado (1 canal, 2 clases)
+    2. Construye modelo ResNet 3D adaptado (1 canal, 2 clases)
     3. Entrena con FocalLoss(gamma=2, alpha=0.75) + FP16 + gradient accumulation
     4. k-fold CV (k=5) con fold seleccionable via --fold
     5. Early stopping por val_loss (patience=15)
@@ -113,11 +113,12 @@ def _log_vram(tag: str = "") -> None:
 
 def _enable_gradient_checkpointing(model: ExpertPancreasSwin3D) -> bool:
     """
-    Habilita gradient checkpointing en los stages del Swin3D.
+    Habilita gradient checkpointing en los residual blocks del R3D-18.
 
-    SwinTransformer3d de torchvision organiza los bloques Swin en
-    model.backbone.features como Sequential de (SwinBlocks, PatchMerging).
-    Se aplica checkpointing a cada stage de bloques Swin.
+    ExpertPancreasResNet3D expone layer1..layer4, cada uno un nn.Sequential
+    de BasicBlock (Conv3D 3x3x3). Se envuelve el forward de cada layer con
+    torch.utils.checkpoint.checkpoint para reducir el consumo de VRAM a
+    costa de re-computar activaciones durante el backward pass.
 
     Returns:
         True si se habilitó, False si no fue posible.
@@ -125,22 +126,33 @@ def _enable_gradient_checkpointing(model: ExpertPancreasSwin3D) -> bool:
     try:
         from torch.utils.checkpoint import checkpoint
 
-        features = model.backbone.features
-        for i, module in enumerate(features):
-            # Los stages de bloques Swin son Sequential, los PatchMerging no
-            if isinstance(module, nn.Sequential):
-                original_forward = module.forward
+        layer_names = ("layer1", "layer2", "layer3", "layer4")
+        applied = 0
 
-                def make_checkpointed_forward(orig_fwd):
-                    def checkpointed_forward(x):
-                        return checkpoint(orig_fwd, x, use_reentrant=False)
+        for name in layer_names:
+            layer = getattr(model, name, None)
+            if layer is None:
+                log.warning(
+                    f"[GradCheckpoint] Atributo '{name}' no encontrado, omitido"
+                )
+                continue
 
-                    return checkpointed_forward
+            original_forward = layer.forward
 
-                module.forward = make_checkpointed_forward(original_forward)
+            def make_checkpointed_forward(orig_fwd):
+                def checkpointed_forward(x):
+                    return checkpoint(orig_fwd, x, use_reentrant=False)
 
-        log.info("[GradCheckpoint] Gradient checkpointing HABILITADO en Swin3D stages")
-        return True
+                return checkpointed_forward
+
+            layer.forward = make_checkpointed_forward(original_forward)
+            applied += 1
+
+        log.info(
+            f"[GradCheckpoint] Gradient checkpointing HABILITADO en "
+            f"{applied}/{len(layer_names)} layers de R3D-18"
+        )
+        return applied > 0
     except Exception as e:
         log.warning(f"[GradCheckpoint] No se pudo habilitar: {e}")
         return False
@@ -372,7 +384,7 @@ def train(dry_run: bool = False, fold: int = 0) -> None:
 
     n_params = model.count_parameters()
     log.info(
-        f"[Expert4] Modelo Swin3D-Tiny creado: {n_params:,} parámetros entrenables"
+        f"[Expert4] Modelo ResNet3D (R3D-18) creado: {n_params:,} parámetros entrenables"
     )
     _log_vram("post-model")
 
@@ -447,7 +459,7 @@ def train(dry_run: bool = False, fold: int = 0) -> None:
     max_epochs = 1 if dry_run else EXPERT4_MAX_EPOCHS
 
     log.info(f"\n{'=' * 70}")
-    log.info(f"  INICIO DE ENTRENAMIENTO — Expert 4 (Swin3D-Tiny / Páncreas)")
+    log.info(f"  INICIO DE ENTRENAMIENTO — Expert 4 (ResNet3D R3D-18 / Páncreas)")
     log.info(f"  Fold: {fold}/{EXPERT4_NUM_FOLDS - 1}")
     log.info(
         f"  Épocas máx: {max_epochs} | Batch efectivo: "
@@ -566,7 +578,7 @@ def train(dry_run: bool = False, fold: int = 0) -> None:
 
     # ── Resumen final ──────────────────────────────────────────────
     log.info(f"\n{'=' * 70}")
-    log.info(f"  ENTRENAMIENTO FINALIZADO — Expert 4 (Swin3D-Tiny / Páncreas)")
+    log.info(f"  ENTRENAMIENTO FINALIZADO — Expert 4 (ResNet3D R3D-18 / Páncreas)")
     log.info(f"  Fold: {fold}/{EXPERT4_NUM_FOLDS - 1}")
     log.info(f"  Mejor val_loss: {best_val_loss:.4f}")
     if training_log:
@@ -590,7 +602,7 @@ def train(dry_run: bool = False, fold: int = 0) -> None:
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(
-        description="Entrenamiento Expert 4 — Swin3D-Tiny / Páncreas CT"
+        description="Entrenamiento Expert 4 — ResNet3D R3D-18 / Páncreas CT"
     )
     parser.add_argument(
         "--dry-run",

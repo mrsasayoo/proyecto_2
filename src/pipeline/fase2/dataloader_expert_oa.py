@@ -1,7 +1,7 @@
 """
 DataLoader para Expert OA — Osteoarthritis Knee (5 clases KL 0-4).
 
-Construye DataLoaders para train, val y test del Expert OA (EfficientNet-B0, 5 clases KL 0-4).
+Construye DataLoaders para train, val y test del Expert OA (EfficientNet-B3, 5 clases KL 0-4).
 Los splits están organizados en carpetas: {root_dir}/{train,val,test}/{0,1,2,3,4}/
 
 Transforms:

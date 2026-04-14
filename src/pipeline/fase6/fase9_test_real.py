@@ -130,7 +130,7 @@ def build_moe_system(
     from src.pipeline.fase2.models.expert_oa_vgg16bn import ExpertOAEfficientNetB0
     from src.pipeline.fase2.models.expert3_r3d18 import Expert3MC318
     from src.pipeline.fase2.models.expert4_swin3d import ExpertPancreasSwin3D
-    from src.pipeline.fase3.models.expert5_cae import ConvAutoEncoder
+    from src.pipeline.fase3.models.expert6_resunet import ConditionedResUNetAE
     from linear import LinearGatingHead
 
     logger.info("Instanciando expertos del MoESystem...")
@@ -139,18 +139,16 @@ def build_moe_system(
     # build_moe_system_dry_run() en moe_model.py
     experts = nn.ModuleList(
         [
-            Expert1ConvNeXtTiny(
-                fc_dropout_p=0.3, num_classes=14
-            ),  # Expert 0: NIH Chest
+            Expert1ConvNeXtTiny(dropout_fc=0.3, num_classes=14),  # Expert 0: NIH Chest
             Expert2ConvNeXtSmall(),  # Expert 1: ISIC (8 clases)
             ExpertOAEfficientNetB0(),  # Expert 2: OA Knee
             Expert3MC318(  # Expert 3: LUNA16
                 spatial_dropout_p=0.15, fc_dropout_p=0.4, num_classes=2
             ),
             ExpertPancreasSwin3D(in_channels=1, num_classes=2),  # Expert 4: Páncreas
-            ConvAutoEncoder(
-                in_channels=3, latent_dim=512, img_size=224
-            ),  # Expert 5: CAE
+            ConditionedResUNetAE(
+                in_ch=3, base_ch=64, n_domains=6
+            ),  # Expert 5: Res-U-Net condicionado (OOD)
         ]
     )
 

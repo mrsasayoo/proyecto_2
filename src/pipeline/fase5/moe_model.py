@@ -56,7 +56,12 @@ class MoESystem(nn.Module):
         self.n_experts_domain = 5  # expertos 0-4, no CAE
         self.n_experts_total = 6
 
-    def forward(self, x: torch.Tensor, expert_id: int) -> dict:
+    def forward(
+        self,
+        x: torch.Tensor,
+        expert_id: int,
+        domain_ids: Optional[torch.LongTensor] = None,
+    ) -> dict:
         """
         Ejecuta el experto indicado y el router sobre el mismo input.
 
@@ -70,6 +75,9 @@ class MoESystem(nn.Module):
         Args:
             x: tensor de entrada con shape apropiado para el experto.
             expert_id: indice del experto (0-5).
+            domain_ids: [B] tensor int64 con IDs de dominio (0-5) para
+                Expert 5 (Res-U-Net). Si None, Expert 5 usa dominio 5
+                ("Unknown") por defecto. Ignorado para expertos 0-4.
 
         Returns:
             dict con keys:
@@ -88,8 +96,8 @@ class MoESystem(nn.Module):
         # --- Forward del experto indicado ---
         expert = self.experts[expert_id]
         if expert_id == 5:
-            # CAE retorna (recon, z)
-            recon, z = expert(x)
+            # ConditionedResUNetAE retorna (recon, z)
+            recon, z = expert(x, domain_ids)
             result["logits"] = z  # latente como "logits"
             result["recon"] = recon
         else:
@@ -158,7 +166,7 @@ def build_moe_system_dry_run(d_model: int = 192) -> MoESystem:
     from fase2.models.expert_oa_vgg16bn import ExpertOAEfficientNetB0
     from fase2.models.expert3_r3d18 import Expert3MC318
     from fase2.models.expert4_swin3d import ExpertPancreasSwin3D
-    from fase3.models.expert5_cae import ConvAutoEncoder
+    from fase3.models.expert6_resunet import ConditionedResUNetAE
 
     # Import LinearGatingHead directly — fase2/routers/__init__.py uses bare
     # imports (from linear import ...) that only work when routers/ is on sys.path.
@@ -177,14 +185,16 @@ def build_moe_system_dry_run(d_model: int = 192) -> MoESystem:
     # --- Instanciar expertos ---
     experts = nn.ModuleList(
         [
-            Expert1ConvNeXtTiny(fc_dropout_p=0.3, num_classes=14),  # Expert 0
+            Expert1ConvNeXtTiny(dropout_fc=0.3, num_classes=14),  # Expert 0
             Expert2ConvNeXtSmall(),  # Expert 1
             ExpertOAEfficientNetB0(),  # Expert 2 — EfficientNet-B0, 5 clases KL
             Expert3MC318(
                 spatial_dropout_p=0.15, fc_dropout_p=0.4, num_classes=2
             ),  # Expert 3
             ExpertPancreasSwin3D(in_channels=1, num_classes=2),  # Expert 4
-            ConvAutoEncoder(in_channels=3, latent_dim=512, img_size=224),  # Expert 5
+            ConditionedResUNetAE(
+                in_ch=3, base_ch=64, n_domains=6
+            ),  # Expert 5 → Res-U-Net v6 condicionado (OOD)
         ]
     )
 

@@ -6,7 +6,7 @@ Todas las imágenes se normalizan a [3, 224, 224] float32.
 
 Para datos 3D:
   - LUNA16 (.npy patches [64,64,64]): slice central axial -> replicate 3ch -> resize [3,224,224]
-  - Páncreas (.nii.gz): HU clip [-100,400] -> slice central -> replicate 3ch -> resize [3,224,224]
+  - Páncreas (.nii.gz): HU clip [-150,250] -> slice central -> replicate 3ch -> resize [3,224,224]
 
 Schema de cae_splits.csv:
   ruta_imagen       — path relativo desde project_root
@@ -33,8 +33,8 @@ _IMAGENET_MEAN = [0.485, 0.456, 0.406]
 _IMAGENET_STD = [0.229, 0.224, 0.225]
 
 # ── HU clip para páncreas (abdomen) ──────────────────────────────────
-_HU_ABDOMEN_LO = -100
-_HU_ABDOMEN_HI = 400
+_HU_ABDOMEN_LO = -150
+_HU_ABDOMEN_HI = 250
 
 
 class MultimodalCAEDataset(Dataset):
@@ -47,7 +47,7 @@ class MultimodalCAEDataset(Dataset):
     - LUNA16 (.npy patches [1,64,64,64] o [64,64,64]):
         slice central axial -> [64,64] -> replicate 3ch -> resize [3,224,224]
     - Páncreas (.nii.gz):
-        HU clip [-100, 400] -> slice central del volumen -> replicate 3ch -> resize [3,224,224]
+        HU clip [-150, 250] -> slice central del volumen -> replicate 3ch -> resize [3,224,224]
 
     Args:
         csv_path: ruta a cae_splits.csv
@@ -173,7 +173,7 @@ class MultimodalCAEDataset(Dataset):
         """
         Carga un volumen NIfTI de páncreas y extrae el slice central.
 
-        HU clip [-100, 400] -> normalizar a [0, 1] -> slice central Z
+        HU clip [-150, 250] -> normalizar a [0, 1] -> slice central Z
         -> convertir a PIL RGB -> resize a [3, 224, 224].
         """
         import nibabel as nib
@@ -181,7 +181,7 @@ class MultimodalCAEDataset(Dataset):
         nii = nib.load(str(abs_path))
         vol = nii.get_fdata().astype(np.float32)
 
-        # HU clip [-100, 400] y normalizar a [0, 1]
+        # HU clip [-150, 250] y normalizar a [0, 1]
         vol = np.clip(vol, _HU_ABDOMEN_LO, _HU_ABDOMEN_HI)
         hu_range = _HU_ABDOMEN_HI - _HU_ABDOMEN_LO
         vol = (vol - _HU_ABDOMEN_LO) / hu_range

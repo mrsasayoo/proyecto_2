@@ -56,6 +56,7 @@ from fase5.fase5_config import (
     RESET_OPTIMIZER_BETWEEN_STAGES,
     ALPHA_L_AUX,
     BETA_L_ERROR,
+    GAMMA_L_BALANCE,
     FP16_ENABLED,
     ACCUMULATION_STEPS,
     MIXED_BATCH_SIZE,
@@ -145,22 +146,27 @@ def _build_param_groups_stage3(moe: MoESystem) -> list[dict]:
     return groups
 
 
-def _compute_l_aux(gates: torch.Tensor, expert_ids: list[int]) -> torch.Tensor:
+def _compute_l_aux(gates: torch.Tensor) -> torch.Tensor:
     """
-    Calcula la Auxiliary Loss del Switch Transformer.
+    Calcula la Auxiliary Loss del Switch Transformer con penalizacion de balance.
 
-    L_aux = alpha * N * sum(f_i * P_i)
+    L_aux = alpha * N * sum(f_i * P_i) + gamma * sum_k max(0, f_k - 2/K)^2
+
     donde:
         f_i = fraccion de muestras ruteadas al experto i
         P_i = probabilidad media del router para el experto i
+        threshold = 2/K: ningun experto debe recibir mas del 40% de samples
 
     Args:
-        gates: probabilidades del router [B, N_EXPERTS_DOMAIN]
-        expert_ids: lista de expert_ids del batch actual
+        gates: probabilidades del router [B, N_EXPERTS_DOMAIN].
+               Se aplica softmax defensivo internamente.
 
     Returns:
-        L_aux escalar
+        L_aux escalar (incluye termino base + penalizacion de umbral)
     """
+    # Asegurar que gates sean probabilidades aunque LinearGatingHead ya aplique softmax
+    gates = torch.softmax(gates, dim=-1)
+
     device = gates.device
     n_experts = gates.shape[1]  # N_EXPERTS_DOMAIN = 5
     batch_size = gates.shape[0]
@@ -174,11 +180,19 @@ def _compute_l_aux(gates: torch.Tensor, expert_ids: list[int]) -> torch.Tensor:
     # P_i: probabilidad media del router por experto
     P_i = gates.mean(dim=0)  # [N_EXPERTS_DOMAIN]
 
-    L_aux = ALPHA_L_AUX * n_experts * (f_i * P_i).sum()
-    return L_aux
+    # Termino base Switch Transformer
+    L_base = ALPHA_L_AUX * n_experts * (f_i * P_i).sum()
+
+    # Penalizacion de umbral: ningun experto debe recibir mas de 2/K samples
+    threshold = 2.0 / n_experts
+    excess = torch.clamp(f_i - threshold, min=0.0)
+    L_balance = GAMMA_L_BALANCE * (excess**2).sum()
+
+    return L_base + L_balance
 
 
 def _compute_l_error(gates: torch.Tensor, expert_ids: list[int]) -> torch.Tensor:
+    # TODO: implementar en producción
     """
     Calcula L_error: penaliza enviar imagenes validas al CAE (Expert 5).
 
@@ -295,28 +309,23 @@ def _dry_run_stage(
                 loss_task = nn.functional.cross_entropy(logits, target)
 
             # L_aux
-            l_aux = _compute_l_aux(gates, [eid])
-
-            # L_error
-            l_error = _compute_l_error(gates, [eid])
+            l_aux = _compute_l_aux(gates)
 
             # L_total
-            # NOTE: l_aux already includes ALPHA_L_AUX internally,
-            # and l_error is a raw penalty — apply BETA here.
-            l_total = loss_task + l_aux + BETA_L_ERROR * l_error
+            # NOTE: l_aux already includes ALPHA_L_AUX and GAMMA_L_BALANCE
+            # internally. l_error desconectado (placeholder, ver TODO).
+            l_total = loss_task + l_aux
 
             # Backward (sin optimizer.step)
             l_total.backward()
 
             log.info(
-                "  [%s] input=%s | output=%s | "
-                "L_task=%.4f | L_aux=%.4f | L_error=%.4f | L_total=%.4f",
+                "  [%s] input=%s | output=%s | L_task=%.4f | L_aux=%.4f | L_total=%.4f",
                 cfg["name"],
                 list(x.shape),
                 list(logits.shape),
                 loss_task.item(),
                 l_aux.item(),
-                l_error.item(),
                 l_total.item(),
             )
 

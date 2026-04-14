@@ -1,15 +1,15 @@
 """
-Script de entrenamiento para Expert OA — EfficientNet-B0 sobre Osteoarthritis Knee.
+Script de entrenamiento para Expert OA — EfficientNet-B3 sobre Osteoarthritis Knee.
 
 Pipeline completo:
     1. Carga hiperparámetros desde expert_oa_config.py (fuente de verdad)
-    2. Construye modelo EfficientNet-B0 pretrained (5 clases KL 0-4)
+    2. Construye modelo EfficientNet-B3 pretrained (5 clases KL 0-4)
     3. Entrena con CrossEntropyLoss(weight=class_weights) + FP16 + gradient accumulation
     4. Adam diferencial: lr_backbone=5e-5 / lr_head=5e-4
     5. CosineAnnealingLR scheduler (T_max=30, eta_min=1e-6)
     6. Checkpoint por val_f1_macro máximo
     7. Early stopping por val_f1_macro (patience=10)
-    8. Métricas: F1-macro (principal), QWK (complementaria)
+    8. Métrica principal: F1-macro
 
 Uso:
     # Dry-run: verifica el pipeline sin entrenar
@@ -22,7 +22,7 @@ Dependencias:
     - src/pipeline/fase2/models/expert_oa_vgg16bn.py: ExpertOAEfficientNetB0
     - src/pipeline/fase2/dataloader_expert_oa.py: get_oa_dataloaders
     - src/pipeline/fase2/expert_oa_config.py: hiperparámetros
-    - src/pipeline/datasets/osteoarthritis.py: OAKneeDataset (compute_qwk)
+    - src/pipeline/datasets/osteoarthritis.py: OAKneeDataset
 """
 
 import sys
@@ -36,7 +36,7 @@ import numpy as np
 import torch
 import torch.nn as nn
 from torch.amp import GradScaler
-from sklearn.metrics import cohen_kappa_score, f1_score
+from sklearn.metrics import f1_score
 
 # ── Configurar paths ───────────────────────────────────────────────────
 _PROJECT_ROOT = Path(__file__).resolve().parents[3]  # proyecto_2/
@@ -67,7 +67,6 @@ from fase2.expert_oa_config import (
     EXPERT_OA_SCHEDULER_ETA_MIN,
     EXPERT_OA_CONFIG_SUMMARY,
 )
-from datasets.osteoarthritis import OAKneeDataset
 
 # ── Logging ────────────────────────────────────────────────────────────
 logging.basicConfig(
@@ -241,10 +240,9 @@ def validate(
     Metricas:
         - val_loss: CrossEntropyLoss promedio
         - val_f1_macro: F1-score macro (metrica principal)
-        - val_qwk: Quadratic Weighted Kappa (metrica complementaria)
 
     Returns:
-        dict con keys: val_loss, val_f1_macro, val_qwk
+        dict con keys: val_loss, val_f1_macro
     """
     model.eval()
     total_loss = 0.0
@@ -282,19 +280,12 @@ def validate(
     avg_loss = total_loss / max(n_batches, 1)
 
     # ── Metricas ───────────────────────────────────────────────────
-    y_true_np = np.array(all_labels)
-    y_pred_np = np.array(all_preds)
-
     # F1-macro — metrica principal
     f1_macro = f1_score(all_labels, all_preds, average="macro", zero_division=0)
-
-    # QWK — metrica complementaria ordinal
-    qwk = OAKneeDataset.compute_qwk(y_true_np, y_pred_np)
 
     return {
         "val_loss": avg_loss,
         "val_f1_macro": f1_macro,
-        "val_qwk": qwk,
     }
 
 
@@ -334,7 +325,7 @@ def train(dry_run: bool = False) -> None:
 
     n_params = model.count_parameters()
     log.info(
-        f"[ExpertOA] Modelo EfficientNet-B0 creado: {n_params:,} parametros entrenables"
+        f"[ExpertOA] Modelo EfficientNet-B3 creado: {n_params:,} parametros entrenables"
     )
     _log_vram("post-model")
 
@@ -397,7 +388,7 @@ def train(dry_run: bool = False) -> None:
     max_epochs = 1 if dry_run else EXPERT_OA_MAX_EPOCHS
 
     log.info(f"\n{'=' * 70}")
-    log.info("  INICIO DE ENTRENAMIENTO — Expert OA (EfficientNet-B0 / OA Knee)")
+    log.info("  INICIO DE ENTRENAMIENTO — Expert OA (EfficientNet-B3 / OA Knee)")
     log.info(
         f"  Epocas max: {max_epochs} | Batch efectivo: "
         f"{EXPERT_OA_BATCH_SIZE}x{EXPERT_OA_ACCUMULATION_STEPS}="
@@ -441,14 +432,13 @@ def train(dry_run: bool = False) -> None:
         epoch_time = time.time() - epoch_start
         val_loss = val_results["val_loss"]
         val_f1_macro = val_results["val_f1_macro"]
-        val_qwk = val_results["val_qwk"]
 
         is_best = val_f1_macro > best_f1_macro
 
         log.info(
             f"[Epoch {epoch + 1:3d}/{max_epochs}] "
             f"train_loss={train_loss:.4f} | val_loss={val_loss:.4f} | "
-            f"val_f1_macro={val_f1_macro:.4f} | val_qwk={val_qwk:.4f} | "
+            f"val_f1_macro={val_f1_macro:.4f} | "
             f"lr_bb={current_lr_backbone:.2e} lr_hd={current_lr_head:.2e} | "
             f"time={epoch_time:.1f}s"
             f"{' ★ BEST' if is_best else ''}"
@@ -461,7 +451,6 @@ def train(dry_run: bool = False) -> None:
             "train_loss": train_loss,
             "val_loss": val_loss,
             "val_f1_macro": val_f1_macro,
-            "val_qwk": val_qwk,
             "lr_backbone": current_lr_backbone,
             "lr_head": current_lr_head,
             "epoch_time_s": round(epoch_time, 1),
@@ -479,7 +468,6 @@ def train(dry_run: bool = False) -> None:
                 "scheduler_state_dict": scheduler.state_dict(),
                 "val_loss": val_loss,
                 "val_f1_macro": val_f1_macro,
-                "val_qwk": val_qwk,
                 "config": {
                     "lr_backbone": EXPERT_OA_LR_BACKBONE,
                     "lr_head": EXPERT_OA_LR_HEAD,
@@ -518,14 +506,13 @@ def train(dry_run: bool = False) -> None:
 
     # ── Resumen final ──────────────────────────────────────────────
     log.info(f"\n{'=' * 70}")
-    log.info("  ENTRENAMIENTO FINALIZADO — Expert OA (EfficientNet-B0 / OA Knee)")
+    log.info("  ENTRENAMIENTO FINALIZADO — Expert OA (EfficientNet-B3 / OA Knee)")
     log.info(f"  Mejor val_f1_macro: {best_f1_macro:.4f}")
     if training_log:
         best_epoch = max(training_log, key=lambda x: x["val_f1_macro"])
         log.info(
             f"  Mejor epoca: {best_epoch['epoch']} | "
-            f"F1-macro: {best_epoch['val_f1_macro']:.4f} | "
-            f"QWK: {best_epoch['val_qwk']:.4f}"
+            f"F1-macro: {best_epoch['val_f1_macro']:.4f}"
         )
     if not dry_run:
         log.info(f"  Checkpoint: {_CHECKPOINT_PATH}")
@@ -541,7 +528,7 @@ def train(dry_run: bool = False) -> None:
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(
-        description="Entrenamiento Expert OA — EfficientNet-B0 / Osteoarthritis Knee"
+        description="Entrenamiento Expert OA — EfficientNet-B3 / Osteoarthritis Knee"
     )
     parser.add_argument(
         "--dry-run",

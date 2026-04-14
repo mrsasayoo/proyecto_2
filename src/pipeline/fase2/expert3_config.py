@@ -2,19 +2,15 @@
 Configuración de entrenamiento para Expert 3 — LUNA16 (Nódulos Pulmonares CT 3D).
 
 Fuente de verdad para todos los hiperparámetros del experto 3 en Fase 2.
-Este archivo NO define la arquitectura del modelo (ViViT-Tiny vs MC3-18);
-esa decisión está pendiente del usuario.
 
-NOTA ARQUITECTÓNICA: La spec prescribe ViViT-Tiny 3D (~25M parámetros).
-Con el dataset actual (14,728 muestras, ratio params/datos ≈ 2,038:1),
-se recomienda considerar MC3-18 (~11.2M params, ratio ≈ 761:1) como alternativa
-antes de Phase 2. Ver docs/overfitting_analysis_expert3.md para análisis completo.
+Arquitectura: DenseNet 3D (~6.7M parámetros), implementado from scratch con
+convoluciones 3D. growth_rate=32, blocks=[4,8,16,12], compression=0.5.
 
 Análisis de riesgo de overfitting:
   - 14,728 muestras de entrenamiento (1,258 positivas, 13,470 negativas)
   - Ratio desbalance efectivo (post-fix leakage): ~10.7:1
-  - Con ViViT-Tiny (~25M params): ratio params/datos ≈ 1,700:1 → ALTO RIESGO
-  - Regularización agresiva obligatoria: dropout, weight_decay, augmentation 3D
+  - Con DenseNet 3D (~6.7M params): ratio params/datos ≈ 455:1 — riesgo moderado
+  - Regularización aplicada: SpatialDropout3d, dropout_fc, weight_decay, FocalLoss
 """
 
 # ── Optimizador ─────────────────────────────────────────────
@@ -85,7 +81,7 @@ derivadas de un threshold."""
 
 # ── Resumen ejecutivo para logs ─────────────────────────────
 EXPERT3_CONFIG_SUMMARY = (
-    "Expert 3 (LUNA16): LR=3e-4 | WD=0.03 | "
+    "Expert 3 (LUNA16 / DenseNet3D): LR=3e-4 | WD=0.03 | "
     "FocalLoss(γ=2, α=0.85) | label_smooth=0.05 | "
     "dropout_fc=0.4 | spatial_drop3d=0.15 | "
     "batch=4 | accum=8 (efectivo=32) | FP16=True | "

@@ -1,5 +1,5 @@
 """
-DataLoader para Expert 4 — Páncreas CT 3D (Swin3D-Tiny).
+DataLoader para Expert 4 — Páncreas CT 3D (ResNet 3D / R3D-18).
 
 Construye DataLoaders para train y val del Expert 4 con k-fold CV.
 Usa PancreasDataset de datasets/pancreas.py con mode="expert".

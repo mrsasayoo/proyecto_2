@@ -13,6 +13,13 @@ pertenecen a esta distribución producen alto error de reconstrucción
 Entrenado desde cero (weights=None). NO usa Conv3d.
 """
 
+# ── DEPRECADO — reemplazado por expert6_resunet.py ──────────────────────────
+# ConvAutoEncoder (CAE simple) fue sustituido por ResUNetAutoencoder en expert6_resunet.py.
+# Este archivo se conserva únicamente para reproducibilidad de experimentos anteriores
+# y para comparación de ablation. No usar en código nuevo.
+# Usar: from fase3.models.expert6_resunet import ResUNetAutoencoder
+# ────────────────────────────────────────────────────────────────────────────
+
 import torch
 import torch.nn as nn
 import torch.nn.functional as F

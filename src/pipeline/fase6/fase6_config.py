@@ -17,6 +17,13 @@ ENTROPY_THRESHOLD_PATH = "checkpoints/entropy_threshold.pkl"
 """Umbral de entropía calibrado sobre el validation set.
 Generado por calibrate_entropy_threshold() en Fase 2."""
 
+OOD_THRESHOLDS_JSON_PATH = "checkpoints/ood_thresholds.json"
+"""Archivo JSON consolidado con todos los umbrales OOD:
+  - entropy_threshold: umbral de entropía del router
+  - cae_theta_leve: umbral bajo de MSE (imagen limpia vs. ruido leve)
+  - cae_theta_ood: umbral alto de MSE (ruido leve vs. OOD absoluto)
+Generado por OODDetector.calibrate_threshold() y calibrate_cae_thresholds()."""
+
 
 # =====================================================================
 # Rutas de resultados
@@ -58,6 +65,16 @@ LOAD_BALANCE_MAX_RATIO = 1.30
 # =====================================================================
 OOD_ENTROPY_PERCENTILE = 95
 """Percentil sobre el validation set para calibrar el umbral de entropía."""
+
+CAE_MSE_PERCENTILE_LEVE = 50
+"""Percentil del MSE in-distribution para θ_leve (imagen limpia vs. ruido leve)."""
+
+CAE_MSE_PERCENTILE_OOD = 99
+"""Percentil del MSE in-distribution para θ_OOD (ruido leve vs. OOD absoluto).
+Umbral elevado de percentil 95 → 99 con la nueva arquitectura Res-U-Net
+(mayor especificidad OOD, menor tasa de falsos positivos).
+En ausencia de muestras OOD etiquetadas, se usa la cola alta de la distribución
+in-distribution como proxy."""
 
 
 # =====================================================================

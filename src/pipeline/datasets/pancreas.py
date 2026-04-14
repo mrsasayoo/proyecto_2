@@ -6,7 +6,7 @@ Hallazgos implementados:
         de case_ids y fijación del hash del commit para reproducibilidad
   H2 → páncreas ocupa ~1% del volumen: PancreasROIExtractor con 3 estrategias;
         resize naïve destruye la señal diagnóstica
-  H3 → clip HU [-100, 400] para abdomen (NO usar [-1000, 400] de LUNA16);
+  H3 → clip HU [-150, +250] para abdomen (NO usar [-1000, 400] de LUNA16);
         z-score por volumen para bias multicéntrico (Radboudumc/MSD/NIH)
   Item-3  → lectura .nii.gz con SimpleITK/nibabel
   Item-6  → gradient checkpointing batch_size 1–2 con 12 GB VRAM
@@ -25,7 +25,8 @@ from torch.utils.data import Dataset
 from pathlib import Path
 import SimpleITK as sitk
 
-from config import EXPERT_IDS, HU_ABDOMEN_CLIP, HU_LUNG_CLIP
+from config import EXPERT_IDS, HU_LUNG_CLIP
+from fase2.expert4_config import EXPERT4_HU_CLIP
 from fase1.transform_3d import normalize_hu, resize_volume_3d, volume_to_vit_input
 
 log = logging.getLogger("fase0")
@@ -419,7 +420,7 @@ class PancreasDataset(Dataset):
 
         # ── H3/Item-4: clip HU abdominal ─────────────────────────────────────
         log.info(
-            f"[Pancreas] H3/Item-4 — HU clip: {HU_ABDOMEN_CLIP} (abdomen).\n"
+            f"[Pancreas] H3/Item-4 — HU clip: {EXPERT4_HU_CLIP} (abdomen, expert4_config.py).\n"
             f"    ⚠ NO usar HU_LUNG_CLIP {HU_LUNG_CLIP} de LUNA16.\n"
             f"    Parénquima pancreático: +30 a +150 HU (fase portal-venosa).\n"
             f"    Tumor PDAC (hipodenso): -20 a +80 HU."
@@ -672,7 +673,7 @@ class PancreasDataset(Dataset):
             else:
                 return torch.randn(1, 64, 64, 64) * 0.1, label, case_stem
 
-        lo, hi = HU_ABDOMEN_CLIP
+        lo, hi = EXPERT4_HU_CLIP  # (-150, 250) — fuente de verdad: expert4_config.py
 
         if self.z_score_norm:
             volume = np.clip(volume, lo, hi)
@@ -725,7 +726,7 @@ class _LegacyPancreasDataset(Dataset):
             v = np.load(pf)
         except Exception:
             return torch.zeros(3, 224, 224), self.expert_id, pf.stem
-        lo, hi = HU_ABDOMEN_CLIP
+        lo, hi = EXPERT4_HU_CLIP  # (-150, 250) — fuente de verdad: expert4_config.py
         v = normalize_hu(v, lo, hi)
         vt = resize_volume_3d(v)
         return volume_to_vit_input(vt), self.expert_id, pf.stem

@@ -103,9 +103,10 @@ OA_BASE_IMG_COUNT = 8260
 # ── Constantes HU ──────────────────────────────────────────
 # LUNA16: aire puro (-1000) hasta límite óseo (+400)
 HU_LUNG_CLIP = (-1000, 400)
-# Pancreas: grasa peripancreática (-100) hasta límite óseo (+400)
+# Pancreas: grasa peripancreática (-150) hasta tejido blando (+250)
 # NO usar [-1000, 400] para abdomen — comprime contraste diagnóstico 7x
-HU_ABDOMEN_CLIP = (-100, 400)
+# Alineado con EXPERT4_HU_CLIP en fase2/expert4_config.py
+HU_ABDOMEN_CLIP = (-150, 250)
 
 
 # ── Nombres y notas por experto ─────────────────────────────
@@ -177,7 +178,7 @@ EXPERT_NOTES = {
         "fijar hash commit; cruzar case_ids con .nii.gz del ZIP. "
         "H2: páncreas ~1% del volumen → resize naïve destruye señal. "
         "Opción A (FASE 0): resize completo. Opción B (FASE 2): recorte Z[120:220]. "
-        "H3: HU clip HU_ABDOMEN_CLIP=(-100,400) — NO HU_LUNG_CLIP de LUNA16. "
+        "H3: HU clip HU_ABDOMEN_CLIP=(-150,250) — NO HU_LUNG_CLIP de LUNA16. "
         "z-score por volumen para bias multicéntrico (Radboudumc/MSD/NIH). "
         "Loss: FocalLoss(alpha=0.75, gamma=2). "
         "Item-6: batch_size=1–2 + FP16 + gradient checkpointing (más restrictivo que LUNA16). "

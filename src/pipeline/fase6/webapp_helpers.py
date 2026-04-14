@@ -87,8 +87,8 @@ EXPERT_METADATA: dict[int, dict] = {
         "class_names": ["Normal", "PDAC"],
     },
     5: {
-        "name": "Experto 6 — CAE / OOD",
-        "architecture": "ConvAutoEncoder 2D",
+        "name": "Experto 6 — Res-U-Net AE (OOD)",
+        "architecture": "ConditionedResUNetAE",
         "dataset": "5 datasets combinados",
         "n_classes": 0,
         "modality": "2D",
@@ -402,7 +402,7 @@ def format_confidence(logits: torch.Tensor, expert_id: int) -> tuple[str, float]
     Para CAE (expert_id=5) retorna ("OOD/CAE", 0.0).
     """
     if expert_id == 5:
-        return "OOD/CAE", 0.0
+        return "OOD/Res-U-Net", 0.0
 
     meta = EXPERT_METADATA.get(expert_id)
     if meta is None:

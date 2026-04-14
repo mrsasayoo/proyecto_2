@@ -1,7 +1,7 @@
 """
 DataLoader para Expert 3 — LUNA16 (parches 3D de nódulos pulmonares).
 
-Construye DataLoaders para train, val y test del Expert 3 (MC3-18).
+Construye DataLoaders para train, val y test del Expert 3 (DenseNet 3D).
 Los parches ya están extraídos y separados por split en disco.
 
 Estrategia de carga eficiente:

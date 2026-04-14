@@ -1,9 +1,9 @@
 """
-Script de entrenamiento para Expert 3 — MC3-18 sobre LUNA16.
+Script de entrenamiento para Expert 3 — DenseNet 3D sobre LUNA16.
 
 Pipeline completo:
     1. Carga hiperparámetros desde expert3_config.py (fuente de verdad)
-    2. Construye modelo MC3-18 adaptado (1 canal, 2 clases)
+    2. Construye modelo DenseNet 3D adaptado (1 canal, 2 clases)
     3. Entrena con FocalLoss(gamma=2, alpha=0.85) + FP16 + gradient accumulation
     4. Early stopping por val_loss (patience=20)
     5. Guarda checkpoints y log de métricas
@@ -16,7 +16,7 @@ Uso:
     python src/pipeline/fase2/train_expert3.py
 
 Dependencias:
-    - src/pipeline/fase2/models/expert3_r3d18.py: Expert3MC318
+    - src/pipeline/fase2/models/expert3_r3d18.py: Expert3MC318 (alias de Expert3DenseNet3D)
     - src/pipeline/fase2/dataloader_expert3.py: build_dataloaders_expert3
     - src/pipeline/fase2/expert3_config.py: hiperparámetros
     - src/pipeline/losses.py: FocalLoss
@@ -108,11 +108,15 @@ def _log_vram(tag: str = "") -> None:
 
 def _enable_gradient_checkpointing(model: Expert3MC318) -> bool:
     """
-    Intenta habilitar gradient checkpointing en el modelo.
+    Intenta habilitar gradient checkpointing en el modelo DenseNet 3D.
 
-    MC3-18 de torchvision no tiene gradient_checkpointing_enable() nativo.
-    Se implementa manualmente usando torch.utils.checkpoint en los bloques
-    residuales (layer1-4).
+    DenseNet 3D no tiene gradient_checkpointing_enable() nativo.
+    Se implementa manualmente usando torch.utils.checkpoint en los
+    dense blocks del modelo (model.dense_blocks: nn.ModuleList de _DenseBlock).
+
+    Cada _DenseBlock contiene N _DenseLayers con conectividad densa.
+    El checkpointing se aplica al forward completo de cada bloque,
+    liberando activaciones intermedias y recalculándolas en el backward.
 
     Returns:
         True si se habilitó, False si no fue posible.
@@ -120,22 +124,31 @@ def _enable_gradient_checkpointing(model: Expert3MC318) -> bool:
     try:
         from torch.utils.checkpoint import checkpoint
 
-        # Guardamos los forwards originales
-        original_forwards = {}
-        for name in ("layer1", "layer2", "layer3", "layer4"):
-            layer = getattr(model, name)
-            original_forwards[name] = layer.forward
+        # Verificar que el modelo tiene dense_blocks (estructura DenseNet 3D)
+        if not hasattr(model, "dense_blocks") or not model.dense_blocks:
+            log.warning(
+                "[GradCheckpoint] Modelo sin atributo 'dense_blocks'. "
+                "Gradient checkpointing no aplicable."
+            )
+            return False
 
-            # Creamos un forward con checkpointing
+        # Aplicar checkpointing a cada _DenseBlock
+        checkpointed_count = 0
+        for idx, block in enumerate(model.dense_blocks):
+            # Creamos un forward con checkpointing por bloque
             def make_checkpointed_forward(original_fwd):
                 def checkpointed_forward(x):
                     return checkpoint(original_fwd, x, use_reentrant=False)
 
                 return checkpointed_forward
 
-            layer.forward = make_checkpointed_forward(layer.forward)
+            block.forward = make_checkpointed_forward(block.forward)
+            checkpointed_count += 1
 
-        log.info("[GradCheckpoint] Gradient checkpointing HABILITADO en layer1-4")
+        log.info(
+            f"[GradCheckpoint] Gradient checkpointing HABILITADO en "
+            f"{checkpointed_count} dense blocks (dense_blocks[0..{checkpointed_count - 1}])"
+        )
         return True
     except Exception as e:
         log.warning(f"[GradCheckpoint] No se pudo habilitar: {e}")
@@ -388,7 +401,7 @@ def train(dry_run: bool = False) -> None:
     ).to(device)
 
     n_params = model.count_parameters()
-    log.info(f"[Expert3] Modelo MC3-18 creado: {n_params:,} parámetros entrenables")
+    log.info(f"[Expert3] Modelo DenseNet3D creado: {n_params:,} parámetros entrenables")
     _log_vram("post-model")
 
     # ── Gradient checkpointing ─────────────────────────────────────
@@ -452,7 +465,7 @@ def train(dry_run: bool = False) -> None:
     max_epochs = 1 if dry_run else EXPERT3_MAX_EPOCHS
 
     log.info(f"\n{'=' * 70}")
-    log.info(f"  INICIO DE ENTRENAMIENTO — Expert 3 (MC3-18 / LUNA16)")
+    log.info(f"  INICIO DE ENTRENAMIENTO — Expert 3 (DenseNet3D / LUNA16)")
     log.info(
         f"  Épocas máx: {max_epochs} | Batch efectivo: "
         f"{EXPERT3_BATCH_SIZE}×{EXPERT3_ACCUMULATION_STEPS}="
@@ -575,7 +588,7 @@ def train(dry_run: bool = False) -> None:
 
     # ── Resumen final ──────────────────────────────────────────────
     log.info(f"\n{'=' * 70}")
-    log.info(f"  ENTRENAMIENTO FINALIZADO — Expert 3 (MC3-18 / LUNA16)")
+    log.info(f"  ENTRENAMIENTO FINALIZADO — Expert 3 (DenseNet3D / LUNA16)")
     log.info(f"  Mejor val_loss: {best_val_loss:.4f}")
     if training_log:
         best_epoch = min(training_log, key=lambda x: x["val_loss"])
@@ -598,7 +611,7 @@ def train(dry_run: bool = False) -> None:
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(
-        description="Entrenamiento Expert 3 — MC3-18 / LUNA16"
+        description="Entrenamiento Expert 3 — DenseNet3D / LUNA16"
     )
     parser.add_argument(
         "--dry-run",

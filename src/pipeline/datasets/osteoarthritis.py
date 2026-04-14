@@ -7,17 +7,9 @@ Clases:
   2 = Leve (KL2)
   3 = Moderado (KL3)
   4 = Severo (KL4)
-
-Hallazgos implementados:
-  H1 → clases ordinales: CrossEntropyLoss con pesos + QWK como métrica
-  H2 → augmentation offline en el ZIP: detección por hash MD5 de muestra
-  H3 → sin metadatos de paciente: split por carpeta (OAI predefinido)
-  H5 → fronteras KL0↔KL1 y KL1↔KL2 son las más ambiguas
 """
 
 import logging
-import random
-import hashlib
 import numpy as np
 import torch
 from torch.utils.data import Dataset
@@ -31,12 +23,11 @@ from config import (
     IMAGENET_STD,
     OA_CLASS_NAMES,
     OA_N_CLASSES,
-    OA_BASE_IMG_COUNT,
 )
 
 log = logging.getLogger("fase0")
 
-# ── Transforms para EfficientNet-B0 (5 clases KL 0-4) ──────────────────
+# ── Transforms para EfficientNet-B3 (5 clases KL 0-4) ──────────────────
 TRANSFORM_TRAIN = transforms.Compose(
     [
         transforms.Resize((256, 256), antialias=True),
@@ -70,90 +61,6 @@ class OAKneeDataset(Dataset):
       mode="embedding" → FASE 0: (img, expert_id=2, img_name)
       mode="expert"    → FASE 2: (img, kl_label_int, img_name) — aug diferenciado
     """
-
-    @staticmethod
-    def compute_qwk(y_true: np.ndarray, y_pred: np.ndarray) -> float:
-        """QWK — Métrica principal para evaluación ordinal del Experto 2 (5 clases)."""
-        from sklearn.metrics import cohen_kappa_score
-
-        if len(y_true) == 0 or len(y_pred) == 0:
-            return 0.0
-        return float(
-            cohen_kappa_score(
-                y_true, y_pred, weights="quadratic", labels=[0, 1, 2, 3, 4]
-            )
-        )
-
-    @staticmethod
-    def evaluate_boundary_confusion(y_true: np.ndarray, y_pred: np.ndarray) -> dict:
-        """
-        Analiza la matriz de confusión 5×5 con foco en las fronteras entre
-        clases adyacentes KL0↔KL1, KL1↔KL2, KL2↔KL3, KL3↔KL4.
-
-        Retorna QWK, confusion matrix, error rates por frontera adyacente,
-        tasa de error severo (KL4 predicho como KL0), y recall por clase.
-        """
-        from sklearn.metrics import cohen_kappa_score, confusion_matrix as sk_cm
-
-        n_cls = 5
-        labels = list(range(n_cls))
-        cm = sk_cm(y_true, y_pred, labels=labels)
-        qwk = cohen_kappa_score(y_true, y_pred, weights="quadratic", labels=labels)
-
-        row_sums = np.maximum(cm.sum(axis=1), 1)
-
-        # Error rate por frontera adyacente: promedio de las confusiones en ambas
-        # direcciones entre clases i e i+1
-        boundary_errors = {}
-        for i in range(n_cls - 1):
-            err = (cm[i, i + 1] / row_sums[i] + cm[i + 1, i] / row_sums[i + 1]) / 2
-            boundary_errors[f"boundary_{i}{i + 1}_error_rate"] = float(err)
-
-        # Peor error clínico: KL4 (Severo) clasificado como KL0 (Normal)
-        severe_miss = cm[n_cls - 1, 0] / row_sums[n_cls - 1]
-
-        recall = {i: cm[i, i] / row_sums[i] for i in range(n_cls)}
-
-        result = {
-            "qwk": float(qwk),
-            "confusion_matrix": cm,
-            "severe_misclass_rate": float(severe_miss),
-            "per_class_recall": {i: float(r) for i, r in recall.items()},
-        }
-        result.update(boundary_errors)
-        return result
-
-    @staticmethod
-    def log_boundary_confusion(metrics: dict, epoch: int = -1) -> None:
-        """Imprime en el log un resumen de la matriz de confusión (5 clases)."""
-        ep_str = f"Época {epoch} — " if epoch >= 0 else ""
-        cm = metrics["confusion_matrix"]
-        n_cls = cm.shape[0]
-
-        recall_lines = "\n".join(
-            f"      Clase {i} {OA_CLASS_NAMES[i]:<18}: "
-            f"{metrics['per_class_recall'][i]:.3f}"
-            for i in range(n_cls)
-        )
-        cm_lines = "\n".join(f"      {cm[i]}" for i in range(n_cls))
-
-        boundary_lines = []
-        for i in range(n_cls - 1):
-            key = f"boundary_{i}{i + 1}_error_rate"
-            val = metrics.get(key, 0.0)
-            flag = "⚠ ALTA" if val > 0.25 else "✓ aceptable"
-            boundary_lines.append(f"    Frontera {i}↔{i + 1}: error={val:.3f} {flag}")
-
-        log.info(
-            f"[OA] {ep_str}Evaluación Experto 2:\n"
-            f"    QWK (métrica principal) : {metrics['qwk']:.4f}\n"
-            f"    Recall por clase:\n"
-            f"{recall_lines}\n"
-            f"    Matriz de confusión (filas=real, cols=pred):\n"
-            f"{cm_lines}\n" + "\n".join(boundary_lines) + "\n"
-            f"    Peor error: Severo→Normal = {metrics['severe_misclass_rate']:.3f} "
-            f"{'⚠⚠ CRÍTICO' if metrics['severe_misclass_rate'] > 0.05 else '✓'}"
-        )
 
     def __init__(self, root_dir, split="train", img_size=224, mode="embedding"):
         assert mode in ("embedding", "expert"), (
@@ -232,37 +139,8 @@ class OAKneeDataset(Dataset):
         cw = torch.tensor(total / (OA_N_CLASSES * counts_safe), dtype=torch.float32)
         self.class_weights = cw
         log.info(
-            f"[OA] H1 — class_weights CrossEntropyLoss: "
+            f"[OA] class_weights: "
             + " | ".join(f"Clase{i}:{cw[i]:.2f}" for i in range(OA_N_CLASSES))
-        )
-        log.info(
-            "[OA] H1 — Opciones de loss para FASE 2:\n"
-            "    Opción A (pragmática): CrossEntropyLoss(weight=dataset.class_weights)\n"
-            "    Opción B (ordinal): OrdinalLoss(n_classes=5)\n"
-            "    Métrica principal: QWK (cohen_kappa_score, weights='quadratic')."
-        )
-        log.info("[OA] H1 — ⚠ Augmentation: NUNCA usar RandomVerticalFlip.")
-
-        # ── H2: detectar augmentation offline ────────────────────────────
-        self._audit_augmentation_offline(split, total)
-
-        # ── Verificar canales de imagen ──────────────────────────────
-        self._verify_image_channels()
-
-        # ── Verificar consistencia de dimensiones ────────────────────
-        self._verify_image_dimensions()
-
-        # ── H3: documentar limitación de split ───────────────────────────
-        log.info(
-            f"[OA] H3 — Sin metadatos de paciente: split '{split}' tomado tal cual "
-            f"de las carpetas del ZIP."
-        )
-
-        # ── H5: documentar fronteras ambiguas ────────────────────────────
-        log.info(
-            "[OA] H5 — Fronteras más difíciles: KL0↔KL1 y KL1↔KL2 "
-            "(alta ambigüedad inter-observador). "
-            "HERRAMIENTA: evaluate_boundary_confusion() para monitorear."
         )
 
         # ── Transform pipeline ────────────────────────────────────────────
@@ -273,92 +151,6 @@ class OAKneeDataset(Dataset):
             self._transform = TRANSFORM_TRAIN
         else:
             self._transform = TRANSFORM_VAL
-
-    def _audit_augmentation_offline(self, split: str, total_imgs: int):
-        """H2 — Detecta si el ZIP contiene augmentation offline."""
-        expected = {"train": 5778, "val": 826, "test": 1656}.get(
-            split, OA_BASE_IMG_COUNT
-        )
-        ratio = total_imgs / max(expected, 1)
-
-        if ratio > 1.10:
-            log.warning(
-                f"[OA] H2 — El split '{split}' tiene {total_imgs:,} imágenes "
-                f"vs {expected:,} esperadas (ratio={ratio:.2f}x). "
-                f"Sugiere augmentation offline."
-            )
-            self._aug_offline_detected = True
-        else:
-            log.info(
-                f"[OA] H2 — Conteo consistente con base OAI "
-                f"({total_imgs:,} vs ~{expected:,}, ratio={ratio:.2f}x)."
-            )
-            self._aug_offline_detected = False
-
-        if len(self.samples) >= 20:
-            sample_paths = [p for p, _ in random.sample(self.samples, 20)]
-            hashes = {}
-            dup_count = 0
-            for p in sample_paths:
-                try:
-                    md5 = hashlib.md5(p.read_bytes()).hexdigest()
-                    if md5 in hashes:
-                        dup_count += 1
-                    else:
-                        hashes[md5] = p.name
-                except Exception:
-                    pass
-            if dup_count:
-                log.warning(
-                    f"[OA] H2 — {dup_count}/20 imágenes de muestra con hash MD5 duplicado."
-                )
-
-    def _verify_image_channels(self):
-        """Verifica que las imágenes son grises guardadas como RGB."""
-        if not self.samples:
-            return
-        n_check = min(5, len(self.samples))
-        sample_paths = [p for p, _ in random.sample(self.samples, n_check)]
-        n_gray_rgb = 0
-        n_true_rgb = 0
-        for p in sample_paths:
-            try:
-                arr = np.array(Image.open(p).convert("RGB"))
-                if np.allclose(arr[:, :, 0], arr[:, :, 1], atol=2) and np.allclose(
-                    arr[:, :, 0], arr[:, :, 2], atol=2
-                ):
-                    n_gray_rgb += 1
-                else:
-                    n_true_rgb += 1
-            except Exception:
-                pass
-        if n_true_rgb == 0:
-            log.info(
-                f"[OA] {n_gray_rgb}/{n_check} imágenes son grises guardadas como RGB ✓"
-            )
-        else:
-            log.warning(
-                f"[OA] {n_true_rgb}/{n_check} imágenes tienen 3 canales distintos."
-            )
-
-    def _verify_image_dimensions(self):
-        """Verifica consistencia de dimensiones."""
-        if not self.samples:
-            return
-        n_check = min(10, len(self.samples))
-        sizes = set()
-        for p, _ in random.sample(self.samples, n_check):
-            try:
-                sizes.add(Image.open(p).size)
-            except Exception:
-                pass
-        if len(sizes) == 1:
-            log.debug(f"[OA] Dimensiones uniformes en muestra: {next(iter(sizes))} ✓")
-        else:
-            log.info(
-                f"[OA] Dimensiones variables en muestra: {sizes}. "
-                f"Resize en transform compensará las diferencias."
-            )
 
     def __len__(self):
         return len(self.samples)

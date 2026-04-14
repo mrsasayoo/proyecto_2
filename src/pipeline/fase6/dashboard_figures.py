@@ -46,7 +46,7 @@ EXPERT_LABELS = [
     "Expert 2\nOA Knee\n(EfficientNet-B0)",
     "Expert 3\nLUNA16\n(MC3-18)",
     "Expert 4\nPáncreas\n(Swin3D-Tiny)",
-    "Expert 5\nCAE / OOD\n(ConvAutoEncoder)",
+    "Expert 5\nRes-U-Net AE / OOD\n(ConditionedResUNetAE)",
 ]
 
 EXPERT_SHORT_NAMES = [
@@ -55,7 +55,7 @@ EXPERT_SHORT_NAMES = [
     "OA-Knee",
     "LUNA16",
     "Páncreas",
-    "CAE/OOD",
+    "Res-U-Net/OOD",
 ]
 
 ROUTER_NAMES = [
@@ -340,7 +340,7 @@ def generate_figure1_architecture(output_dir: Path, logger: logging.Logger) -> P
     legend_items = [
         mpatches.Patch(color=COLOR_EXPERT_2D, label="Expertos 2D (Chest, ISIC, OA)"),
         mpatches.Patch(color=COLOR_EXPERT_3D, label="Expertos 3D (LUNA, Páncreas)"),
-        mpatches.Patch(color=COLOR_CAE, label="Experto CAE / OOD"),
+        mpatches.Patch(color=COLOR_CAE, label="Experto Res-U-Net AE / OOD"),
         mpatches.Patch(color=COLOR_BACKBONE, label="Backbone compartido"),
         mpatches.Patch(color=COLOR_ROUTER, label="Router (entropía)"),
     ]

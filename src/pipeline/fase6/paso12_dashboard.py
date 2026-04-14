@@ -140,13 +140,13 @@ _ARCHITECTURE_TRACE = """\
    → Softmax: gates g_i ∈ [0, 1], Σg_i = 1
    → Selección: expert_id = argmax(g)
 
-5. EXPERTOS (5 dominio + 1 CAE)
+5. EXPERTOS (5 dominio + 1 Res-U-Net AE)
    → Expert 0: ConvNeXt-Tiny       — Chest X-Ray (14 clases)
     → Expert 1: ConvNeXt-Small       — ISIC Dermatología (8 clases)
    → Expert 2: EfficientNet-B0     — OA Knee (5 clases)
    → Expert 3: MC3-18              — LUNA16 Nódulos 3D (2 clases)
    → Expert 4: Swin3D-Tiny         — Páncreas MSD 3D (2 clases)
-   → Expert 5: ConvAutoEncoder     — OOD / Reconstrucción
+   → Expert 5: ConditionedResUNetAE — OOD / Reconstrucción
 
 6. SALIDA
    → Logits del experto seleccionado
@@ -187,8 +187,8 @@ _COMPONENT_DESCRIPTIONS: dict[str, str] = {
         "Clasificador 3D para detección de PDAC en el páncreas (MSD). "
         "Swin Transformer 3D Tiny con ventanas desplazadas."
     ),
-    "Expert 5 — ConvAutoEncoder (OOD)": (
-        "Autoencoder convolucional para detección out-of-distribution. "
+    "Expert 5 — ConditionedResUNetAE (OOD)": (
+        "Res-U-Net Autoencoder condicionado por dominio (FiLM) para detección out-of-distribution. "
         "Reconstruye la imagen de entrada; un error de reconstrucción alto "
         "indica muestra OOD. No produce clasificación directa."
     ),

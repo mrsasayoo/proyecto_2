@@ -1,122 +1,166 @@
 """
-Expert 1 — ConvNeXt-Tiny para clasificación multilabel de ChestXray14.
+Expert 1 — ConvNeXt-Tiny (timm, pretrained) para clasificación multilabel de ChestXray14.
 
 Arquitectura:
-    Backbone: torchvision.models.convnext_tiny (Liu et al., 2022)
+    Backbone: timm convnext_tiny.in12k_ft_in1k (Liu et al., 2022)
+              Pre-entrenado en ImageNet-12K, fine-tuned en ImageNet-1K.
+    Adapter:  domain_conv — bloque convolucional residual post-backbone
+              que adapta las features al dominio médico sin destruir
+              las representaciones pretrained.
+    Head:     AdaptiveAvgPool2d(1) → Flatten → Dropout → Linear(768, 14)
     Entrada:  [B, 3, 224, 224] — radiografía de tórax RGB, float32
     Salida:   [B, 14] — logits para 14 patologías (multilabel, BCEWithLogitsLoss)
 
-Adaptaciones respecto al ConvNeXt-Tiny original (ImageNet, 1000 clases):
-    1. Sin pesos preentrenados (weights=None) — entrenamiento from scratch.
-    2. Cabeza clasificadora: 1000 → 14 clases.
-    3. Dropout(p=0.3) antes de la capa de clasificación final.
+Estrategia de entrenamiento: LP-FT (Linear Probing → Fine-Tuning).
+    - LP: freeze_backbone() — solo head + domain_conv entrenables.
+    - FT: unfreeze_backbone() — todo el modelo con LR reducido.
 
-Conteo de parámetros:
-    ConvNeXt-Tiny tiene ~28.6M parámetros totales.
-    Con ~86K muestras de entrenamiento, el ratio params/datos es ~332:1,
-    manejable con regularización estándar (dropout, weight_decay, augmentation).
+MODEL_MEAN y MODEL_STD se resuelven programáticamente desde timm para
+garantizar consistencia con el backbone pretrained.
 
 Autor: Pipeline Expert1 — Fase 2
 """
 
+from __future__ import annotations
+
+import timm
+import timm.data
 import torch
 import torch.nn as nn
-from torchvision.models import convnext_tiny
+
+from pipeline.fase2.expert1_config import (
+    EXPERT1_BACKBONE,
+    EXPERT1_DROPOUT_FC,
+    EXPERT1_NUM_CLASSES,
+)
 
 
-class Expert1ConvNeXtTiny(nn.Module):
-    """
-    ConvNeXt-Tiny para clasificación multilabel de 14 patologías torácicas.
+class Expert1ConvNeXt(nn.Module):
+    """ConvNeXt-Tiny pretrained para clasificación multilabel de 14 patologías.
 
-    Usa torchvision.models.convnext_tiny sin pesos preentrenados.
-    La cabeza clasificadora original (1000 clases ImageNet) se reemplaza
-    por una capa con Dropout + Linear(768, 14).
+    Usa ``timm.create_model`` con ``num_classes=0`` para obtener features puras
+    del backbone. Un adapter residual (``domain_conv``) adapta las features al
+    dominio de rayos X antes de pasar por pooling global y la cabeza clasificadora.
 
-    Entrada:  [B, 3, 224, 224] — imagen RGB normalizada (ImageNet stats)
-    Salida:   [B, 14] — logits crudos (antes de sigmoid)
+    Attributes:
+        model_mean: tupla RGB de medias de normalización del backbone.
+        model_std: tupla RGB de desviaciones de normalización del backbone.
 
     Args:
-        fc_dropout_p: probabilidad de Dropout antes de la FC final.
-            Default: 0.3 (de expert1_config.EXPERT1_DROPOUT_FC).
-        num_classes: número de clases de salida. Default: 14.
+        backbone: nombre del modelo timm. Default: config.EXPERT1_BACKBONE.
+        num_classes: clases de salida. Default: config.EXPERT1_NUM_CLASSES (14).
+        dropout_fc: dropout antes de la FC final. Default: config.EXPERT1_DROPOUT_FC.
+        pretrained: cargar pesos pretrained. Default: True.
     """
 
     def __init__(
         self,
-        fc_dropout_p: float = 0.3,
-        num_classes: int = 14,
-    ):
+        backbone: str = EXPERT1_BACKBONE,
+        num_classes: int = EXPERT1_NUM_CLASSES,
+        dropout_fc: float = EXPERT1_DROPOUT_FC,
+        pretrained: bool = True,
+    ) -> None:
         super().__init__()
 
-        # ── Cargar backbone ConvNeXt-Tiny sin pesos preentrenados ───────
-        backbone = convnext_tiny(weights=None)
+        # ── Backbone pretrained (sin cabeza clasificadora) ──────────────
+        self.backbone = timm.create_model(
+            backbone,
+            pretrained=pretrained,
+            num_classes=0,
+        )
+        feat_dim: int = self.backbone.num_features
 
-        # ── Adaptar cabeza clasificadora: 1000 → 14 clases ─────────────
-        # Estructura original del classifier en torchvision ConvNeXt:
-        #   backbone.classifier = Sequential(
-        #       [0] LayerNorm2d(768),
-        #       [1] Flatten(start_dim=1),
-        #       [2] Linear(768, 1000)
-        #   )
-        # Reemplazamos solo el Linear final con Dropout + Linear(768, num_classes)
-        in_features = backbone.classifier[2].in_features  # 768
-        backbone.classifier[2] = nn.Sequential(
-            nn.Dropout(p=fc_dropout_p),
-            nn.Linear(in_features, num_classes),
+        # ── Resolver estadísticas de normalización del backbone ─────────
+        _cfg = timm.data.resolve_data_config({}, model=self.backbone)
+        self.model_mean: tuple[float, ...] = _cfg["mean"]
+        self.model_std: tuple[float, ...] = _cfg["std"]
+
+        # ── domain_conv — adapter residual post-backbone ────────────────
+        self.domain_conv = nn.Sequential(
+            nn.Conv2d(feat_dim, feat_dim, 3, padding=1, bias=False),
+            nn.BatchNorm2d(feat_dim),
+            nn.GELU(),
+            nn.Conv2d(feat_dim, feat_dim, 1, bias=False),
+            nn.BatchNorm2d(feat_dim),
         )
 
-        self.model = backbone
+        # ── Pooling global + cabeza clasificadora ───────────────────────
+        self.pool = nn.AdaptiveAvgPool2d(1)
+        self.head = nn.Sequential(
+            nn.Flatten(),
+            nn.Dropout(p=dropout_fc),
+            nn.Linear(feat_dim, num_classes),
+        )
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        """
-        Forward pass del modelo ConvNeXt-Tiny.
+        """Forward pass.
 
         Args:
-            x: tensor [B, 3, 224, 224] — imagen RGB normalizada
+            x: tensor ``[B, 3, 224, 224]`` — imagen RGB normalizada.
 
         Returns:
-            logits: tensor [B, 14] — logits crudos (antes de sigmoid)
+            Logits ``[B, num_classes]`` (antes de sigmoid).
         """
-        return self.model(x)
+        feat = self.backbone.forward_features(x)  # [B, C, H, W]
+        feat = feat + self.domain_conv(feat)  # residual
+        feat = self.pool(feat)  # [B, C, 1, 1]
+        return self.head(feat)  # [B, num_classes]
+
+    def freeze_backbone(self) -> None:
+        """Congela todos los parámetros del backbone (fase LP)."""
+        for p in self.backbone.parameters():
+            p.requires_grad = False
+
+    def unfreeze_backbone(self) -> None:
+        """Descongela todos los parámetros del backbone (fase FT)."""
+        for p in self.backbone.parameters():
+            p.requires_grad = True
 
     def count_parameters(self) -> int:
-        """Retorna el número total de parámetros entrenables del modelo."""
+        """Número de parámetros entrenables (requires_grad=True)."""
         return sum(p.numel() for p in self.parameters() if p.requires_grad)
 
     def count_all_parameters(self) -> int:
-        """Retorna el número total de parámetros (entrenables + congelados)."""
+        """Número total de parámetros (entrenables + congelados)."""
         return sum(p.numel() for p in self.parameters())
 
 
-def _test_model():
-    """Verificación rápida: instanciar, forward pass, conteo de parámetros."""
+# ── Alias de compatibilidad con imports existentes ──────────────────────
+Expert1ConvNeXtTiny = Expert1ConvNeXt
+
+
+def _test_model() -> None:
+    """Verificación rápida: instanciar, forward pass, freeze/unfreeze, conteo."""
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    print(f"[Expert1/ConvNeXt-Tiny] Dispositivo: {device}")
+    print(f"[Expert1/ConvNeXt] Dispositivo: {device}")
 
-    model = Expert1ConvNeXtTiny(
-        fc_dropout_p=0.3,
-        num_classes=14,
-    ).to(device)
+    model = Expert1ConvNeXt().to(device)
 
-    # Forward pass con tensor dummy
+    print(f"[Expert1/ConvNeXt] mean={model.model_mean}  std={model.model_std}")
+
     x = torch.randn(2, 3, 224, 224, device=device)
     model.eval()
     with torch.no_grad():
         out = model(x)
 
-    n_params = model.count_parameters()
-    print(f"[Expert1/ConvNeXt-Tiny] Input shape:  {list(x.shape)}")
-    print(f"[Expert1/ConvNeXt-Tiny] Output shape: {list(out.shape)}")
-    print(f"[Expert1/ConvNeXt-Tiny] Params: {n_params:,}")
-    print(f"[Expert1/ConvNeXt-Tiny] Output values: {out}")
+    total = model.count_all_parameters()
+    trainable = model.count_parameters()
+    print(f"[Expert1/ConvNeXt] Input shape:  {list(x.shape)}")
+    print(f"[Expert1/ConvNeXt] Output shape: {list(out.shape)}")
+    print(f"[Expert1/ConvNeXt] Params total: {total:,}  trainable: {trainable:,}")
 
-    # Validaciones
-    assert out.shape == (2, 14), (
-        f"Shape de salida incorrecto: {out.shape}, esperado (2, 14)"
-    )
-    assert n_params > 0, "Modelo sin parámetros entrenables"
-    print(f"[Expert1/ConvNeXt-Tiny] Verificación completada exitosamente")
-    return model
+    model.freeze_backbone()
+    frozen_trainable = model.count_parameters()
+    print(f"[Expert1/ConvNeXt] Trainable after freeze: {frozen_trainable:,}")
+
+    model.unfreeze_backbone()
+    unfrozen_trainable = model.count_parameters()
+    print(f"[Expert1/ConvNeXt] Trainable after unfreeze: {unfrozen_trainable:,}")
+
+    assert out.shape == (2, 14), f"Shape incorrecto: {out.shape}"
+    assert frozen_trainable < trainable, "freeze_backbone no redujo trainables"
+    assert unfrozen_trainable == trainable, "unfreeze_backbone no restauró trainables"
+    print("[Expert1/ConvNeXt] Verificación completada exitosamente")
 
 
 if __name__ == "__main__":

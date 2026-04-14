@@ -1,9 +1,9 @@
 """
-Configuración de entrenamiento para Expert OA Knee — EfficientNet-B0 (expert_id=2).
+Configuración de entrenamiento para Expert OA Knee — EfficientNet-B3 (expert_id=2).
 
 Fuente de verdad para todos los hiperparámetros del experto OA en Fase 2.
 
-Arquitectura: EfficientNet-B0 (pretrained ImageNet), fine-tuning con Adam diferencial.
+Arquitectura: EfficientNet-B3 (pretrained ImageNet), fine-tuning con Adam diferencial.
 Tarea: clasificación de 5 clases — grados Kellgren-Lawrence 0-4.
 Loss: CrossEntropyLoss con class_weights (inverse-frequency).
 Métrica principal: val_f1_macro (F1-score macro).
@@ -18,14 +18,15 @@ Análisis del dataset:
   - Preprocesado: CLAHE antes del resize (interno en OAKneeDataset)
 
 Cambios respecto a la versión anterior (VGG16-BN):
-  - Modelo: VGG16-BN (from scratch) → EfficientNet-B0 (pretrained, fine-tune)
+  - Modelo: VGG16-BN (from scratch) → EfficientNet-B3 (pretrained, fine-tune)
   - Clases: 3 (Normal/Leve/Severo) → 5 (KL 0-4)
   - Optimizador: AdamW uniforme → Adam diferencial (lr_backbone ≠ lr_head)
   - Scheduler: CosineAnnealingWarmRestarts → CosineAnnealingLR
   - Épocas: 100 → 30
   - Dropout: 0.5 → 0.4
   - Accum steps: 4 → 2 (batch efectivo 128 → 64)
-  - Métrica principal: QWK → val_f1_macro
+  - Métrica principal: val_f1_macro
+  - Feature dim head: 1280 (B0) → 1536 (B3)
 """
 
 # ── Identidad del experto ───────────────────────────────────
@@ -45,15 +46,15 @@ EXPERT_OA_CLASS_NAMES: list[str] = [
 """Nombres legibles de las 5 clases KL (índice = grado KL)."""
 
 # ── Modelo ──────────────────────────────────────────────────
-EXPERT_OA_MODEL_NAME = "efficientnet_b0"
-"""Arquitectura base. EfficientNet-B0 pretrained en ImageNet."""
+EXPERT_OA_MODEL_NAME = "efficientnet_b3"
+"""Arquitectura base. EfficientNet-B3 pretrained en ImageNet."""
 
 EXPERT_OA_DROPOUT_FC = 0.4
 """Dropout antes de la capa de clasificación. Reducido respecto a VGG16-BN
-(0.5 → 0.4) porque EfficientNet-B0 tiene ~5.3M params vs ~131M de VGG16."""
+(0.5 → 0.4). EfficientNet-B3 tiene ~10.7M params."""
 
 EXPERT_OA_IMG_SIZE = 224
-"""Tamaño de imagen de entrada (224×224 px). Estándar EfficientNet-B0."""
+"""Tamaño de imagen de entrada (224×224 px)."""
 
 # ── Optimizador (Adam diferencial) ──────────────────────────
 EXPERT_OA_OPTIMIZER = "Adam"
@@ -73,11 +74,11 @@ Permite al head adaptarse rápido a las 5 clases KL."""
 
 EXPERT_OA_WEIGHT_DECAY = 1e-4
 """Weight decay (L2 regularization) en Adam. Valor moderado para
-EfficientNet-B0 pretrained (~5.3M params)."""
+EfficientNet-B3 pretrained (~10.7M params)."""
 
 # ── Batch y entrenamiento ───────────────────────────────────
 EXPERT_OA_BATCH_SIZE = 32
-"""Batch size real por GPU. Con imágenes 224×224 RGB y EfficientNet-B0
+"""Batch size real por GPU. Con imágenes 224×224 RGB y EfficientNet-B3
 en FP16, batch_size=32 cabe cómodamente en ~4-6 GB VRAM."""
 
 EXPERT_OA_ACCUMULATION_STEPS = 2
@@ -90,7 +91,7 @@ acelera ~1.5x en GPUs con Tensor Cores."""
 
 # ── Scheduler y stopping ───────────────────────────────────
 EXPERT_OA_MAX_EPOCHS = 30
-"""Máximo de épocas. Con EfficientNet-B0 pretrained y Adam diferencial,
+"""Máximo de épocas. Con EfficientNet-B3 pretrained y Adam diferencial,
 la convergencia es más rápida que VGG16-BN from scratch."""
 
 EXPERT_OA_SCHEDULER = "CosineAnnealingLR"
@@ -125,7 +126,7 @@ EXPERT_OA_TARGET_METRIC_THRESHOLD = 0.72
 
 # ── Resumen ejecutivo para logs ─────────────────────────────
 EXPERT_OA_CONFIG_SUMMARY = (
-    "Expert OA (Knee): EfficientNet-B0 | 5 clases KL | "
+    "Expert OA (Knee): EfficientNet-B3 | 5 clases KL | "
     "Adam diferencial (backbone=5e-5, head=5e-4) | WD=1e-4 | "
     "CosineAnnealingLR(T_max=30) | dropout=0.4 | "
     "batch=32 | accum=2 (efectivo=64) | FP16=True | "
