@@ -36,10 +36,10 @@ for _p in (_SRC, _PIPELINE, _FASE2, _ROUTERS):
 # Imports — using the canonical class names from each expert file.
 # ---------------------------------------------------------------------------
 from pipeline.fase2.models.expert1_convnext import Expert1ConvNeXt  # noqa: E402
-from pipeline.fase2.models.expert2_efficientnet import Expert2ConvNeXtSmall  # noqa: E402
-from pipeline.fase2.models.expert_oa_vgg16bn import ExpertOAEfficientNetB3  # noqa: E402
-from pipeline.fase2.models.expert3_r3d18 import Expert3DenseNet3D  # noqa: E402
-from pipeline.fase2.models.expert4_swin3d import ExpertPancreasResNet3D  # noqa: E402
+from pipeline.fase2.models.expert2_convnext_small import Expert2ConvNeXtSmall  # noqa: E402
+from pipeline.fase2.models.expert_oa_efficientnet_b3 import ExpertOAEfficientNetB3  # noqa: E402
+from pipeline.fase2.models.expert3_densenet3d import Expert3DenseNet3D  # noqa: E402
+from pipeline.fase2.models.expert4_resnet3d import ExpertPancreasResNet3D  # noqa: E402
 from pipeline.fase3.models.expert6_resunet import ConditionedResUNetAE  # noqa: E402
 
 DEVICE = torch.device("cpu")

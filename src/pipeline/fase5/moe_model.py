@@ -162,10 +162,10 @@ def build_moe_system_dry_run(d_model: int = 192) -> MoESystem:
         MoESystem listo para forward pass sintetico.
     """
     from fase2.models.expert1_convnext import Expert1ConvNeXtTiny
-    from fase2.models.expert2_efficientnet import Expert2ConvNeXtSmall
-    from fase2.models.expert_oa_vgg16bn import ExpertOAEfficientNetB0
-    from fase2.models.expert3_r3d18 import Expert3MC318
-    from fase2.models.expert4_swin3d import ExpertPancreasSwin3D
+    from fase2.models.expert2_convnext_small import Expert2ConvNeXtSmall
+    from fase2.models.expert_oa_efficientnet_b3 import ExpertOAEfficientNetB0
+    from fase2.models.expert3_densenet3d import Expert3MC318
+    from fase2.models.expert4_resnet3d import ExpertPancreasSwin3D
     from fase3.models.expert6_resunet import ConditionedResUNetAE
 
     # Import LinearGatingHead directly — fase2/routers/__init__.py uses bare

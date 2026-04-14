@@ -22,7 +22,7 @@ Uso:
     done
 
 Dependencias:
-    - src/pipeline/fase2/models/expert4_swin3d.py: ExpertPancreasSwin3D
+    - src/pipeline/fase2/models/expert4_resnet3d.py: ExpertPancreasSwin3D
     - src/pipeline/fase2/dataloader_expert4.py: build_dataloaders_expert4
     - src/pipeline/fase2/expert4_config.py: hiperparámetros
     - src/pipeline/losses.py: FocalLoss
@@ -47,7 +47,7 @@ _PIPELINE_ROOT = _PROJECT_ROOT / "src" / "pipeline"
 if str(_PIPELINE_ROOT) not in sys.path:
     sys.path.insert(0, str(_PIPELINE_ROOT))
 
-from fase2.models.expert4_swin3d import ExpertPancreasSwin3D
+from fase2.models.expert4_resnet3d import ExpertPancreasSwin3D
 from fase2.dataloader_expert4 import build_dataloaders_expert4
 from fase2.expert4_config import (
     EXPERT4_LR,

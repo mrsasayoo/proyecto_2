@@ -19,7 +19,7 @@ Uso:
     python src/pipeline/fase2/train_expert_oa.py
 
 Dependencias:
-    - src/pipeline/fase2/models/expert_oa_vgg16bn.py: ExpertOAEfficientNetB0
+    - src/pipeline/fase2/models/expert_oa_efficientnet_b3.py: ExpertOAEfficientNetB0
     - src/pipeline/fase2/dataloader_expert_oa.py: get_oa_dataloaders
     - src/pipeline/fase2/expert_oa_config.py: hiperparámetros
     - src/pipeline/datasets/osteoarthritis.py: OAKneeDataset
@@ -49,7 +49,7 @@ _FASE1_ROOT = _PIPELINE_ROOT / "fase1"
 if str(_FASE1_ROOT) not in sys.path:
     sys.path.insert(0, str(_FASE1_ROOT))
 
-from fase2.models.expert_oa_vgg16bn import ExpertOAEfficientNetB0
+from fase2.models.expert_oa_efficientnet_b3 import ExpertOAEfficientNetB0
 from fase2.dataloader_expert_oa import get_oa_dataloaders
 from fase2.expert_oa_config import (
     EXPERT_OA_LR_BACKBONE,

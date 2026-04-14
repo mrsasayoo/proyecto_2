@@ -126,10 +126,12 @@ def build_moe_system(
     """
     from src.pipeline.fase5.moe_model import MoESystem
     from src.pipeline.fase2.models.expert1_convnext import Expert1ConvNeXtTiny
-    from src.pipeline.fase2.models.expert2_efficientnet import Expert2ConvNeXtSmall
-    from src.pipeline.fase2.models.expert_oa_vgg16bn import ExpertOAEfficientNetB0
-    from src.pipeline.fase2.models.expert3_r3d18 import Expert3MC318
-    from src.pipeline.fase2.models.expert4_swin3d import ExpertPancreasSwin3D
+    from src.pipeline.fase2.models.expert2_convnext_small import Expert2ConvNeXtSmall
+    from src.pipeline.fase2.models.expert_oa_efficientnet_b3 import (
+        ExpertOAEfficientNetB0,
+    )
+    from src.pipeline.fase2.models.expert3_densenet3d import Expert3MC318
+    from src.pipeline.fase2.models.expert4_resnet3d import ExpertPancreasSwin3D
     from src.pipeline.fase3.models.expert6_resunet import ConditionedResUNetAE
     from linear import LinearGatingHead
 

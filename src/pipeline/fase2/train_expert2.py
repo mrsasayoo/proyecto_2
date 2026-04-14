@@ -21,7 +21,7 @@ Uso:
     python src/pipeline/fase2/train_expert2.py
 
 Dependencias:
-    - src/pipeline/fase2/models/expert2_efficientnet.py: Expert2ConvNeXtSmall
+    - src/pipeline/fase2/models/expert2_convnext_small.py: Expert2ConvNeXtSmall
     - src/pipeline/fase2/dataloader_expert2.py: build_dataloaders_expert2
     - src/pipeline/fase2/expert2_config.py: hiperparámetros por fase
 """
@@ -51,7 +51,7 @@ _PIPELINE_ROOT = _PROJECT_ROOT / "src" / "pipeline"
 if str(_PIPELINE_ROOT) not in sys.path:
     sys.path.insert(0, str(_PIPELINE_ROOT))
 
-from fase2.models.expert2_efficientnet import Expert2ConvNeXtSmall
+from fase2.models.expert2_convnext_small import Expert2ConvNeXtSmall
 from fase2.dataloader_expert2 import build_dataloaders_expert2
 from fase2.losses import FocalLossMultiClass
 from datasets.isic import cutmix_data, mixup_data

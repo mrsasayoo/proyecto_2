@@ -16,7 +16,7 @@ Uso:
     python src/pipeline/fase2/train_expert3.py
 
 Dependencias:
-    - src/pipeline/fase2/models/expert3_r3d18.py: Expert3MC318 (alias de Expert3DenseNet3D)
+    - src/pipeline/fase2/models/expert3_densenet3d.py: Expert3MC318 (alias de Expert3DenseNet3D)
     - src/pipeline/fase2/dataloader_expert3.py: build_dataloaders_expert3
     - src/pipeline/fase2/expert3_config.py: hiperparámetros
     - src/pipeline/losses.py: FocalLoss
@@ -42,7 +42,7 @@ _PIPELINE_ROOT = _PROJECT_ROOT / "src" / "pipeline"
 if str(_PIPELINE_ROOT) not in sys.path:
     sys.path.insert(0, str(_PIPELINE_ROOT))
 
-from fase2.models.expert3_r3d18 import Expert3MC318
+from fase2.models.expert3_densenet3d import Expert3MC318
 from fase2.dataloader_expert3 import build_dataloaders_expert3
 from fase2.expert3_config import (
     EXPERT3_LR,
