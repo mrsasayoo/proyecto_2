@@ -28,7 +28,7 @@ import timm.data
 import torch
 import torch.nn as nn
 
-from pipeline.fase2.expert1_config import (
+from fase2.expert1_config import (
     EXPERT1_BACKBONE,
     EXPERT1_DROPOUT_FC,
     EXPERT1_NUM_CLASSES,

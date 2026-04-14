@@ -36,7 +36,7 @@ from pathlib import Path
 import albumentations as A
 import torch
 from albumentations.pytorch import ToTensorV2
-from torch.utils.data import DataLoader, Dataset
+from torch.utils.data import DataLoader, Dataset, Subset
 
 # ── Agregar src/pipeline al path para imports ──────────────────────────
 _PROJECT_ROOT = Path(__file__).resolve().parents[3]  # proyecto_2/
@@ -119,6 +119,7 @@ def build_expert1_dataloaders(
     batch_size: int = EXPERT1_BATCH_SIZE,
     num_workers: int = EXPERT1_NUM_WORKERS,
     use_cache: bool = True,
+    max_samples: int | None = None,
 ) -> dict[str, DataLoader | torch.Tensor]:
     """Construye DataLoaders para train, val, test y test_flip (TTA).
 
@@ -135,6 +136,9 @@ def build_expert1_dataloaders(
         batch_size: tamaño de batch por GPU. Default: EXPERT1_BATCH_SIZE (32).
         num_workers: workers para DataLoader. Default: EXPERT1_NUM_WORKERS (4).
         use_cache: precargar imágenes en RAM. Default: True.
+        max_samples: si se proporciona, limita cada dataset a este número de
+            muestras y desactiva el preload en RAM. Útil para dry-run rápido
+            sin cargar ~90K imágenes. Default: None (usa todo el dataset).
 
     Returns:
         dict con claves:
@@ -175,6 +179,14 @@ def build_expert1_dataloaders(
         f"Cache: {use_cache}"
     )
     log.info(f"[Expert1/DataLoader] model_mean={model_mean}  model_std={model_std}")
+
+    # ── Dry-run: desactivar cache y limitar muestras ───────────────────
+    if max_samples is not None:
+        use_cache = False
+        log.info(
+            f"[Expert1/DataLoader] max_samples={max_samples} — "
+            f"cache desactivado, cada dataset limitado a {max_samples} muestras"
+        )
 
     # ── Builds transforms ──────────────────────────────────────────────
     train_tfm = _build_train_transform(model_mean, model_std)
@@ -222,7 +234,7 @@ def build_expert1_dataloaders(
         use_cache=use_cache,
     )
 
-    # ── Extraer pos_weight del dataset de entrenamiento ────────────────
+    # ── Extraer pos_weight ANTES de hacer Subset (necesita dataset completo) ─
     pos_weight = train_ds.class_weights
     if pos_weight is None:
         raise RuntimeError(
@@ -234,6 +246,32 @@ def build_expert1_dataloaders(
         f"min: {pos_weight.min():.1f} | max: {pos_weight.max():.1f}"
     )
 
+    # ── Limitar muestras si max_samples está activo (dry-run) ──────────
+    train_ds_final: Dataset = train_ds
+    val_ds_final: Dataset = val_ds
+    test_ds_final: Dataset = test_ds
+    test_flip_ds_final: Dataset = test_flip_ds
+
+    if max_samples is not None:
+        for name, ds in [
+            ("train", train_ds),
+            ("val", val_ds),
+            ("test", test_ds),
+            ("test_flip", test_flip_ds),
+        ]:
+            log.info(
+                f"[Expert1/DataLoader] {name}: {len(ds):,} → "
+                f"{min(max_samples, len(ds)):,} muestras (max_samples={max_samples})"
+            )
+        n_train = min(max_samples, len(train_ds))
+        n_val = min(max_samples, len(val_ds))
+        n_test = min(max_samples, len(test_ds))
+        n_test_flip = min(max_samples, len(test_flip_ds))
+        train_ds_final = Subset(train_ds, list(range(n_train)))
+        val_ds_final = Subset(val_ds, list(range(n_val)))
+        test_ds_final = Subset(test_ds, list(range(n_test)))
+        test_flip_ds_final = Subset(test_flip_ds, list(range(n_test_flip)))
+
     # ── Crear DataLoaders ──────────────────────────────────────────────
     common_kwargs: dict[str, object] = {
         "num_workers": num_workers,
@@ -242,7 +280,7 @@ def build_expert1_dataloaders(
     }
 
     train_loader = DataLoader(
-        train_ds,
+        train_ds_final,
         batch_size=batch_size,
         shuffle=True,
         drop_last=True,
@@ -250,7 +288,7 @@ def build_expert1_dataloaders(
     )
 
     val_loader = DataLoader(
-        val_ds,
+        val_ds_final,
         batch_size=batch_size,
         shuffle=False,
         drop_last=False,
@@ -258,7 +296,7 @@ def build_expert1_dataloaders(
     )
 
     test_loader = DataLoader(
-        test_ds,
+        test_ds_final,
         batch_size=batch_size,
         shuffle=False,
         drop_last=False,
@@ -266,7 +304,7 @@ def build_expert1_dataloaders(
     )
 
     test_flip_loader = DataLoader(
-        test_flip_ds,
+        test_flip_ds_final,
         batch_size=batch_size,
         shuffle=False,
         drop_last=False,

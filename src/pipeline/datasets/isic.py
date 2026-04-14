@@ -21,6 +21,7 @@ Transforms online:
 
 import logging
 import hashlib
+import math
 import numpy as np
 import torch
 from torch.utils.data import Dataset
@@ -226,7 +227,7 @@ class ISICDataset(Dataset):
         """Resize manteniendo aspecto: lado corto = target_size."""
         w, h = img.size
         scale = target_size / min(w, h)
-        new_w, new_h = int(w * scale), int(h * scale)
+        new_w, new_h = math.ceil(w * scale), math.ceil(h * scale)
         return img.resize((new_w, new_h), Image.LANCZOS)
 
     @staticmethod
@@ -236,7 +237,11 @@ class ISICDataset(Dataset):
         """
         from torch.utils.data import WeightedRandomSampler
 
-        labels = split_df[classes].values.argmax(axis=1)
+        # Soporta CSV con columna label_idx (entero) o columnas one-hot por clase
+        if "label_idx" in split_df.columns:
+            labels = split_df["label_idx"].values.astype(int)
+        else:
+            labels = split_df[classes].values.argmax(axis=1)
         counts = np.bincount(labels, minlength=len(classes)).astype(float)
         counts = np.maximum(counts, 1)
         w_cls = 1.0 / counts
@@ -283,8 +288,22 @@ class ISICDataset(Dataset):
             f"apply_bcn_crop={apply_bcn_crop}"
         )
 
-        # Verificar one-hot
-        if all(c in self.df.columns for c in self.CLASSES):
+        # Verificar etiquetas
+        if "label_idx" in self.df.columns:
+            bad = (
+                (self.df["label_idx"] < 0) | (self.df["label_idx"] >= len(self.CLASSES))
+            ).sum()
+            if bad:
+                log.error(
+                    f"[ISIC] {bad} filas con label_idx fuera del rango [0, {len(self.CLASSES) - 1}]. "
+                    f"ISIC es MULTICLASE con {len(self.CLASSES)} clases."
+                )
+            else:
+                log.debug(
+                    "[ISIC] Ground truth label_idx ✓ (rango 0-%d)",
+                    len(self.CLASSES) - 1,
+                )
+        elif all(c in self.df.columns for c in self.CLASSES):
             bad = (self.df[self.CLASSES].sum(axis=1) != 1).sum()
             if bad:
                 log.error(
@@ -337,7 +356,11 @@ class ISICDataset(Dataset):
             )
 
             self.df = self.df.copy()
-            self.df["class_label"] = self.df[self.CLASSES].values.argmax(axis=1)
+            # Soporta CSV con columna label_idx (entero) o columnas one-hot por clase
+            if "label_idx" in self.df.columns:
+                self.df["class_label"] = self.df["label_idx"].astype(int)
+            else:
+                self.df["class_label"] = self.df[self.CLASSES].values.argmax(axis=1)
 
             dist = self.df["class_label"].value_counts().sort_index()
             total = len(self.df)
@@ -360,11 +383,22 @@ class ISICDataset(Dataset):
                 f"max={self.class_weights.max():.2f}({self.CLASSES[self.class_weights.argmax()]})"
             )
 
-            all_zero = (self.df[self.CLASSES].sum(axis=1) == 0).sum()
-            if all_zero:
-                log.warning(
-                    f"[ISIC] {all_zero} filas sum=0 → argmax asignará clase 0 (MEL)."
-                )
+            # Verificar filas sin etiqueta válida
+            if "label_idx" in self.df.columns:
+                invalid = (
+                    (self.df["class_label"] < 0)
+                    | (self.df["class_label"] >= self.N_TRAIN_CLS)
+                ).sum()
+                if invalid:
+                    log.warning(
+                        f"[ISIC] {invalid} filas con class_label fuera de [0, {self.N_TRAIN_CLS - 1}]."
+                    )
+            else:
+                all_zero = (self.df[self.CLASSES].sum(axis=1) == 0).sum()
+                if all_zero:
+                    log.warning(
+                        f"[ISIC] {all_zero} filas sum=0 → argmax asignará clase 0 (MEL)."
+                    )
 
     def _source_audit(self) -> None:
         """H3/Item-7 — Infiere fuente por naming e imprime estadísticas de bias de dominio."""
@@ -555,9 +589,10 @@ class ISICDataset(Dataset):
         if self.apply_bcn_crop and not loaded_from_cache and _HAS_BCN_CROP:
             img = apply_circular_crop(img)
 
-        # Si la imagen NO viene de cache, hacer resize a shorter_side=TARGET_SIZE
-        # para que RandomCrop(224) funcione correctamente
-        if not loaded_from_cache and self.mode != "embedding":
+        # Resize a shorter_side >= TARGET_SIZE para que RandomCrop(224) funcione.
+        # Se aplica siempre (cache o no): las imgs cacheadas con el bug de
+        # truncamiento int() pueden tener lado corto = 223 en vez de 224.
+        if self.mode != "embedding" and min(img.size) < TARGET_SIZE:
             img = self._resize_shorter_side(img, TARGET_SIZE)
 
         if self.mode == "embedding":

@@ -54,9 +54,9 @@ _ISIC_IMG_DIR = _PROJECT_ROOT / "datasets" / "isic_2019" / "ISIC_2019_Training_I
 _ISIC_CACHE_DIR = (
     _PROJECT_ROOT / "datasets" / "isic_2019" / "ISIC_2019_Training_Input_preprocessed"
 )
-_ISIC_TRAIN_CSV = _PROJECT_ROOT / "splits" / "isic_train.csv"
-_ISIC_VAL_CSV = _PROJECT_ROOT / "splits" / "isic_val.csv"
-_ISIC_TEST_CSV = _PROJECT_ROOT / "splits" / "isic_test.csv"
+_ISIC_TRAIN_CSV = _PROJECT_ROOT / "datasets" / "isic_2019" / "splits" / "isic_train.csv"
+_ISIC_VAL_CSV = _PROJECT_ROOT / "datasets" / "isic_2019" / "splits" / "isic_val.csv"
+_ISIC_TEST_CSV = _PROJECT_ROOT / "datasets" / "isic_2019" / "splits" / "isic_test.csv"
 
 _NUM_WORKERS = 4
 

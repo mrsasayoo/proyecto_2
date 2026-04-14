@@ -593,6 +593,7 @@ def train(dry_run: bool = False, data_root: str | None = None) -> None:
         model_std=model.model_std,
         batch_size=EXPERT1_BATCH_SIZE,
         num_workers=num_workers,
+        max_samples=64 if dry_run else None,
     )
 
     train_loader = loaders["train"]
