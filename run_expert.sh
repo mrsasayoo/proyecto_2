@@ -49,7 +49,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="${SCRIPT_DIR}"
 
 # ── Python del entorno virtual ─────────────────────────────────────────
-PYTHON="/home/mrsasayo_mesa/venv_global/bin/python"
+PYTHON="python3"
 
 # ── Validar argumentos ─────────────────────────────────────────────────
 if [ $# -lt 1 ]; then

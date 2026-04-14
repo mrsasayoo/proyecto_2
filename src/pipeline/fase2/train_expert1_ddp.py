@@ -937,7 +937,14 @@ def train(
     scheduler_ft = torch.optim.lr_scheduler.CosineAnnealingLR(
         optimizer_ft,
         T_max=EXPERT1_FT_EPOCHS,
+        last_epoch=-1,
     )
+    # Evitar el warning "lr_scheduler.step() before optimizer.step()":
+    # El __init__ con last_epoch=-1 llama step() internamente antes de que
+    # el optimizer haya dado un paso, lo que dispara el warning de PyTorch.
+    # Marcamos _step_count = 1 para que PyTorch no emita el warning en la
+    # primera llamada explícita a scheduler.step() en el loop de entrenamiento.
+    scheduler_ft.optimizer._step_count = 1
 
     early_stopping = EarlyStoppingAUC(
         patience=EXPERT1_EARLY_STOPPING_PATIENCE,
