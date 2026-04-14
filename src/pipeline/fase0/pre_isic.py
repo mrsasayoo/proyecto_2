@@ -27,6 +27,7 @@ from __future__ import annotations
 import argparse
 import json
 import logging
+import math
 import random
 import time
 import warnings
@@ -139,8 +140,8 @@ def resize_shorter_side(img_array: np.ndarray, target_size: int = 224) -> np.nda
     """
     h, w = img_array.shape[:2]
     scale = target_size / min(h, w)
-    new_w = int(w * scale)
-    new_h = int(h * scale)
+    new_w = math.ceil(w * scale)
+    new_h = math.ceil(h * scale)
 
     if _HAS_CV2:
         return cv2.resize(img_array, (new_w, new_h), interpolation=cv2.INTER_LANCZOS4)

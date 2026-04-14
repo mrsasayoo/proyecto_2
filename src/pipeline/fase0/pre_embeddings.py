@@ -926,57 +926,119 @@ def _pancreas_preprocess_one(nii_path, panorama_dir=None):
          fallback a [32,32,32] si panorama_dir=None o máscara falla
       7. Crop 48³ centrado en centroide (center crop del volumen 64³)
 
+    Optimización de memoria: para volúmenes grandes (>256 MB float32 estimado),
+    los pasos 2 y 5 se combinan en un solo resampleo SimpleITK directo a 64³,
+    evitando la creación de arrays isotrópicos intermedios de varios GB.
+
     Returns:
         (crop48, meta_dict) donde:
           crop48   — float32 ndarray (48, 48, 48)
           meta_dict — dict con spacing_orig, shape_orig, centroid, case_id
     """
+    import gc
+
     import SimpleITK as sitk
-    from scipy.ndimage import zoom as scipy_zoom
 
     nii_path = str(nii_path)
 
     # ── Paso 1: Carga con SimpleITK (lee spacing del header NIfTI) ───────────
     image = sitk.ReadImage(nii_path)
     spacing = np.array(image.GetSpacing(), dtype=np.float64)  # [sx, sy, sz] XYZ
-    array = sitk.GetArrayFromImage(image).astype(np.float32)  # [Z, Y, X]
-    shape_orig = array.shape  # (D, H, W) antes de cualquier transformación
+    size_xyz = np.array(image.GetSize(), dtype=np.float64)  # [x, y, z]
+    shape_orig = tuple(int(s) for s in reversed(size_xyz))  # (D, H, W) = (z, y, x)
 
-    # ── Paso 2: Remuestreo isotrópico a 1×1×1 mm³ (B-spline, order=3) ────────
-    # spacing en SimpleITK es [x, y, z]; array está en [Z, Y, X]
-    # → zoom_factors en orden [z, y, x] = [spacing[2], spacing[1], spacing[0]]
+    # Estimar memoria float32 del volumen para decidir estrategia
+    _estimated_bytes = int(np.prod(size_xyz)) * 4  # float32
+    _LARGE_THRESHOLD = 256 * 1024 * 1024  # 256 MB
+
+    # Calcular dimensiones isotrópicas para centroide
+    # spacing en SimpleITK = [sx, sy, sz] en XYZ
+    # zoom_factors para array [Z,Y,X] = [sz, sy, sx]
     zoom_factors = (spacing[2], spacing[1], spacing[0])
-    array = scipy_zoom(array, zoom_factors, order=3)
+    d_iso = int(round(shape_orig[0] * zoom_factors[0]))
+    h_iso = int(round(shape_orig[1] * zoom_factors[1]))
+    w_iso = int(round(shape_orig[2] * zoom_factors[2]))
 
-    # ── Paso 3: Clip HU a [-150, +250] (ventana abdominal CECT) ──────────────
-    array = np.clip(array, PANCREAS_HU_MIN, PANCREAS_HU_MAX)
+    if _estimated_bytes > _LARGE_THRESHOLD:
+        # ── Estrategia eficiente: resampleo directo a 64³ via SimpleITK ──────
+        # Combina pasos 2+5 en un solo resampleo, sin array intermedio en RAM.
+        target = PANCREAS_OUTPUT_SIZE  # 64
+        new_spacing = [
+            spacing[0] * size_xyz[0] / target,
+            spacing[1] * size_xyz[1] / target,
+            spacing[2] * size_xyz[2] / target,
+        ]
+        resampler = sitk.ResampleImageFilter()
+        resampler.SetSize([target, target, target])
+        resampler.SetOutputSpacing(new_spacing)
+        resampler.SetOutputOrigin(image.GetOrigin())
+        resampler.SetOutputDirection(image.GetDirection())
+        resampler.SetInterpolator(sitk.sitkLinear)
+        resampler.SetDefaultPixelValue(-1024)
+        resampled = resampler.Execute(image)
+        del image
+        gc.collect()
 
-    # ── Paso 4: Min-max normalización a [0, 1] ────────────────────────────────
-    # (HU + 150) / 400 → 0.0 = tejido blando mínimo, 1.0 = máximo abdominal
-    array = (array - PANCREAS_HU_MIN) / float(PANCREAS_HU_RANGE)
+        array = sitk.GetArrayFromImage(resampled).astype(np.float32)  # [Z,Y,X]
+        del resampled
+        gc.collect()
 
-    # ── Paso 5: Resize trilineal a 64×64×64 (scipy.ndimage.zoom, order=1) ─────
-    d, h, w = array.shape
-    d_iso, h_iso, w_iso = (
-        d,
-        h,
-        w,
-    )  # dims ANTES del resize final, para proyectar centroide
-    target = float(PANCREAS_OUTPUT_SIZE)
-    final_zoom = (target / d, target / h, target / w)
-    array = scipy_zoom(array, final_zoom, order=1)
-    # Garantizar shape exacto (errores de redondeo ±1 vóxel)
-    if array.shape != (PANCREAS_OUTPUT_SIZE,) * 3:
-        from skimage.transform import resize as sk_resize
+        # ── Paso 3: Clip HU ─────────────────────────────────────────────────
+        np.clip(array, PANCREAS_HU_MIN, PANCREAS_HU_MAX, out=array)
 
-        array = sk_resize(
-            array,
-            (PANCREAS_OUTPUT_SIZE,) * 3,
-            order=1,
-            mode="reflect",
-            anti_aliasing=False,
-            preserve_range=True,
-        ).astype(np.float32)
+        # ── Paso 4: Normalización ────────────────────────────────────────────
+        array -= PANCREAS_HU_MIN
+        array /= float(PANCREAS_HU_RANGE)
+
+        # Garantizar shape exacto
+        if array.shape != (PANCREAS_OUTPUT_SIZE,) * 3:
+            from skimage.transform import resize as sk_resize
+
+            array = sk_resize(
+                array,
+                (PANCREAS_OUTPUT_SIZE,) * 3,
+                order=1,
+                mode="reflect",
+                anti_aliasing=False,
+                preserve_range=True,
+            ).astype(np.float32)
+    else:
+        # ── Estrategia original: para volúmenes pequeños (cabe en RAM) ───────
+        from scipy.ndimage import zoom as scipy_zoom
+
+        array = sitk.GetArrayFromImage(image).astype(np.float32)  # [Z, Y, X]
+        del image
+        gc.collect()
+
+        # ── Paso 2: Remuestreo isotrópico 1×1×1 mm³ (B-spline, order=3) ─────
+        array = scipy_zoom(array, zoom_factors, order=3)
+
+        # ── Paso 3: Clip HU ─────────────────────────────────────────────────
+        np.clip(array, PANCREAS_HU_MIN, PANCREAS_HU_MAX, out=array)
+
+        # ── Paso 4: Normalización ────────────────────────────────────────────
+        array -= PANCREAS_HU_MIN
+        array /= float(PANCREAS_HU_RANGE)
+
+        # ── Paso 5: Resize trilineal a 64³ ──────────────────────────────────
+        d, h, w = array.shape
+        d_iso, h_iso, w_iso = d, h, w  # actualizar dims isotrópicas reales
+        target = float(PANCREAS_OUTPUT_SIZE)
+        final_zoom = (target / d, target / h, target / w)
+        array = scipy_zoom(array, final_zoom, order=1)
+
+        # Garantizar shape exacto (errores de redondeo ±1 vóxel)
+        if array.shape != (PANCREAS_OUTPUT_SIZE,) * 3:
+            from skimage.transform import resize as sk_resize
+
+            array = sk_resize(
+                array,
+                (PANCREAS_OUTPUT_SIZE,) * 3,
+                order=1,
+                mode="reflect",
+                anti_aliasing=False,
+                preserve_range=True,
+            ).astype(np.float32)
 
     # ── Paso 6: Centroide pancreático desde máscara de segmentación ───────────
     _half_crop = PANCREAS_CROP_SIZE // 2  # = 24
@@ -999,10 +1061,12 @@ def _pancreas_preprocess_one(nii_path, panorama_dir=None):
                 _mask_img = sitk.ReadImage(str(_mask_path))
                 _mask_arr = sitk.GetArrayFromImage(_mask_img)  # [Z, Y, X], enteros
                 _panc_vox = np.argwhere(_mask_arr == 3)  # voxels del páncreas
+                del _mask_img
                 if len(_panc_vox) > 0:
                     _c_orig = np.mean(
                         _panc_vox, axis=0
                     )  # centroide en espacio original [Z,Y,X]
+                    del _panc_vox
                     # Proyectar al espacio isotrópico (Paso 2): multiplicar por zoom_factors
                     # zoom_factors = (spacing[2], spacing[1], spacing[0]) orden [Z, Y, X]
                     _c_iso = _c_orig * np.array(zoom_factors)
@@ -1015,6 +1079,8 @@ def _pancreas_preprocess_one(nii_path, panorama_dir=None):
                     cy = int(np.clip(round(_cy64), _clamp_lo, _clamp_hi))
                     cx = int(np.clip(round(_cx64), _clamp_lo, _clamp_hi))
                     _centroid_fallback = False
+                else:
+                    del _panc_vox
             except Exception:
                 pass  # fallback silencioso al centro geométrico
 
@@ -1030,6 +1096,8 @@ def _pancreas_preprocess_one(nii_path, panorama_dir=None):
     w1 = min(PANCREAS_OUTPUT_SIZE, centroid[2] + half)
 
     crop = array[d0:d1, h0:h1, w0:w1]
+    del array
+    gc.collect()
 
     # Zero-pad si el crop es menor que 48³ (solo en bordes del volumen)
     if crop.shape != (PANCREAS_CROP_SIZE,) * 3:
@@ -1157,12 +1225,16 @@ def _validate_pancreas_sample(preprocessed_dir, n_sample=100):
     return (pass_rate, corrupt)
 
 
-def _compute_safe_workers(requested_workers, gb_per_worker=2.5):
+def _compute_safe_workers(requested_workers, gb_per_worker=3.5):
     # type: (int, float) -> tuple[int, str]
     """Calcula un número seguro de workers adaptativo a la RAM disponible.
 
     Intenta usar psutil para leer la RAM disponible y limita los workers
     para evitar OOM kills del OS al cargar volúmenes CT grandes.
+
+    Cada volumen de páncreas ocupa ~2.7 GB pico en promedio, pero los más
+    grandes (>500 MB comprimidos) pueden superar 4 GB.  Se usa 3.5 GB/worker
+    como estimación conservadora.
 
     Args:
         requested_workers: Número de workers solicitados.
@@ -1356,8 +1428,64 @@ def run_pancreas_preprocessing(datasets_dir, workers=4, dry_run=False):
     n_ok = n_skip = n_error = 0
     errors = []
 
+    def _run_sequential():
+        """Procesa volúmenes secuencialmente (1 worker) para evitar OOM.
+
+        Cada volumen CT de páncreas consume ~2.7 GB de RAM pico durante el
+        remuestreo isotrópico + zoom.  Con 13 GB de RAM total, solo 1 worker
+        es seguro.  Procesamiento secuencial evita fork overhead y permite
+        que el GC libere memoria entre volúmenes.
+        """
+        nonlocal n_ok, n_skip, n_error, errors
+        for i, task in enumerate(tasks, 1):
+            try:
+                case_id, status, err_msg = _pancreas_worker(task)
+            except Exception as e:
+                n_error += 1
+                errors.append(("UNKNOWN", str(e)))
+                if i % 100 == 0 or i == len(tasks):
+                    elapsed = time.time() - t0
+                    rate = i / max(elapsed, 1)
+                    log.info(
+                        "  [PANCREAS-OFFLINE] %d/%d (%.1f%%) | %.1f vol/s | "
+                        "OK=%d SKIP=%d ERR=%d",
+                        i,
+                        len(tasks),
+                        100 * i / len(tasks),
+                        rate,
+                        n_ok,
+                        n_skip,
+                        n_error,
+                    )
+                continue
+
+            if status == "OK":
+                n_ok += 1
+            elif status == "SKIP":
+                n_skip += 1
+            else:
+                n_error += 1
+                errors.append((case_id, err_msg))
+
+            if i % 100 == 0 or i == len(tasks):
+                elapsed = time.time() - t0
+                rate = i / max(elapsed, 1)
+                log.info(
+                    "  [PANCREAS-OFFLINE] %d/%d (%.1f%%) | %.1f vol/s | "
+                    "OK=%d SKIP=%d ERR=%d",
+                    i,
+                    len(tasks),
+                    100 * i / len(tasks),
+                    rate,
+                    n_ok,
+                    n_skip,
+                    n_error,
+                )
+
     def _run_pool(n_workers):
         nonlocal n_ok, n_skip, n_error, errors
+        from concurrent.futures.process import BrokenProcessPool
+
         with ProcessPoolExecutor(max_workers=n_workers) as exe:
             futures = {exe.submit(_pancreas_worker, t): t for t in tasks}
             done_count = 0
@@ -1365,6 +1493,8 @@ def run_pancreas_preprocessing(datasets_dir, workers=4, dry_run=False):
                 done_count += 1
                 try:
                     case_id, status, err_msg = fut.result()
+                except BrokenProcessPool:
+                    raise  # re-raise so the outer handler can catch and retry
                 except Exception as e:
                     n_error += 1
                     errors.append(("UNKNOWN", str(e)))
@@ -1393,17 +1523,24 @@ def run_pancreas_preprocessing(datasets_dir, workers=4, dry_run=False):
                         n_error,
                     )
 
-    try:
-        _run_pool(effective_workers)
-    except concurrent.futures.process.BrokenProcessPool:
-        log.error(
-            "[PANCREAS-OFFLINE] BrokenProcessPool con %d workers (probable OOM). "
-            "Reintentando con 1 worker...",
-            effective_workers,
-        )
-        n_ok = n_skip = n_error = 0
-        errors = []
-        _run_pool(1)
+    # Con 13 GB de RAM y ~2.7 GB pico por volumen, usar 1 worker secuencial
+    # es la única opción segura.  Si effective_workers > 1 y hay RAM de sobra,
+    # intentar pool con fallback a secuencial ante OOM.
+    if effective_workers <= 1:
+        log.info("[PANCREAS-OFFLINE] Usando procesamiento secuencial (1 worker).")
+        _run_sequential()
+    else:
+        try:
+            _run_pool(effective_workers)
+        except (concurrent.futures.process.BrokenProcessPool, RuntimeError):
+            log.error(
+                "[PANCREAS-OFFLINE] BrokenProcessPool con %d workers (probable OOM). "
+                "Reintentando secuencialmente...",
+                effective_workers,
+            )
+            n_ok = n_skip = n_error = 0
+            errors = []
+            _run_sequential()
 
     elapsed = time.time() - t0
     log.info(
