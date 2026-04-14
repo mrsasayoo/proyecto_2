@@ -105,3 +105,47 @@ class FocalLoss(nn.Module):
         alpha_t = self.alpha * targets + (1 - self.alpha) * (1 - targets)
         loss = alpha_t * (1 - p_t) ** self.gamma * bce
         return loss.mean()
+
+
+class FocalLossMultiClass(nn.Module):
+    """
+    Focal Loss multiclase para ISIC 2019 (Lin et al., ICCV 2017).
+
+    Reduce el gradiente de ejemplos fáciles y concentra el aprendizaje
+    en ejemplos difíciles de clases minoritarias (DF, VASC, AK, SCC).
+
+    Parámetros ISIC:
+        gamma=2.0: concentración estándar
+        weight: tensor[8] con pesos inverse-frequency por clase
+        label_smoothing=0.1: reduce overconfidence
+
+    Uso:
+        criterion = FocalLossMultiClass(gamma=2.0, weight=class_weights, label_smoothing=0.1)
+        loss = criterion(logits, labels)   # logits: [B,8], labels: [B] int
+    """
+
+    def __init__(
+        self,
+        gamma: float = 2.0,
+        weight: torch.Tensor | None = None,
+        label_smoothing: float = 0.0,
+    ):
+        super().__init__()
+        self.gamma = gamma
+        self.label_smoothing = label_smoothing
+        self.register_buffer("weight", weight)
+
+    def forward(self, logits: torch.Tensor, targets: torch.Tensor) -> torch.Tensor:
+        # CE por muestra con pesos y label smoothing
+        ce = nn.functional.cross_entropy(
+            logits,
+            targets,
+            weight=self.weight,
+            label_smoothing=self.label_smoothing,
+            reduction="none",
+        )
+        # p_t = exp(-CE) ≈ probabilidad de la clase correcta
+        pt = torch.exp(-ce)
+        # Focal weight
+        focal_weight = (1.0 - pt) ** self.gamma
+        return (focal_weight * ce).mean()

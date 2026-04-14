@@ -1,15 +1,24 @@
 """
-DataLoader para Expert 2 — ISIC 2019 (dermoscopía, 8+1 clases multiclase).
+DataLoader para Expert 2 — ISIC 2019 (dermoscopía, 8 clases multiclase).
 
-Construye DataLoaders para train, val y test del Expert 2 (EfficientNet-B3).
+Construye DataLoaders para train, val y test del Expert 2 (ConvNeXt-Small).
 Los splits (CSVs) fueron pre-construidos en Fase 0 usando
 ISICDataset.build_lesion_split() para evitar leakage por lesion_id.
 
 Transforms:
-    - Standard (val/test): Resize(224) → ToTensor → Normalize(ImageNet)
-    - Augmented (train, minority): + FlipH/V, ColorJitter agresivo, RandomAffine
+    - Gestionados internamente por ISICDataset según mode/split:
+      * train: TRANSFORM_TRAIN (RandomCrop 224, flips, rot 360°, ColorJitter, etc.)
+      * val/test: TRANSFORM_VAL (CenterCrop 224)
     - NO incluye BCNCrop — lo aplica ISICDataset internamente (apply_bcn_crop=True)
-    - NO incluye RandomErasing/Cutout — prohibido por spec del proyecto
+
+Cache:
+    - Si cache_dir existe y contiene imágenes preprocesadas ({id}_pp_224.jpg),
+      ISICDataset las carga directamente (DullRazor + resize ya aplicados).
+    - Si no, carga las originales con resize a shorter_side=224.
+
+Sampler:
+    - Train usa WeightedRandomSampler (inverse-frequency) para compensar desbalance.
+    - Val/Test usan shuffle=False.
 
 Dependencias:
     - src/pipeline/datasets/isic.py: ISICDataset (mode="expert")
@@ -28,7 +37,6 @@ import numpy as np
 import pandas as pd
 import torch
 from torch.utils.data import DataLoader
-from torchvision import transforms
 
 # ── Agregar src/pipeline al path para imports ──────────────────────────
 _PROJECT_ROOT = Path(__file__).resolve().parents[3]  # proyecto_2/
@@ -36,7 +44,6 @@ _PIPELINE_ROOT = _PROJECT_ROOT / "src" / "pipeline"
 if str(_PIPELINE_ROOT) not in sys.path:
     sys.path.insert(0, str(_PIPELINE_ROOT))
 
-from config import IMAGENET_MEAN, IMAGENET_STD
 from datasets.isic import ISICDataset
 from fase2.expert2_config import EXPERT2_BATCH_SIZE
 
@@ -44,64 +51,19 @@ log = logging.getLogger("expert2_dataloader")
 
 # ── Rutas de datos ─────────────────────────────────────────────────────
 _ISIC_IMG_DIR = _PROJECT_ROOT / "datasets" / "isic_2019" / "ISIC_2019_Training_Input"
+_ISIC_CACHE_DIR = (
+    _PROJECT_ROOT / "datasets" / "isic_2019" / "ISIC_2019_Training_Input_preprocessed"
+)
 _ISIC_TRAIN_CSV = _PROJECT_ROOT / "splits" / "isic_train.csv"
 _ISIC_VAL_CSV = _PROJECT_ROOT / "splits" / "isic_val.csv"
 _ISIC_TEST_CSV = _PROJECT_ROOT / "splits" / "isic_test.csv"
 
 _NUM_WORKERS = 4
-_IMG_SIZE = 224
-
-
-def _build_transforms(img_size: int = _IMG_SIZE) -> tuple:
-    """
-    Construye los pipelines de transforms para Expert 2.
-
-    Returns:
-        (transform_standard, transform_aug)
-        - transform_standard: Resize → ToTensor → Normalize (para val/test)
-        - transform_aug: augmentation agresivo para clases minoritarias (train)
-
-    NOTA: NO incluir BCNCrop — ISICDataset lo aplica internamente
-    cuando apply_bcn_crop=True.
-    """
-    normalize = transforms.Normalize(mean=IMAGENET_MEAN, std=IMAGENET_STD)
-
-    transform_standard = transforms.Compose(
-        [
-            transforms.Resize((img_size, img_size)),
-            transforms.ToTensor(),
-            normalize,
-        ]
-    )
-
-    # Augmentation agresivo (spec: ColorJitter brightness=0.3, etc.)
-    # NO RandomErasing — prohibido por spec del proyecto
-    transform_aug = transforms.Compose(
-        [
-            transforms.Resize((img_size, img_size)),
-            transforms.RandomHorizontalFlip(p=0.5),
-            # REMOVED: RandomVerticalFlip — prohibited by project spec
-            transforms.ColorJitter(
-                brightness=0.3,
-                contrast=0.3,
-                saturation=0.3,
-                hue=0.1,
-            ),
-            transforms.RandomAffine(
-                degrees=15,
-                translate=(0.1, 0.1),
-                scale=(0.9, 1.1),
-            ),
-            transforms.ToTensor(),
-            normalize,
-        ]
-    )
-
-    return transform_standard, transform_aug
 
 
 def build_dataloaders_expert2(
     img_dir: str | Path | None = None,
+    cache_dir: str | Path | None = None,
     train_csv: str | Path | None = None,
     val_csv: str | Path | None = None,
     test_csv: str | Path | None = None,
@@ -112,7 +74,11 @@ def build_dataloaders_expert2(
     Construye DataLoaders para train, val y test del Expert 2 (ISIC 2019).
 
     Args:
-        img_dir: directorio con imágenes ISIC .jpg. Default: datasets/isic_2019/ISIC_2019_Training_Input/
+        img_dir: directorio con imágenes ISIC .jpg originales.
+            Default: datasets/isic_2019/ISIC_2019_Training_Input/
+        cache_dir: directorio con imágenes preprocesadas (DullRazor + resize).
+            Default: datasets/isic_2019/ISIC_2019_Training_Input_preprocessed/
+            Si no existe o es None, se usan las originales con resize online.
         train_csv: CSV con split de entrenamiento. Default: splits/isic_train.csv
         val_csv: CSV con split de validación. Default: splits/isic_val.csv
         test_csv: CSV con split de test. Default: splits/isic_test.csv
@@ -121,13 +87,28 @@ def build_dataloaders_expert2(
 
     Returns:
         (train_loader, val_loader, test_loader, class_weights)
-        - class_weights: Tensor[9] con pesos de clase para CrossEntropyLoss
+        - class_weights: Tensor[8] con pesos de clase para FocalLossMultiClass
     """
     img_dir = Path(img_dir) if img_dir else _ISIC_IMG_DIR
     train_csv = Path(train_csv) if train_csv else _ISIC_TRAIN_CSV
     val_csv = Path(val_csv) if val_csv else _ISIC_VAL_CSV
     test_csv = Path(test_csv) if test_csv else _ISIC_TEST_CSV
     batch_size = batch_size or EXPERT2_BATCH_SIZE
+
+    # Resolver cache_dir: usar default si no se pasa, verificar existencia
+    if cache_dir is not None:
+        effective_cache_dir: Path | None = Path(cache_dir)
+    elif _ISIC_CACHE_DIR.exists():
+        effective_cache_dir = _ISIC_CACHE_DIR
+    else:
+        effective_cache_dir = None
+
+    if effective_cache_dir is not None and not effective_cache_dir.exists():
+        log.warning(
+            f"[Expert2/DataLoader] cache_dir no existe: {effective_cache_dir}. "
+            f"Usando imágenes originales con resize online."
+        )
+        effective_cache_dir = None
 
     # ── Verificar que los archivos existen ─────────────────────────────
     for label, path in [
@@ -142,6 +123,7 @@ def build_dataloaders_expert2(
             )
 
     log.info(f"[Expert2/DataLoader] Images: {img_dir}")
+    log.info(f"[Expert2/DataLoader] Cache:  {effective_cache_dir}")
     log.info(f"[Expert2/DataLoader] Train CSV: {train_csv}")
     log.info(f"[Expert2/DataLoader] Val CSV:   {val_csv}")
     log.info(f"[Expert2/DataLoader] Test CSV:  {test_csv}")
@@ -157,39 +139,33 @@ def build_dataloaders_expert2(
         f"train: {len(train_df):,} | val: {len(val_df):,} | test: {len(test_df):,}"
     )
 
-    # ── Construir transforms ───────────────────────────────────────────
-    transform_standard, transform_aug = _build_transforms()
-
     # ── Crear datasets ─────────────────────────────────────────────────
-    # ISICDataset en mode="expert" computa class_label y class_weights internamente.
-    # transform_standard se usa para clases mayoritarias en train y como base para val/test.
-    # transform_minority (=transform_aug) se usa para clases minoritarias en train.
-    # apply_bcn_crop=True: ISICDataset aplica circular crop internamente para BCN_20000.
+    # ISICDataset en mode="expert" selecciona TRANSFORM_TRAIN/TRANSFORM_VAL
+    # internamente según split. apply_bcn_crop=True para BCN_20000.
     train_ds = ISICDataset(
         img_dir=img_dir,
+        cache_dir=effective_cache_dir,
         split_df=train_df,
         mode="expert",
         split="train",
-        transform_standard=transform_standard,
-        transform_minority=transform_aug,
         apply_bcn_crop=True,
     )
 
     val_ds = ISICDataset(
         img_dir=img_dir,
+        cache_dir=effective_cache_dir,
         split_df=val_df,
         mode="expert",
         split="val",
-        transform_standard=transform_standard,
         apply_bcn_crop=True,
     )
 
     test_ds = ISICDataset(
         img_dir=img_dir,
+        cache_dir=effective_cache_dir,
         split_df=test_df,
         mode="expert",
         split="test",
-        transform_standard=transform_standard,
         apply_bcn_crop=True,
     )
 
@@ -208,9 +184,10 @@ def build_dataloaders_expert2(
             "Computando por inverse-frequency..."
         )
         labels = [train_ds[i][1] for i in range(len(train_ds))]
-        counts = np.bincount(labels, minlength=9)
+        n_classes = ISICDataset.N_TRAIN_CLS
+        counts = np.bincount(labels, minlength=n_classes)
         class_weights = torch.tensor(
-            len(train_ds) / (9 * np.maximum(counts, 1)),
+            len(train_ds) / (n_classes * np.maximum(counts, 1)),
             dtype=torch.float32,
         )
         log.info(
@@ -220,10 +197,13 @@ def build_dataloaders_expert2(
         )
 
     # ── Crear DataLoaders ──────────────────────────────────────────────
+    # Train: WeightedRandomSampler para compensar desbalance
+    sampler = ISICDataset.get_weighted_sampler(train_df, ISICDataset.CLASSES)
+
     train_loader = DataLoader(
         train_ds,
         batch_size=batch_size,
-        shuffle=True,
+        sampler=sampler,  # reemplaza shuffle=True
         drop_last=True,
         num_workers=num_workers,
         pin_memory=True,
@@ -279,7 +259,7 @@ def _print_summary(
     print("=" * 70)
 
 
-def _test_dataloaders():
+def _test_dataloaders() -> None:
     """Verificación rápida: cargar un batch de cada split."""
     logging.basicConfig(level=logging.INFO, format="%(message)s")
 

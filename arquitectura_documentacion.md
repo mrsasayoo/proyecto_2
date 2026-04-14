@@ -39,7 +39,7 @@ El sistema contiene **6 expertos**, organizados en dos categorías:
 | ID | Nombre | Tipo | Modalidad | Función |
 | --- | --- | --- | --- | --- |
 | 0 | Chest (NIH ChestXray14) | Dominio | Radiografía 2D | 14 patologías torácicas |
-| 1 | ISIC 2019 | Dominio | Dermatoscopía 2D | 9 clases de lesiones cutáneas |
+| 1 | ISIC 2019 | Dominio | Dermatoscopía 2D | 8 clases de lesiones cutáneas (+UNK inferencia) |
 | 2 | OA-Knee | Dominio | Radiografía 2D | 3 grados osteoartritis (KL) |
 | 3 | LUNA16 | Dominio | CT pulmonar 3D | Detección nódulos (binario) |
 | 4 | Pancreas | Dominio | CT abdominal 3D | Detección PDAC (binario) |
@@ -103,7 +103,7 @@ Router: softmax(W·z + b) → distribución sobre 6 expertos
 | 4.1 | Entrenar backbones | Entrenamiento end-to-end de los 4 backbones desde cero con tarea proxy (clasificación de dominio médico, 5 clases). Produce `backbone.pth` en `checkpoints/backbone_0X_<nombre>/` | Fase 1 | ✅ Completado (2026-04-05) |
 | 4.2 | Generar embeddings | Backbone congelado (cargado desde checkpoint de Paso 4.1) extrae CLS tokens → `.npy` | Fase 1 | ✅ Implementado (dry-run verificado EXIT 0, 2026-04-06) |
 | 5.1 | Entrenar Experto 1 | Chest — ConvNeXt-Tiny (~27.8M params), BCEWithLogitsLoss(pos_weight), 14 clases multilabel. Archivos: `expert1_config.py`, `models/expert1_convnext.py`, `dataloader_expert1.py`, `train_expert1.py`. Checkpoint: `checkpoints/expert_00_convnext_tiny/expert1_best.pt` | Fase 2 | ✅ Script implementado — dry-run verificado |
-| 5.2 | Entrenar Experto 2 | ISIC — EfficientNet-B3 (~10.7M params), CrossEntropyLoss(class_weights), 9 clases (8 train + UNK). Archivos: `expert2_config.py`, `models/expert2_efficientnet.py`, `dataloader_expert2.py`, `train_expert2.py`. Checkpoint: `checkpoints/expert_01_efficientnet_b3/expert2_best.pt` | Fase 2 | ✅ Script implementado — dry-run verificado |
+| 5.2 | Entrenar Experto 2 | ISIC — EfficientNet-B3 (~10.7M params), FocalLossMultiClass(γ=2.0, class_weights, label_smoothing=0.1), 8 clases + slot UNK inferencia. Preprocesado offline DullRazor + caché. CutMix/MixUp en training loop. WeightedRandomSampler. Archivos: `expert2_config.py`, `models/expert2_efficientnet.py`, `dataloader_expert2.py`, `train_expert2.py`. Checkpoint: `checkpoints/expert_01_efficientnet_b3/expert2_best.pt` | Fase 2 | ✅ Script implementado — dry-run verificado |
 | 5.3 | Entrenar Experto 3 | OA — VGG16-BN (~134M params), CrossEntropyLoss(class_weights), 3 clases ordinales (KL→Normal/Leve/Severo). Archivos: `expert_oa_config.py`, `models/expert_oa_vgg16bn.py`, `dataloader_expert_oa.py`, `train_expert_oa.py`. Checkpoint: `checkpoints/expert_02_vgg16_bn/expert_oa_best.pt` | Fase 2 | ✅ Script implementado — dry-run verificado |
 | 5.4 | Entrenar Experto 4 | LUNA16 — MC3-18 (~11.4M params), FocalLoss(alpha=0.85, gamma=2.0), 2 clases. Script `train_expert3.py` corregido (BUG-1: paths). Checkpoint: `checkpoints/expert_03_vivit_tiny/expert3_best.pt` | Fase 2 | ✅ Script corregido — dry-run verificado |
 | 5.5 | Entrenar Experto 5 | Páncreas — Swin3D-Tiny (~6.94M params), FocalLoss(alpha=0.75, gamma=2.0), 2 clases, k-fold CV (k=5). Archivos: `expert4_config.py`, `models/expert4_swin3d.py`, `dataloader_expert4.py`, `train_expert4.py`. Checkpoint: `checkpoints/expert_04_swin3d_tiny/expert4_best.pt` | Fase 2 | ✅ Script implementado — dry-run verificado |
@@ -187,10 +187,10 @@ Router: softmax(W·z + b) → distribución sobre 6 expertos
 | **Modalidad** | Dermatoscopía 2D |
 | **Tarea** | Clasificación multiclase (8 clases en train, UNK solo en test) |
 | **Arquitectura** | EfficientNet-B3 |
-| **Loss** | `CrossEntropyLoss` con `class_weights` |
+| **Loss** | `FocalLossMultiClass(gamma=2.0, weight=class_weights, label_smoothing=0.1)` |
 | **Métricas** | BMCA (oficial) + AUC-ROC por clase |
 | **Volumen** | ~25K imágenes |
-| **Preprocesado** | Resize 224×224, ColorJitter agresivo |
+| **Preprocesado** | Offline: DullRazor (hair removal) → resize aspect-ratio-preserving (lado corto=224px) → caché JPEG 95. Online: RandomCrop 224 → flips → rotation 360° → ColorJitter → RandomGamma → ShadesOfGray (p=0.5) → CoarseDropout |
 | **Split** | Por `lesion_id` (función `build_lesion_split`) |
 
 **Estado del dataset (verificado 2026-04-04):**
@@ -213,7 +213,7 @@ Router: softmax(W·z + b) → distribución sobre 6 expertos
 - Sin `metadata_csv` → riesgo de leakage entre fuentes.
 - UNK en inferencia → H(g) alta → Experto 5 OOD la captura.
 
-**Estado del script de entrenamiento (Paso 5.2, 2026-04-05):**
+**Estado del script de entrenamiento (Paso 5.2, actualizado 2026-04-14):**
 
 | Campo | Detalle |
 | --- | --- |
@@ -221,9 +221,12 @@ Router: softmax(W·z + b) → distribución sobre 6 expertos
 | **Modelo** | `Expert2EfficientNetB3` — EfficientNet-B3, ~10.7M params, `weights=None` |
 | **Archivos** | `expert2_config.py`, `models/expert2_efficientnet.py`, `dataloader_expert2.py`, `train_expert2.py` |
 | **Checkpoint** | `checkpoints/expert_01_efficientnet_b3/expert2_best.pt` |
-| **Pipeline** | `BCNCrop (por ISICDataset) → Resize(224×224) → ToTensor → Normalize(ImageNet)` |
-| **Augmentation** | `ColorJitter(0.3, 0.3, 0.3, 0.1)` + flips + affine (agresivo, obligatorio por 3 fuentes) |
-| **Nota BCNCrop** | Aplicado internamente por `ISICDataset`, no en el objeto `transform` — evita doble crop |
+| **Preprocesado offline** | `pre_isic.py`: DullRazor (hair removal) → resize lado corto=224px → caché como `{isic_id}_pp_224.jpg` en `ISIC_2019_Training_Input_preprocessed/` |
+| **Pipeline online** | `RandomCrop(224) → flips → rotation 360° → ColorJitter → RandomGamma → ShadesOfGray(p=0.5) → CoarseDropout → ToTensor → Normalize(ImageNet)` |
+| **Augmentation batch-level** | CutMix (p=0.3) + MixUp (p=0.2) en training loop (mutuamente excluyentes por batch) |
+| **Loss** | `FocalLossMultiClass(gamma=2.0, weight=class_weights, label_smoothing=0.1)` — reemplaza `CrossEntropyLoss` |
+| **Sampler** | `WeightedRandomSampler` (reemplaza `shuffle=True`) para balanceo de clases |
+| **Caché** | `cache_dir` soportado en `ISICDataset` y `dataloader_expert2.py`; fallback a imágenes originales si no existe |
 
 ### 3.3 Experto 2 — OA Knee (Osteoartritis de rodilla)
 
@@ -767,9 +770,10 @@ Esta técnica produce imágenes médicas sintéticas superiores a augmentación 
 | 3 | Post-procesado NIH | ✅ | 6.1s |
 | 4 | Etiquetas páncreas | ✅ | ~4,205s (70 min) — re-ejecutado con fix OOM |
 | 5 | Splits 80/10/10 | ⚠️ parcial | 3.0s |
-| 6 | Datos 3D (parches) | ⚠️ parcial | 162.2s |
-| 7 | Parche CvT-13 | ⚠️ | 7.3s |
-| 8 | Reporte | — | — |
+| 6 | ISIC Preprocesamiento | — | — |
+| 7 | Datos 3D (parches) | ⚠️ parcial | 162.2s |
+| 8 | Parche CvT-13 | ⚠️ | 7.3s |
+| 9 | Reporte | — | — |
 
 ### 7.2 Estado actual de los datos en disco (2026-04-05)
 

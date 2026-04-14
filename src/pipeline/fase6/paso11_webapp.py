@@ -127,7 +127,7 @@ def build_inference_engine(device: str, dry_run: bool):
         from src.pipeline.fase6.inference_engine import InferenceEngine
         from src.pipeline.fase5.moe_model import MoESystem
         from src.pipeline.fase2.models.expert1_convnext import Expert1ConvNeXtTiny
-        from src.pipeline.fase2.models.expert2_efficientnet import Expert2EfficientNetB3
+        from src.pipeline.fase2.models.expert2_efficientnet import Expert2ConvNeXtSmall
         from src.pipeline.fase2.models.expert_oa_vgg16bn import ExpertOAEfficientNetB0
         from src.pipeline.fase2.models.expert3_r3d18 import Expert3MC318
         from src.pipeline.fase2.models.expert4_swin3d import ExpertPancreasSwin3D
@@ -140,7 +140,7 @@ def build_inference_engine(device: str, dry_run: bool):
         experts = nn.ModuleList(
             [
                 Expert1ConvNeXtTiny(fc_dropout_p=0.3, num_classes=14),
-                Expert2EfficientNetB3(fc_dropout_p=0.3, num_classes=9),
+                Expert2ConvNeXtSmall(),
                 ExpertOAEfficientNetB0(),
                 Expert3MC318(spatial_dropout_p=0.15, fc_dropout_p=0.4, num_classes=2),
                 ExpertPancreasSwin3D(in_channels=1, num_classes=2),

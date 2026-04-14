@@ -70,8 +70,8 @@
  │ 2D   │  │ 2D   │           │ 2D   │       │ 3D   │    │ 3D   │
  │Chest │  │ ISIC │           │Knee  │       │LUNA16│    │Pancr.│
  │NIH   │  │ 2019 │           │  OA  │       │      │    │      │
- │14cls │  │ 9cls │           │ 3cls │       │ 2cls │    │ 2cls │
- │BCE   │  │ CE   │           │ CE   │       │Focal │    │Focal │
+ │14cls │  │ 8cls │           │ 3cls │       │ 2cls │    │ 2cls │
+ │BCE   │  │Focal │           │ CE   │       │Focal │    │Focal │
  └──┬───┘  └──┬───┘           └──┬───┘       └──┬───┘    └──┬───┘
     │         │                   │              │ ckpt ✓    │ ckpt ✓
     │         │                   │              │ FP16 ✓    │ FP16 ✓

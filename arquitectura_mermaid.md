@@ -73,7 +73,7 @@ graph TD
     %% ============================================================
     subgraph EXPERTS["Expertos de Dominio (0–4)"]
         EXP0["Exp 0 — ConvNeXt-Tiny<br/>Chest NIH · 14 clases<br/>BCEWithLogitsLoss"]
-        EXP1["Exp 1 — EfficientNet-B3<br/>ISIC 2019 · 9 clases<br/>CrossEntropyLoss"]
+        EXP1["Exp 1 — EfficientNet-B3<br/>ISIC 2019 · 8 clases<br/>FocalLossMultiClass"]
         EXP2["Exp 2 — VGG16-BN<br/>OA-Knee · 3 clases<br/>CrossEntropyLoss"]
         EXP3["Exp 3 — ViViT-Tiny<br/>LUNA16 · 2 clases<br/>FocalLoss"]
         EXP4["Exp 4 — Swin3D-Tiny<br/>Páncreas · 2 clases<br/>FocalLoss"]

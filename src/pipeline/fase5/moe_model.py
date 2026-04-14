@@ -154,7 +154,7 @@ def build_moe_system_dry_run(d_model: int = 192) -> MoESystem:
         MoESystem listo para forward pass sintetico.
     """
     from fase2.models.expert1_convnext import Expert1ConvNeXtTiny
-    from fase2.models.expert2_efficientnet import Expert2EfficientNetB3
+    from fase2.models.expert2_efficientnet import Expert2ConvNeXtSmall
     from fase2.models.expert_oa_vgg16bn import ExpertOAEfficientNetB0
     from fase2.models.expert3_r3d18 import Expert3MC318
     from fase2.models.expert4_swin3d import ExpertPancreasSwin3D
@@ -178,7 +178,7 @@ def build_moe_system_dry_run(d_model: int = 192) -> MoESystem:
     experts = nn.ModuleList(
         [
             Expert1ConvNeXtTiny(fc_dropout_p=0.3, num_classes=14),  # Expert 0
-            Expert2EfficientNetB3(fc_dropout_p=0.3, num_classes=9),  # Expert 1
+            Expert2ConvNeXtSmall(),  # Expert 1
             ExpertOAEfficientNetB0(),  # Expert 2 — EfficientNet-B0, 5 clases KL
             Expert3MC318(
                 spatial_dropout_p=0.15, fc_dropout_p=0.4, num_classes=2

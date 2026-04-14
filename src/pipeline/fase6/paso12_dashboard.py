@@ -142,7 +142,7 @@ _ARCHITECTURE_TRACE = """\
 
 5. EXPERTOS (5 dominio + 1 CAE)
    → Expert 0: ConvNeXt-Tiny       — Chest X-Ray (14 clases)
-   → Expert 1: EfficientNet-B3     — ISIC Dermatología (9 clases)
+    → Expert 1: ConvNeXt-Small       — ISIC Dermatología (8 clases)
    → Expert 2: EfficientNet-B0     — OA Knee (5 clases)
    → Expert 3: MC3-18              — LUNA16 Nódulos 3D (2 clases)
    → Expert 4: Swin3D-Tiny         — Páncreas MSD 3D (2 clases)
@@ -171,9 +171,9 @@ _COMPONENT_DESCRIPTIONS: dict[str, str] = {
         "Clasificador multi-etiqueta para 14 patologías torácicas del dataset NIH ChestXray14. "
         "Arquitectura ConvNeXt-Tiny con dropout 0.3 en la capa FC final."
     ),
-    "Expert 1 — EfficientNet-B3 (ISIC)": (
-        "Clasificador de lesiones dermatológicas con 9 clases (ISIC 2019). "
-        "EfficientNet-B3 con compound scaling optimizado para imágenes de piel."
+    "Expert 1 — ConvNeXt-Small (ISIC)": (
+        "Clasificador de lesiones dermatológicas con 8 clases (ISIC 2019). "
+        "ConvNeXt-Small con head personalizado (LayerNorm + Dropout + Linear + GELU)."
     ),
     "Expert 2 — EfficientNet-B0 (OA Knee)": (
         "Clasificador de osteoartritis de rodilla (5 grados KL). "

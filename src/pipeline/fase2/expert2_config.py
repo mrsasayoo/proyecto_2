@@ -1,66 +1,64 @@
 """
-Configuración de entrenamiento para Expert 2 — ISIC 2019 (Dermoscopía, 8+1 clases).
+expert2_config.py — Configuración de entrenamiento para Expert 2 (ISIC 2019)
+=============================================================================
 
-Fuente de verdad para todos los hiperparámetros del experto 2 en Fase 2.
+Pipeline de 3 fases con descongelamiento progresivo del backbone ConvNeXt-Small:
 
-Arquitectura: EfficientNet-B3 entrenado desde cero (weights=None).
-Tarea: multiclase — 8 clases de entrenamiento + 1 slot UNK (solo inferencia).
-Loss: CrossEntropyLoss con class_weights (inverse-frequency, 9 posiciones).
-Métrica principal: BMCA (Balanced Multi-Class Accuracy = balanced_accuracy_score).
+  Fase 1 (épocas  1-5):   Solo head, backbone congelado.
+                           CosineAnnealingLR.
+  Fase 2 (épocas  6-20):  Fine-tuning diferencial (head + backbone con LR distintos).
+                           CosineAnnealingWarmRestarts.
+  Fase 3 (épocas 21-40):  Full fine-tuning + early stopping.
+                           CosineAnnealingWarmRestarts.
 
-Análisis del dataset:
-  - ~25,331 imágenes (split por lesion_id sin leakage)
-  - 8 clases con desbalance severo: NV ~53%, VASC ~0.9%
-  - 3 fuentes con bias de dominio: HAM10000, BCN_20000, MSK
-  - Augmentation diferenciado: estándar para mayoría, agresivo para minoría
-  - Contramedida de bias: apply_circular_crop() para BCN_20000
+Dataset ISIC 2019 — 8 clases de entrenamiento:
+  MEL  (Melanoma)
+  NV   (Melanocytic nevus)
+  BCC  (Basal cell carcinoma)
+  AK   (Actinic keratosis)
+  BKL  (Benign keratosis)
+  DF   (Dermatofibroma)
+  VASC (Vascular lesion)
+  SCC  (Squamous cell carcinoma)
 """
 
-# ── Optimizador ─────────────────────────────────────────────
-EXPERT2_LR = 3e-4
-"""Learning rate inicial para AdamW. Valor moderado para EfficientNet-B3
-entrenado desde cero sobre ISIC 2019."""
+# ── GENERAL ──────────────────────────────────────────────────────────────────
+EXPERT2_NUM_CLASSES: int = 8
+EXPERT2_IMG_SIZE: int = 224
+EXPERT2_BATCH_SIZE: int = 32
+EXPERT2_ACCUMULATION_STEPS: int = 3  # batch efectivo = 96
+EXPERT2_NUM_WORKERS: int = 4
+EXPERT2_LABEL_SMOOTHING: float = 0.1
+EXPERT2_CHECKPOINT_DIR: str = "checkpoints/expert_01_efficientnet_b3"
+EXPERT2_CHECKPOINT_NAME: str = "expert2_best.pt"
+EXPERT2_MONITOR: str = "val_f1_macro"  # métrica para checkpoint
 
-EXPERT2_WEIGHT_DECAY = 0.05
-"""Weight decay (L2 regularization) en AdamW. Valor estándar para
-modelos EfficientNet (Tan & Le, 2019)."""
+# ── FASE 1 (épocas 1-5): solo head, backbone congelado ──────────────────────
+EXPERT2_PHASE1_EPOCHS: int = 5
+EXPERT2_PHASE1_LR: float = 3e-4
+EXPERT2_PHASE1_WD: float = 1e-4
+EXPERT2_PHASE1_ETA_MIN: float = 3e-5  # CosineAnnealingLR eta_min
 
-# ── Regularización del modelo ───────────────────────────────
-EXPERT2_DROPOUT_FC = 0.3
-"""Dropout en la capa fully-connected final antes de la clasificación.
-Valor moderado: EfficientNet-B3 ya incluye dropout interno, pero
-el desbalance severo entre clases requiere regularización adicional."""
+# ── FASE 2 (épocas 6-20): fine-tuning diferencial ───────────────────────────
+EXPERT2_PHASE2_EPOCHS: int = 15
+EXPERT2_PHASE2_HEAD_LR: float = 3e-4
+EXPERT2_PHASE2_BACKBONE_LR: float = 1e-5
+EXPERT2_PHASE2_WD: float = 1e-4
+EXPERT2_PHASE2_T0: int = 10  # CosineAnnealingWarmRestarts T_0
+EXPERT2_PHASE2_T_MULT: int = 2
+EXPERT2_PHASE2_ETA_MIN: float = 1e-7
 
-# ── Batch y entrenamiento ───────────────────────────────────
-EXPERT2_BATCH_SIZE = 32
-"""Batch size real por GPU. Con imágenes 224×224 RGB y EfficientNet-B3
-en FP16, batch_size=32 cabe cómodamente en 12 GB VRAM."""
+# ── FASE 3 (épocas 21-40): full fine-tuning + early stopping ────────────────
+EXPERT2_PHASE3_EPOCHS: int = 20
+EXPERT2_PHASE3_HEAD_LR: float = 1e-4
+EXPERT2_PHASE3_BACKBONE_LR: float = 5e-6
+EXPERT2_PHASE3_WD: float = 1e-4
+EXPERT2_PHASE3_T0: int = 10  # CosineAnnealingWarmRestarts T_0
+EXPERT2_PHASE3_T_MULT: int = 2
+EXPERT2_PHASE3_ETA_MIN: float = 1e-7
+EXPERT2_EARLY_STOPPING_PATIENCE: int = 8
 
-EXPERT2_ACCUMULATION_STEPS = 4
-"""Gradient accumulation steps. Batch efectivo = batch_size × accumulation_steps
-= 32 × 4 = 128. Mínimo obligatorio del proyecto es 4."""
-
-EXPERT2_FP16 = True
-"""Usar mixed precision (torch.amp). Reduce consumo de VRAM ~40% y
-acelera el entrenamiento ~1.5x en GPUs con soporte de Tensor Cores."""
-
-# ── Scheduler y stopping ───────────────────────────────────
-EXPERT2_MAX_EPOCHS = 50
-"""Máximo de épocas. El early stopping detendrá antes si val_loss estanca.
-50 es suficiente para convergencia con CosineAnnealingWarmRestarts."""
-
-EXPERT2_EARLY_STOPPING_PATIENCE = 10
-"""Épocas sin mejora en val_loss antes de detener el entrenamiento.
-10 épocas es razonable para un dataset de ~20K imágenes con augmentation."""
-
-EXPERT2_EARLY_STOPPING_MONITOR = "val_loss"
-"""Métrica a monitorear para early stopping. val_loss es más estable
-que BMCA o AUC para multiclase con 8 clases desbalanceadas."""
-
-# ── Resumen ejecutivo para logs ─────────────────────────────
-EXPERT2_CONFIG_SUMMARY = (
-    "Expert 2 (ISIC2019): LR=3e-4 | WD=0.05 | "
-    "CrossEntropyLoss(class_weights) | dropout_fc=0.3 | "
-    "batch=32 | accum=4 (efectivo=128) | FP16=True | "
-    "patience=10 | max_epochs=50"
+# ── Derivada ─────────────────────────────────────────────────────────────────
+EXPERT2_TOTAL_EPOCHS: int = (
+    EXPERT2_PHASE1_EPOCHS + EXPERT2_PHASE2_EPOCHS + EXPERT2_PHASE3_EPOCHS
 )

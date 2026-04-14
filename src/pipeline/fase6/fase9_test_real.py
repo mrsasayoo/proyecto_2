@@ -56,13 +56,13 @@ logger = logging.getLogger(__name__)
 # num_classes y is_multilabel para cada experto de dominio.
 # Ajustado a los constructores reales de cada experto:
 #   Expert 0 (ConvNeXt): num_classes=14 (NIH ChestXray14, multilabel)
-#   Expert 1 (EfficientNet): num_classes=9 (ISIC 2019, 8 clases + 1 UNK)
+#   Expert 1 (ConvNeXt-Small): num_classes=8 (ISIC 2019, 8 clases)
 #   Expert 2 (EfficientNet-B0): num_classes=5 (OA Knee, KL 0-4)
 #   Expert 3 (MC3-18): num_classes=2 (LUNA16, binario)
 #   Expert 4 (Swin3D): num_classes=2 (Pancreas PDAC, binario)
 EXPERT_DATASET_CONFIG = {
     0: {"name": "chest", "num_classes": 14, "is_multilabel": True},
-    1: {"name": "isic", "num_classes": 9, "is_multilabel": False},
+    1: {"name": "isic", "num_classes": 8, "is_multilabel": False},
     2: {"name": "oa_knee", "num_classes": 5, "is_multilabel": False},
     3: {"name": "luna", "num_classes": 2, "is_multilabel": False},
     4: {"name": "pancreas", "num_classes": 2, "is_multilabel": False},
@@ -126,7 +126,7 @@ def build_moe_system(
     """
     from src.pipeline.fase5.moe_model import MoESystem
     from src.pipeline.fase2.models.expert1_convnext import Expert1ConvNeXtTiny
-    from src.pipeline.fase2.models.expert2_efficientnet import Expert2EfficientNetB3
+    from src.pipeline.fase2.models.expert2_efficientnet import Expert2ConvNeXtSmall
     from src.pipeline.fase2.models.expert_oa_vgg16bn import ExpertOAEfficientNetB0
     from src.pipeline.fase2.models.expert3_r3d18 import Expert3MC318
     from src.pipeline.fase2.models.expert4_swin3d import ExpertPancreasSwin3D
@@ -142,9 +142,7 @@ def build_moe_system(
             Expert1ConvNeXtTiny(
                 fc_dropout_p=0.3, num_classes=14
             ),  # Expert 0: NIH Chest
-            Expert2EfficientNetB3(
-                fc_dropout_p=0.3, num_classes=9
-            ),  # Expert 1: ISIC (8+UNK)
+            Expert2ConvNeXtSmall(),  # Expert 1: ISIC (8 clases)
             ExpertOAEfficientNetB0(),  # Expert 2: OA Knee
             Expert3MC318(  # Expert 3: LUNA16
                 spatial_dropout_p=0.15, fc_dropout_p=0.4, num_classes=2

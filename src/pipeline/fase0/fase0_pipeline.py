@@ -4,7 +4,7 @@ fase0_pipeline.py — Orquestador principal de Fase 0
 =====================================================
 Fase 0 — Preparación de Datos | Proyecto MoE Médico
 
-Responsabilidad única: ejecutar los 8 pasos de Fase 0 en orden secuencial
+Responsabilidad única: ejecutar los 10 pasos de Fase 0 en orden secuencial
 con idempotencia, registro de tiempos, manejo de errores y reporte final.
 
 Pasos:
@@ -14,9 +14,10 @@ Pasos:
   3 — Post-procesado NIH          [pre_chestxray14.py]
   4 — Etiquetas páncreas          [integrado aquí]
   5 — Splits 80/10/10             [pre_modelo.py]
-  6 — Datos 3D (LUNA + páncreas)  [pre_embeddings.py]
-  7 — DenseNet3D verificar         [integrado aquí]
-  8 — Reporte final               [integrado aquí]
+  6 — ISIC Preprocesamiento       [pre_isic.py]
+  7 — Datos 3D (LUNA + páncreas)  [pre_embeddings.py]
+  8 — DenseNet3D verificar         [integrado aquí]
+  9 — Reporte final               [integrado aquí]
 
 Uso:
   python3 fase0/fase0_pipeline.py
@@ -266,7 +267,7 @@ def paso0_prerequisites(active, dry_run=False):
             log.warning("  ⚠ kaggle CLI no disponible")
             issues.append(("WARNING", "kaggle CLI no disponible"))
 
-    # SimpleITK — necesario para Paso 6 (extracción de parches 3D)
+    # SimpleITK — necesario para Paso 7 (extracción de parches 3D)
     if any(d in active for d in {"luna_ct", "pancreas"}):
         try:
             import SimpleITK  # noqa: F401
@@ -274,7 +275,7 @@ def paso0_prerequisites(active, dry_run=False):
             log.info("  ✓ SimpleITK disponible")
         except ImportError:
             msg = (
-                "SimpleITK no instalado — Paso 6 fallará. "
+                "SimpleITK no instalado — Paso 7 fallará. "
                 "Instalar: pip install SimpleITK"
             )
             log.error("  ✗ %s", msg)
@@ -528,11 +529,46 @@ def paso5_splits(active, dry_run=False):
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-#  Paso 6 — Datos 3D
+#  Paso 6 — ISIC Preprocesamiento
 # ══════════════════════════════════════════════════════════════════════════════
 
 
-def paso6_pre_embeddings(
+def paso6_isic_preprocess(active, dry_run=False):
+    # type: (set, bool) -> dict
+    """Preprocesamiento offline del dataset ISIC 2019 (DullRazor + resize)."""
+    if "isic" not in active:
+        log.info("╔══ Paso 6: Saltado (ISIC no activo) ══╗")
+        return {"status": "skipped"}
+
+    log.info("╔══ Paso 6: ISIC Preprocesamiento ══╗")
+
+    img_dir = DATASETS_DIR / "isic_2019" / "ISIC_2019_Training_Input"
+    out_dir = DATASETS_DIR / "isic_2019" / "ISIC_2019_Training_Input_preprocessed"
+    gt_csv = DATASETS_DIR / "isic_2019" / "ISIC_2019_Training_GroundTruth.csv"
+
+    if dry_run:
+        n_cached = 0
+        if out_dir.exists():
+            n_cached = len(list(out_dir.glob("*_pp_224.jpg")))
+        log.info("  [dry_run] Archivos cacheados: %d", n_cached)
+        return {"status": "dry_run", "n_cached": n_cached}
+
+    try:
+        from pre_isic import preprocess_isic_dataset
+
+        result = preprocess_isic_dataset(img_dir, out_dir, gt_csv)
+        return {"status": "ok", "out_dir": str(out_dir), "detail": result}
+    except Exception as e:
+        log.error("  Paso 6 falló: %s", e)
+        return {"status": "error", "msg": str(e)}
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+#  Paso 7 — Datos 3D
+# ══════════════════════════════════════════════════════════════════════════════
+
+
+def paso7_pre_embeddings(
     active,
     workers=6,
     neg_ratio=10,
@@ -544,7 +580,7 @@ def paso6_pre_embeddings(
     skip_audit=False,
 ):
     # type: (set, int, int, int|None, list|None, bool, bool, bool, bool) -> dict
-    log.info("╔══ Paso 6: Datos 3D (LUNA + Páncreas) ══╗")
+    log.info("╔══ Paso 7: Datos 3D (LUNA + Páncreas) ══╗")
     try:
         from pre_embeddings import run_pre_embeddings
 
@@ -561,12 +597,12 @@ def paso6_pre_embeddings(
             skip_audit=skip_audit,
         )
     except Exception as e:
-        log.error("  Paso 6 falló: %s", e)
+        log.error("  Paso 7 falló: %s", e)
         return {"status": "❌", "error": str(e)}
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-#  Paso 7 — DenseNet3D
+#  Paso 8 — DenseNet3D
 # ══════════════════════════════════════════════════════════════════════════════
 
 DENSENET3D_MODULE_PATH = (
@@ -574,21 +610,21 @@ DENSENET3D_MODULE_PATH = (
 )
 
 
-def paso7_densenet3d(dry_run=False):
+def paso8_densenet3d(dry_run=False):
     # type: (bool) -> dict
     """
     Verifica que el backbone DenseNet3D esté disponible para Fase 1.
     Arquitectura: DenseNet-121 3D — 11.14M params, entrada [B,1,64,64,64], salida [B,2].
     Ref: luna16-online-aug.ipynb — growth_rate=32, block_config=(6,12,24,16).
     """
-    log.info("╔══ Paso 7: DenseNet3D backbone ══╗")
+    log.info("╔══ Paso 8: DenseNet3D backbone ══╗")
 
-    # 7a: Verificar módulo nativo en Fase 1
+    # 8a: Verificar módulo nativo en Fase 1
     if DENSENET3D_MODULE_PATH.exists():
         log.info(
             "  ✓ backbone_densenet3d.py encontrado en src/pipeline/fase1/ (nativo)"
         )
-        # 7b: Sanity check — importar DenseNet3D y verificar forward pass
+        # 8b: Sanity check — importar DenseNet3D y verificar forward pass
         if not dry_run:
             try:
                 import importlib.util
@@ -632,7 +668,7 @@ def paso7_densenet3d(dry_run=False):
                 return {"status": "❌", "error": str(exc)}
         return {"status": "✅", "dry_run": True}
 
-    # 7c: Verificar checkpoint preentrenado como fallback
+    # 8c: Verificar checkpoint preentrenado como fallback
     ckpt_path = (
         PROJECT_ROOT / "checkpoints" / "expert_03_vivit_tiny" / "expert3_best.pt"
     )
@@ -657,13 +693,13 @@ def paso7_densenet3d(dry_run=False):
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-#  Paso 8 — Reporte final
+#  Paso 9 — Reporte final
 # ══════════════════════════════════════════════════════════════════════════════
 
 
-def paso8_reporte(all_results, timings, active):
+def paso9_reporte(all_results, timings, active):
     # type: (dict, dict, set) -> dict
-    log.info("╔══ Paso 8: Reporte final ══╗")
+    log.info("╔══ Paso 9: Reporte final ══╗")
 
     import datetime
 
@@ -687,12 +723,13 @@ def paso8_reporte(all_results, timings, active):
         3: "Post-procesado NIH",
         4: "Etiquetas páncreas",
         5: "Splits 80/10/10",
-        6: "Datos 3D",
-        7: "DenseNet3D",
-        8: "Reporte",
+        6: "ISIC Preprocesamiento",
+        7: "Datos 3D",
+        8: "DenseNet3D",
+        9: "Reporte",
     }
 
-    for paso_num in range(9):
+    for paso_num in range(10):
         key = "paso{}".format(paso_num)
         nombre = paso_nombres.get(paso_num, "?")
         r = all_results.get(key, {})
@@ -792,7 +829,7 @@ def main():
         nargs="+",
         type=int,
         default=None,
-        help="Solo ejecutar pasos específicos (0-8)",
+        help="Solo ejecutar pasos específicos (0-9)",
     )
     parser.add_argument(
         "--disco",
@@ -839,17 +876,17 @@ def main():
     parser.add_argument(
         "--skip_zerocentering",
         action="store_true",
-        help="Skip zero-centering fix (paso 6b)",
+        help="Skip zero-centering fix (paso 7b)",
     )
     parser.add_argument(
         "--skip_augmentation",
         action="store_true",
-        help="Skip train_aug creation (paso 6c)",
+        help="Skip train_aug creation (paso 7c)",
     )
     parser.add_argument(
         "--skip_audit",
         action="store_true",
-        help="Skip dataset audit (paso 6d)",
+        help="Skip dataset audit (paso 7d)",
     )
     args = parser.parse_args()
 
@@ -864,7 +901,7 @@ def main():
     active = resolve_active(args.solo, args.skip)
     log.info("Datasets activos: %s", sorted(active))
 
-    pasos = set(range(9))
+    pasos = set(range(10))
     if args.solo_pasos is not None:
         pasos = set(args.solo_pasos)
     log.info("Pasos a ejecutar: %s", sorted(pasos))
@@ -920,9 +957,10 @@ def main():
     run_paso(3, paso3_pre_chestxray14, active, args.dry_run)
     run_paso(4, paso4_pancreas_labels, active, args.dry_run)
     run_paso(5, paso5_splits, active, args.dry_run)
+    run_paso(6, paso6_isic_preprocess, active, args.dry_run)
     run_paso(
-        6,
-        paso6_pre_embeddings,
+        7,
+        paso7_pre_embeddings,
         active,
         args.workers,
         args.neg_ratio,
@@ -933,15 +971,15 @@ def main():
         skip_augmentation=args.skip_augmentation,
         skip_audit=args.skip_audit,
     )
-    run_paso(7, paso7_densenet3d, args.dry_run)
-    run_paso(8, paso8_reporte, all_results, timings, active)
+    run_paso(8, paso8_densenet3d, args.dry_run)
+    run_paso(9, paso9_reporte, all_results, timings, active)
 
     # Resumen final
     log.info("")
     log.info("=" * 65)
     log.info("  FASE 0 COMPLETADA")
     log.info("=" * 65)
-    for num in range(9):
+    for num in range(10):
         key = "paso{}".format(num)
         r = all_results.get(key, {})
         t = timings.get(key, 0)

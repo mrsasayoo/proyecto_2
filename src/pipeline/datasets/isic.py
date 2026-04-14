@@ -1,13 +1,22 @@
 """
-ISIC 2019 — Experto 1: Multiclase, 9 clases (8 en train + UNK solo en test).
+ISIC 2019 — Experto 2: Multiclase, 8 clases (ConvNeXt-Small).
+
+Pipeline actualizado con la solución ganadora de ISIC 2020:
+  - DullRazor + Color Constancy online + augmentaciones basadas en la literatura
+  - CutMix/MixUp en el training loop (batch level)
+  - FocalLossMultiClass reemplaza CrossEntropyLoss
 
 Hallazgos implementados:
-  H1 → multiclase: CrossEntropyLoss, 9 neuronas softmax, pesos de clase
+  H1 → multiclase: FocalLossMultiClass, 8 neuronas softmax, pesos de clase
   H2 → split por lesion_id sin leakage (build_lesion_split)
   H3 → bias 3 fuentes: _source_audit() + apply_circular_crop() para BCN_20000
   H4 → deduplicación MD5: elimina duplicados silenciosos ISIC 2018/2019
-  H5 → UNK: validación todo-ceros en train, slot 8 para OOD en inferencia
-  H6 → augmentation diferenciado: estándar vs agresivo (Gessert et al.) por clase
+
+Transforms online:
+  Train: RandomCrop(224) → flips → rotation 360° → ColorJitter →
+         RandomGamma → ShadesOfGray(p=0.5) → CoarseDropout → ToTensor → Normalize
+  Val:   CenterCrop(224) → ToTensor → Normalize
+  Emb:   Resize(224x224) → ToTensor → Normalize
 """
 
 import logging
@@ -20,87 +29,210 @@ from PIL import Image
 from pathlib import Path
 import pandas as pd
 
-from config import EXPERT_IDS, IMAGENET_MEAN, IMAGENET_STD
-from fase1.transform_domain import apply_circular_crop
+from config import EXPERT_IDS
+
+try:
+    from fase1.transform_domain import apply_circular_crop
+
+    _HAS_BCN_CROP = True
+except ImportError:
+    _HAS_BCN_CROP = False
+    apply_circular_crop = None  # type: ignore[assignment]
 
 log = logging.getLogger("fase0")
 
 
+# ── Custom transforms ──────────────────────────────────────────────────
+
+
+class RandomGamma:
+    """Corrección gamma aleatoria: I' = I^γ con γ ∈ gamma_range."""
+
+    def __init__(self, gamma_range: tuple[float, float] = (0.7, 1.5), p: float = 0.5):
+        self.gamma_range = gamma_range
+        self.p = p
+
+    def __call__(self, img: Image.Image) -> Image.Image:
+        if np.random.random() < self.p:
+            gamma = np.random.uniform(*self.gamma_range)
+            return transforms.functional.adjust_gamma(img, gamma)
+        return img
+
+
+class ShadesOfGray:
+    """Color Constancy: normalización del iluminante por norma de Minkowski (p=6).
+    Aplica corrección von Kries diagonal para simular luz blanca canónica.
+    Usar con p=0.5 online para ConvNeXt-Small (>20M params)."""
+
+    def __init__(self, power: int = 6):
+        self.power = power
+
+    def __call__(self, img: Image.Image) -> Image.Image:
+        arr = np.array(img, dtype=np.float32)
+        illuminant = np.mean(arr**self.power, axis=(0, 1)) ** (1.0 / self.power)
+        illuminant = illuminant / (np.mean(illuminant) + 1e-6)
+        corrected = arr / (illuminant + 1e-6)
+        return Image.fromarray(np.clip(corrected, 0, 255).astype(np.uint8))
+
+
+class CoarseDropout:
+    """Elimina 1–3 parches rectangulares aleatorios (CutOut / CoarseDropout).
+    Opera sobre PIL Image ANTES de ToTensor."""
+
+    def __init__(
+        self,
+        n_holes_range: tuple[int, int] = (1, 3),
+        size_range: tuple[int, int] = (32, 96),
+        fill_value: tuple[int, int, int] = (
+            int(0.485 * 255),
+            int(0.456 * 255),
+            int(0.406 * 255),
+        ),
+        p: float = 0.5,
+    ):
+        self.n_holes_range = n_holes_range
+        self.size_range = size_range
+        self.fill_value = fill_value
+        self.p = p
+
+    def __call__(self, img: Image.Image) -> Image.Image:
+        if np.random.random() >= self.p:
+            return img
+        arr = np.array(img)
+        h, w = arr.shape[:2]
+        n_holes = np.random.randint(self.n_holes_range[0], self.n_holes_range[1] + 1)
+        for _ in range(n_holes):
+            hole_h = np.random.randint(self.size_range[0], self.size_range[1] + 1)
+            hole_w = np.random.randint(self.size_range[0], self.size_range[1] + 1)
+            y = np.random.randint(0, max(1, h - hole_h))
+            x = np.random.randint(0, max(1, w - hole_w))
+            arr[y : y + hole_h, x : x + hole_w] = self.fill_value
+        return Image.fromarray(arr)
+
+
+# ── Transform pipelines ────────────────────────────────────────────────
+
+TARGET_SIZE = 224  # debe coincidir con EXPERT2_IMG_SIZE
+
+TRANSFORM_TRAIN = transforms.Compose(
+    [
+        transforms.RandomCrop(TARGET_SIZE),
+        transforms.RandomHorizontalFlip(p=0.5),
+        transforms.RandomVerticalFlip(p=0.5),
+        transforms.RandomRotation(
+            degrees=360,
+            interpolation=transforms.InterpolationMode.BILINEAR,
+            fill=0,
+        ),
+        transforms.ColorJitter(brightness=0.2, contrast=0.2, saturation=0.2, hue=0.1),
+        RandomGamma(gamma_range=(0.7, 1.5), p=0.5),
+        transforms.RandomApply([ShadesOfGray(power=6)], p=0.5),
+        CoarseDropout(n_holes_range=(1, 3), size_range=(32, 96), p=0.5),
+        transforms.ToTensor(),
+        transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]),
+    ]
+)
+
+TRANSFORM_VAL = transforms.Compose(
+    [
+        transforms.CenterCrop(TARGET_SIZE),
+        transforms.ToTensor(),
+        transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]),
+    ]
+)
+
+# Para modo "embedding" (Fase 0) — sin augmentación
+TRANSFORM_EMBEDDING = transforms.Compose(
+    [
+        transforms.Resize((TARGET_SIZE, TARGET_SIZE)),
+        transforms.ToTensor(),
+        transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]),
+    ]
+)
+
+
+# ── CutMix / MixUp helpers ────────────────────────────────────────────
+
+
+def cutmix_data(
+    x: torch.Tensor, y: torch.Tensor, alpha: float = 1.0
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, float]:
+    """
+    CutMix: recorta región rectangular de imagen A y la pega en imagen B.
+    Returns: mixed_x, y_a, y_b, lam
+    Usar en training loop como: loss = lam * criterion(logits, y_a) + (1-lam) * criterion(logits, y_b)
+    """
+    lam = np.random.beta(alpha, alpha)
+    batch_size = x.size(0)
+    rand_index = torch.randperm(batch_size, device=x.device)
+    y_a = y
+    y_b = y[rand_index]
+    _, _, H, W = x.shape
+    cut_rat = np.sqrt(1.0 - lam)
+    cut_w = int(W * cut_rat)
+    cut_h = int(H * cut_rat)
+    cx = np.random.randint(W)
+    cy = np.random.randint(H)
+    bbx1 = np.clip(cx - cut_w // 2, 0, W)
+    bby1 = np.clip(cy - cut_h // 2, 0, H)
+    bbx2 = np.clip(cx + cut_w // 2, 0, W)
+    bby2 = np.clip(cy + cut_h // 2, 0, H)
+    x = x.clone()
+    x[:, :, bby1:bby2, bbx1:bbx2] = x[rand_index, :, bby1:bby2, bbx1:bbx2]
+    lam = 1 - (bbx2 - bbx1) * (bby2 - bby1) / (W * H)
+    return x, y_a, y_b, lam
+
+
+def mixup_data(
+    x: torch.Tensor, y: torch.Tensor, alpha: float = 0.4
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, float]:
+    """
+    MixUp: combina linealmente dos imágenes y sus etiquetas.
+    Returns: mixed_x, y_a, y_b, lam
+    Usar en training loop como: loss = lam * criterion(logits, y_a) + (1-lam) * criterion(logits, y_b)
+    """
+    lam = np.random.beta(alpha, alpha)
+    batch_size = x.size(0)
+    rand_index = torch.randperm(batch_size, device=x.device)
+    y_a = y
+    y_b = y[rand_index]
+    mixed_x = lam * x + (1.0 - lam) * x[rand_index]
+    return mixed_x, y_a, y_b, lam
+
+
+# ── ISICDataset ────────────────────────────────────────────────────────
+
+
 class ISICDataset(Dataset):
     """
-    ISIC 2019 — Multiclase, 9 clases (8 en train + UNK solo en test).
+    ISIC 2019 — Multiclase, 8 clases (ConvNeXt-Small).
 
     Dos modos:
       mode="embedding" → FASE 0: (img, expert_id=1, img_name)
       mode="expert"    → FASE 2: (img, class_label_int, img_name)
+
+    Soporta cache_dir: si las imágenes preprocesadas existen ahí
+    (DullRazor + resize shorter_side=224), se cargan directamente.
+    Si no, se cargan las originales con resize a shorter_side=224.
     """
 
     CLASSES = ["MEL", "NV", "BCC", "AK", "BKL", "DF", "VASC", "SCC"]
     N_TRAIN_CLS = 8
-    MINORITY_IDX = {3, 5, 6, 7}  # AK=3, DF=5, VASC=6, SCC=7
     KNOWN_DUPLICATES = {"ISIC_0067980", "ISIC_0069013"}
     _error_count = 0
 
     @staticmethod
-    def build_isic_transforms(img_size=224):
-        """
-        H6 — Tres pipelines de transform:
-          "embedding" : sin augmentation (FASE 0).
-          "standard"  : augmentation moderado para clases mayoritarias (FASE 2).
-          "minority"  : augmentation agresivo Gessert et al. 2020 (FASE 2).
-        """
-        normalize = transforms.Normalize(mean=IMAGENET_MEAN, std=IMAGENET_STD)
-
-        embedding_tf = transforms.Compose(
-            [
-                transforms.Resize((img_size, img_size)),
-                transforms.ToTensor(),
-                normalize,
-            ]
-        )
-
-        standard_tf = transforms.Compose(
-            [
-                transforms.Resize((img_size, img_size)),
-                transforms.RandomHorizontalFlip(p=0.5),
-                transforms.RandomRotation(degrees=30),
-                transforms.ColorJitter(
-                    brightness=0.2, contrast=0.2, saturation=0.2, hue=0.05
-                ),
-                transforms.ToTensor(),
-                normalize,
-            ]
-        )
-
-        minority_tf = transforms.Compose(
-            [
-                transforms.Resize((img_size, img_size)),
-                transforms.RandomHorizontalFlip(p=0.5),
-                # REMOVED: RandomVerticalFlip — prohibited by project spec
-                transforms.RandomApply([transforms.RandomRotation((90, 90))], p=0.33),
-                transforms.RandomApply([transforms.RandomRotation((180, 180))], p=0.33),
-                transforms.ColorJitter(
-                    brightness=0.3, contrast=0.3, saturation=0.3, hue=0.1
-                ),
-                transforms.RandomAffine(
-                    degrees=0, translate=(0.1, 0.1), scale=(0.9, 1.1)
-                ),
-                transforms.ToTensor(),
-                normalize,
-                # REMOVED: RandomErasing — prohibited by project spec
-            ]
-        )
-
-        return {
-            "embedding": embedding_tf,
-            "standard": standard_tf,
-            "minority": minority_tf,
-        }
+    def _resize_shorter_side(img: Image.Image, target_size: int) -> Image.Image:
+        """Resize manteniendo aspecto: lado corto = target_size."""
+        w, h = img.size
+        scale = target_size / min(w, h)
+        new_w, new_h = int(w * scale), int(h * scale)
+        return img.resize((new_w, new_h), Image.LANCZOS)
 
     @staticmethod
-    def get_weighted_sampler(split_df, classes):
+    def get_weighted_sampler(split_df: pd.DataFrame, classes: list[str]):
         """
-        H6 — WeightedRandomSampler para compensar desbalance NV>>DF/VASC en FASE 2.
+        WeightedRandomSampler para compensar desbalance NV>>DF/VASC en FASE 2.
         """
         from torch.utils.data import WeightedRandomSampler
 
@@ -117,19 +249,19 @@ class ISICDataset(Dataset):
 
     def __init__(
         self,
-        img_dir,
-        split_df,
-        mode="embedding",
-        split="train",
-        transform_standard=None,
-        transform_minority=None,
-        apply_bcn_crop=True,
+        img_dir: str | Path,
+        split_df: pd.DataFrame,
+        mode: str = "embedding",
+        split: str = "train",
+        cache_dir: str | Path | None = None,
+        apply_bcn_crop: bool = True,
     ):
         assert mode in ("embedding", "expert"), (
             f"[ISIC] mode debe ser 'embedding' o 'expert', recibido: '{mode}'"
         )
 
         self.img_dir = Path(img_dir)
+        self.cache_dir = Path(cache_dir) if cache_dir else None
         self.expert_id = EXPERT_IDS["isic"]
         self.mode = mode
         self.split = split
@@ -137,44 +269,30 @@ class ISICDataset(Dataset):
         self.df = split_df.reset_index(drop=True)
         self.class_weights = None
 
-        tfs = self.build_isic_transforms()
+        # Seleccionar transform según modo y split
         if mode == "embedding":
-            self.transform = tfs["embedding"]
+            self.transform = TRANSFORM_EMBEDDING
+        elif split == "train":
+            self.transform = TRANSFORM_TRAIN
         else:
-            self.transform_standard = transform_standard or tfs["standard"]
-            self.transform_minority = transform_minority or tfs["minority"]
-            self.transform_base = tfs["embedding"]
-            self.transform = self.transform_standard
+            self.transform = TRANSFORM_VAL
 
         log.info(
             f"[ISIC] Dataset: {len(self.df):,} imgs | mode='{mode}' | "
+            f"split='{split}' | cache_dir={self.cache_dir} | "
             f"apply_bcn_crop={apply_bcn_crop}"
         )
 
-        # H1 — verificar one-hot
+        # Verificar one-hot
         if all(c in self.df.columns for c in self.CLASSES):
             bad = (self.df[self.CLASSES].sum(axis=1) != 1).sum()
             if bad:
                 log.error(
-                    f"[ISIC] H1 — {bad} filas sin exactamente un 1.0. "
-                    f"ISIC es MULTICLASE (no multi-label). row_sum=0=UNK; row_sum>1=error CSV."
+                    f"[ISIC] {bad} filas sin exactamente un 1.0. "
+                    f"ISIC es MULTICLASE (no multi-label)."
                 )
             else:
-                log.debug("[ISIC] H1 — Ground truth one-hot ✓")
-
-        # H5 — verificar UNK = todo-ceros en train
-        if "UNK" in self.df.columns:
-            n_unk = (self.df["UNK"] != 0).sum()
-            if n_unk:
-                log.warning(
-                    f"[ISIC] H5 — {n_unk} filas con UNK≠0. "
-                    f"UNK solo debería estar en el test set oficial."
-                )
-            else:
-                log.info(
-                    "[ISIC] H5 — UNK=0 en train ✓ | "
-                    "Slot 8 (softmax) disponible para OOD en inferencia → Experto 5"
-                )
+                log.debug("[ISIC] Ground truth one-hot ✓")
 
         # H3/Item-6 — detectar _downsampled y verificar en disco
         ds_names = self.df["image"][
@@ -204,26 +322,22 @@ class ISICDataset(Dataset):
         # H3/Item-7 — source audit (HAM/BCN/MSK)
         self._source_audit()
 
-        # H6/Item-9 — preparar modo expert
+        # Preparar modo expert
         if mode == "expert":
             log.info(
-                "[ISIC] H1  — Loss: CrossEntropyLoss con pesos (NO BCEWithLogitsLoss)."
+                "[ISIC] Loss: FocalLossMultiClass con pesos (gamma=2.0, label_smoothing=0.1)."
             )
+            log.info("[ISIC] 8 neuronas softmax. Métrica: BMCA (no Accuracy global).")
             log.info(
-                "[ISIC] H1  — 9 neuronas softmax. Metrica: BMCA (no Accuracy global)."
-            )
-            log.info(
-                "[ISIC] H6/Item-9 — Augmentation diferenciado:\n"
-                "    Mayoría: flip H, rot±30°, ColorJitter moderado\n"
-                "    Minoría (DF/VASC/SCC/AK): flip H, rot 0/90/180/270°, "
-                "ColorJitter agresivo, RandomAffine\n"
-                "    (RandomVerticalFlip y RandomErasing/Cutout PROHIBIDOS — ver spec)\n"
+                "[ISIC] Augmentation pipeline:\n"
+                "    Train: RandomCrop(224) → flips(0.5) → rotation(360°) → "
+                "ColorJitter → RandomGamma → ShadesOfGray(p=0.5) → CoarseDropout\n"
+                "    + CutMix(p=0.3) / MixUp(p=0.2) a nivel de batch\n"
                 "    Usar get_weighted_sampler() en DataLoader de FASE 2."
             )
 
             self.df = self.df.copy()
             self.df["class_label"] = self.df[self.CLASSES].values.argmax(axis=1)
-            self.df["is_minority"] = self.df["class_label"].isin(self.MINORITY_IDX)
 
             dist = self.df["class_label"].value_counts().sort_index()
             total = len(self.df)
@@ -231,22 +345,19 @@ class ISICDataset(Dataset):
             for i, cls in enumerate(self.CLASSES):
                 count = dist.get(i, 0)
                 bar = "█" * max(1, int(30 * count / total))
-                tag = " ⚠ MINORÍA" if i in self.MINORITY_IDX else ""
                 log.info(
-                    f"    {cls:<5}(idx {i}): {count:>6,} ({100 * count / total:.1f}%) {bar}{tag}"
+                    f"    {cls:<5}(idx {i}): {count:>6,} ({100 * count / total:.1f}%) {bar}"
                 )
 
             counts = np.array(
                 [dist.get(i, 1) for i in range(self.N_TRAIN_CLS)], dtype=float
             )
             weights = total / (self.N_TRAIN_CLS * counts)
-            weights_full = np.append(weights, 1.0)
-            self.class_weights = torch.tensor(weights_full, dtype=torch.float32)
-            _cls_names = self.CLASSES + ["UNK"]
+            self.class_weights = torch.tensor(weights, dtype=torch.float32)
             log.info(
-                f"[ISIC] H1 — class_weights: "
-                f"min={self.class_weights.min():.2f}({_cls_names[self.class_weights.argmin()]}) | "
-                f"max={self.class_weights.max():.2f}({_cls_names[self.class_weights.argmax()]})"
+                f"[ISIC] class_weights[{self.N_TRAIN_CLS}]: "
+                f"min={self.class_weights.min():.2f}({self.CLASSES[self.class_weights.argmin()]}) | "
+                f"max={self.class_weights.max():.2f}({self.CLASSES[self.class_weights.argmax()]})"
             )
 
             all_zero = (self.df[self.CLASSES].sum(axis=1) == 0).sum()
@@ -255,7 +366,7 @@ class ISICDataset(Dataset):
                     f"[ISIC] {all_zero} filas sum=0 → argmax asignará clase 0 (MEL)."
                 )
 
-    def _source_audit(self):
+    def _source_audit(self) -> None:
         """H3/Item-7 — Infiere fuente por naming e imprime estadísticas de bias de dominio."""
         names = self.df["image"]
         msk_mask = names.str.endswith("_downsampled")
@@ -274,13 +385,17 @@ class ISICDataset(Dataset):
             f"    HAM10000 (Viena, 600×450, recortado)      : {n_ham:>5,} ({100 * n_ham / total:.1f}%)\n"
             f"    BCN_20000 (Barcelona, 1024×1024, dermoscop): {n_bcn:>5,} ({100 * n_bcn / total:.1f}%)\n"
             f"    MSK (NYC, variable, _downsampled)          : {n_msk:>5,} ({100 * n_msk / total:.1f}%)\n"
-            f"    Contramedida activa: apply_circular_crop() (BCN) + ColorJitter (todas).\n"
+            f"    Contramedida activa: apply_circular_crop() (BCN) + ShadesOfGray(p=0.5).\n"
             f"    ⚠ Para inspección visual: samplea 5-10 imgs de cada fuente antes de FASE 2."
         )
 
     @staticmethod
     def build_lesion_split(
-        gt_csv, img_dir=None, metadata_csv=None, frac_train=0.8, random_state=42
+        gt_csv,
+        img_dir=None,
+        metadata_csv=None,
+        frac_train: float = 0.8,
+        random_state: int = 42,
     ):
         """
         H2 + H4 — Split por lesion_id + deduplicación MD5.
@@ -305,7 +420,9 @@ class ISICDataset(Dataset):
                 f"[ISIC/split] H4 — Calculando hashes MD5 de {len(df_gt):,} imgs "
                 f"(puede tardar ~1-2 min)..."
             )
-            hashes, dup_ids, missing = {}, set(), 0
+            hashes: dict[str, str] = {}
+            dup_ids: set[str] = set()
+            missing = 0
             for _, row in df_gt.iterrows():
                 fpath = img_path_obj / f"{row['image']}.jpg"
                 if not fpath.exists():
@@ -388,59 +505,62 @@ class ISICDataset(Dataset):
             train_df = df_gt.iloc[idx_all[:n_tr]].copy()
             val_df = df_gt.iloc[idx_all[n_tr:]].copy()
 
-        # H5: verificar UNK=0 en ambos splits
-        for sname, sdf in [("train", train_df), ("val", val_df)]:
-            if "UNK" in sdf.columns:
-                n_unk = (sdf["UNK"] != 0).sum()
-                if n_unk:
-                    log.warning(
-                        f"[ISIC/split] H5 — {n_unk} filas UNK≠0 en '{sname}'. "
-                        f"UNK solo debería estar en el test set oficial."
-                    )
-                else:
-                    log.debug(f"[ISIC/split] H5 — UNK=0 en '{sname}' ✓")
-
         log.info(
             f"[ISIC/split] Final — train: {len(train_df):,} | val: {len(val_df):,}"
         )
         return train_df, val_df
 
-    def __len__(self):
+    def __len__(self) -> int:
         return len(self.df)
 
-    def __getitem__(self, idx):
+    def __getitem__(self, idx: int):
         img_name = self.df.loc[idx, "image"]
-        img_path = self.img_dir / f"{img_name}.jpg"
-        try:
-            img = Image.open(img_path).convert("RGB")
-        except Exception as e:
-            ISICDataset._error_count += 1
-            if ISICDataset._error_count <= 1:
-                log.warning(
-                    f"[ISIC] Error abriendo '{img_path}': {e}. "
-                    f"Reemplazando con tensor cero. "
-                    f"(futuros errores similares se silenciarán)"
-                )
-            dummy = torch.zeros(3, 224, 224)
-            if self.mode == "embedding":
-                return dummy, self.expert_id, img_name
-            label = (
-                int(self.df.loc[idx, "class_label"])
-                if "class_label" in self.df.columns
-                else 0
-            )
-            return dummy, label, img_name
 
-        # H3/Item-8 — eliminar bordes negros BCN_20000 (idempotente para HAM/MSK)
-        if self.apply_bcn_crop:
+        # Intentar cargar desde cache_dir primero
+        img = None
+        loaded_from_cache = False
+        if self.cache_dir is not None:
+            cache_path = self.cache_dir / f"{img_name}_pp_{TARGET_SIZE}.jpg"
+            if cache_path.exists():
+                try:
+                    img = Image.open(cache_path).convert("RGB")
+                    loaded_from_cache = True
+                except Exception:
+                    img = None
+
+        # Fallback: cargar desde img_dir original
+        if img is None:
+            img_path = self.img_dir / f"{img_name}.jpg"
+            try:
+                img = Image.open(img_path).convert("RGB")
+            except Exception as e:
+                ISICDataset._error_count += 1
+                if ISICDataset._error_count <= 1:
+                    log.warning(
+                        f"[ISIC] Error abriendo '{img_path}': {e}. "
+                        f"Reemplazando con tensor cero. "
+                        f"(futuros errores similares se silenciarán)"
+                    )
+                dummy = torch.zeros(3, TARGET_SIZE, TARGET_SIZE)
+                if self.mode == "embedding":
+                    return dummy, self.expert_id, img_name
+                label = (
+                    int(self.df.loc[idx, "class_label"])
+                    if "class_label" in self.df.columns
+                    else 0
+                )
+                return dummy, label, img_name
+
+        # H3/Item-8 — eliminar bordes negros BCN_20000 (solo si no viene de cache)
+        if self.apply_bcn_crop and not loaded_from_cache and _HAS_BCN_CROP:
             img = apply_circular_crop(img)
+
+        # Si la imagen NO viene de cache, hacer resize a shorter_side=TARGET_SIZE
+        # para que RandomCrop(224) funcione correctamente
+        if not loaded_from_cache and self.mode != "embedding":
+            img = self._resize_shorter_side(img, TARGET_SIZE)
 
         if self.mode == "embedding":
             return self.transform(img), self.expert_id, img_name
         else:
-            if self.split == "train":
-                is_minority = bool(self.df.loc[idx, "is_minority"])
-                tf = self.transform_minority if is_minority else self.transform_standard
-            else:
-                tf = self.transform_base
-            return tf(img), int(self.df.loc[idx, "class_label"]), img_name
+            return self.transform(img), int(self.df.loc[idx, "class_label"]), img_name
