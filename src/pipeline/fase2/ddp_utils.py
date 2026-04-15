@@ -29,6 +29,7 @@ from __future__ import annotations
 
 import logging
 import os
+import warnings
 from pathlib import Path
 from typing import Any
 
@@ -117,6 +118,11 @@ def setup_ddp(backend: str = "nccl") -> None:
     # WARNING en workers deja pasar solo advertencias y errores reales.
     if rank != 0:
         logging.getLogger().setLevel(logging.WARNING)
+        # Suprimir también warnings.warn() de PyTorch (CUDNN, scheduler,
+        # torchvision) en workers. El módulo `warnings` de Python es
+        # completamente independiente del módulo `logging`, así que la
+        # guardia de logging de arriba no los cubre.
+        warnings.filterwarnings("ignore")
 
     if rank == 0:
         log.info(

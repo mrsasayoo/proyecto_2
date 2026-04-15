@@ -65,6 +65,7 @@ import logging
 import os
 import sys
 import time
+import warnings
 from contextlib import contextmanager
 from pathlib import Path
 from typing import Iterator
@@ -956,18 +957,21 @@ def train(
     #   KeyError: "param 'initial_lr' is not specified in param_groups[0]..."
     # La primera llamada explícita a scheduler.step() en el loop de entrenamiento
     # (línea 594, después de optimizer.step()) avanza correctamente a epoch 1.
+    # Suprimir falso positivo "lr_scheduler.step() before optimizer.step()".
+    # En dry-run con FP16+DDP, GradScaler puede saltar optimizer.step() si detecta
+    # inf/nan (accum_steps > n_batches), dejando optimizer._step_count == 0.
+    # PyTorch 2.3.0 verifica _step_count, no _opt_called, así que el hack anterior
+    # no funciona. warnings.filterwarnings es el enfoque robusto.
+    warnings.filterwarnings(
+        "ignore",
+        message=r"Detected call of.*lr_scheduler",
+        category=UserWarning,
+    )
     scheduler_ft = torch.optim.lr_scheduler.CosineAnnealingLR(
         optimizer_ft,
         T_max=EXPERT1_FT_EPOCHS,
         last_epoch=-1,
     )
-    # Fix: evitar falso positivo "lr_scheduler.step() before optimizer.step()".
-    # En dry-run con FP16, GradScaler puede saltar optimizer.step() si detecta
-    # inf/nan en los gradientes del primer mini-batch, dejando _opt_called=False.
-    # Al crear el scheduler, su constructor ya computó el LR de epoch 0 vía
-    # step() interno, así que el primer scheduler.step() explícito es correcto.
-    # Marcar _opt_called=True no altera el schedule de LR ni el estado del optimizer.
-    optimizer_ft._opt_called = True
 
     early_stopping = EarlyStoppingAUC(
         patience=EXPERT1_EARLY_STOPPING_PATIENCE,

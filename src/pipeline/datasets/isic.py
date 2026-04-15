@@ -244,12 +244,22 @@ class ISICDataset(Dataset):
         """Resuelve la ruta real de una imagen probando todas las convenciones de nombre.
 
         Cadena de resolución (primera que exista gana):
-          1. cache_dir / {img_name}_pp_{TARGET_SIZE}.jpg        (cache exacto)
-          2. img_dir   / {img_name}.jpg                         (original exacto)
-          3. img_dir   / {img_name}_pp_{TARGET_SIZE}.jpg        (pp en img_dir — cubre
-                 el caso donde img_dir apunta al directorio preprocesado)
-          4. Si img_name termina en '_downsampled', repetir 1-3 con base_name
-             (sin el sufijo _downsampled).
+          1.  cache_dir / {img_name}_pp_{TARGET_SIZE}.jpg   (cache preprocesado exacto)
+          2.  cache_dir / {img_name}.jpg                    (original copiado al cache)
+          3.  img_dir   / {img_name}.jpg                    (original exacto)
+          4.  img_dir   / {img_name}_pp_{TARGET_SIZE}.jpg   (pp en img_dir — cubre
+                  el caso donde img_dir apunta al directorio preprocesado)
+
+          Si img_name termina en '_downsampled', repetir 1-4 con base_name
+          (sin el sufijo _downsampled):
+          5.  cache_dir / {base}_pp_{TARGET_SIZE}.jpg
+          6.  cache_dir / {base}.jpg
+          7.  img_dir   / {base}.jpg
+          8.  img_dir   / {base}_pp_{TARGET_SIZE}.jpg
+
+          Último recurso — glob:
+          9.  glob en cache_dir y img_dir buscando {img_name}* y {base}*
+              (cubre extensiones .jpeg/.png y variantes no anticipadas).
 
         Returns:
             (ruta, is_cache): ruta al archivo encontrado y si proviene de cache
@@ -261,17 +271,19 @@ class ISICDataset(Dataset):
         # Candidatos: (directorio, nombre_archivo, es_cache_o_pp)
         candidates: list[tuple[Path | None, str, bool]] = [
             (self.cache_dir, f"{img_name}{pp_suffix}.jpg", True),  # 1
-            (self.img_dir, f"{img_name}.jpg", False),  # 2
-            (self.img_dir, f"{img_name}{pp_suffix}.jpg", True),  # 3
+            (self.cache_dir, f"{img_name}.jpg", True),  # 2
+            (self.img_dir, f"{img_name}.jpg", False),  # 3
+            (self.img_dir, f"{img_name}{pp_suffix}.jpg", True),  # 4
         ]
 
-        # 4. Variantes sin _downsampled
+        # Variantes sin _downsampled
         if img_name.endswith("_downsampled"):
             base = img_name[: -len("_downsampled")]
             candidates += [
-                (self.cache_dir, f"{base}{pp_suffix}.jpg", True),  # 4a
-                (self.img_dir, f"{base}.jpg", False),  # 4b
-                (self.img_dir, f"{base}{pp_suffix}.jpg", True),  # 4c
+                (self.cache_dir, f"{base}{pp_suffix}.jpg", True),  # 5
+                (self.cache_dir, f"{base}.jpg", True),  # 6
+                (self.img_dir, f"{base}.jpg", False),  # 7
+                (self.img_dir, f"{base}{pp_suffix}.jpg", True),  # 8
             ]
 
         for directory, filename, is_cached in candidates:
@@ -280,6 +292,34 @@ class ISICDataset(Dataset):
             path = directory / filename
             if path.exists():
                 return path, is_cached
+
+        # ── Último recurso: glob en ambos directorios ──────────────────
+        #   Cubre extensiones alternativas (.jpeg, .png) y variantes de
+        #   naming no anticipadas en el dataset.
+        base_id = (
+            img_name.split("_downsampled")[0]
+            if "_downsampled" in img_name
+            else img_name
+        )
+        glob_patterns = [f"{img_name}*"]
+        if base_id != img_name:
+            glob_patterns.append(f"{base_id}*")
+
+        for directory in (self.cache_dir, self.img_dir):
+            if directory is None:
+                continue
+            for pattern in glob_patterns:
+                matches = sorted(directory.glob(pattern))
+                for match in matches:
+                    if match.is_file() and match.suffix.lower() in (
+                        ".jpg",
+                        ".jpeg",
+                        ".png",
+                        ".bmp",
+                        ".tiff",
+                    ):
+                        is_pp = pp_suffix in match.name
+                        return match, is_pp
 
         return None, False
 
@@ -660,11 +700,14 @@ class ISICDataset(Dataset):
         # --- Último recurso: tensor cero ---
         if img is None:
             ISICDataset._error_count += 1
-            if ISICDataset._error_count <= 5:
+            if ISICDataset._error_count <= 20:
+                extra = ""
+                if resolved_path is not None:
+                    extra = f" (archivo encontrado en {resolved_path} pero no se pudo abrir)"
                 log.error(
-                    f"[ISIC] TODAS las rutas de carga fallaron para '{img_name}'. "
+                    f"[ISIC] TODAS las rutas de carga fallaron para '{img_name}'.{extra} "
                     f"Paths intentados: cache={self.cache_dir}, img_dir={self.img_dir}. "
-                    f"Retornando tensor cero (error {ISICDataset._error_count}/5 logged)."
+                    f"Retornando tensor cero (error {ISICDataset._error_count}/20 logged)."
                 )
             dummy = torch.zeros(3, TARGET_SIZE, TARGET_SIZE)
             if self.mode == "embedding":
