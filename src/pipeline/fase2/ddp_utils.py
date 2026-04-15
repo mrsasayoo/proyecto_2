@@ -110,6 +110,14 @@ def setup_ddp(backend: str = "nccl") -> None:
         world_size=world_size,
     )
 
+    # ── Guardia global de logging: silenciar ranks != 0 ────────────────
+    # Los scripts configuran logging.basicConfig(level=INFO) antes de llamar
+    # a setup_ddp(). Sin esta guardia, todos los ranks imprimen logs INFO,
+    # duplicando la salida ×world_size. Elevar el nivel del root logger a
+    # WARNING en workers deja pasar solo advertencias y errores reales.
+    if rank != 0:
+        logging.getLogger().setLevel(logging.WARNING)
+
     if rank == 0:
         log.info(
             f"[DDP] Process group inicializado: "

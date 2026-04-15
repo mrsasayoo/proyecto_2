@@ -627,7 +627,9 @@ def train(
     world_size = get_world_size()
 
     if is_main_process():
-        log.info(f"[Expert5] Config: {EXPERT6_CONFIG_SUMMARY}")
+        log.info(
+            f"[Expert5] Config: {EXPERT6_CONFIG_SUMMARY.replace('Expert 6', 'Expert 5', 1)}"
+        )
         if dry_run:
             log.info("[Expert5] === MODO DRY-RUN === (2 batches × 2 épocas)")
         log.info(

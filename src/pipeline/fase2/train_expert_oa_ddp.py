@@ -545,6 +545,13 @@ def train(
         T_max=EXPERT_OA_SCHEDULER_T_MAX,
         eta_min=EXPERT_OA_SCHEDULER_ETA_MIN,
     )
+    # Fix: evitar falso positivo "lr_scheduler.step() before optimizer.step()".
+    # En dry-run con FP16, GradScaler puede saltar optimizer.step() si detecta
+    # inf/nan en los gradientes del primer mini-batch, dejando _opt_called=False.
+    # Al crear el scheduler, su constructor ya computó el LR de epoch 0 vía
+    # step() interno, así que el primer scheduler.step() explícito es correcto.
+    # Marcar _opt_called=True no altera el schedule de LR ni el estado del optimizer.
+    optimizer._opt_called = True
     if is_main_process():
         log.info(
             f"[INFO] [ExpertOA] Scheduler: CosineAnnealingLR"

@@ -240,6 +240,49 @@ class ISICDataset(Dataset):
         new_w, new_h = math.ceil(w * scale), math.ceil(h * scale)
         return img.resize((new_w, new_h), Image.LANCZOS)
 
+    def _resolve_image_path(self, img_name: str) -> tuple[Path | None, bool]:
+        """Resuelve la ruta real de una imagen probando todas las convenciones de nombre.
+
+        Cadena de resolución (primera que exista gana):
+          1. cache_dir / {img_name}_pp_{TARGET_SIZE}.jpg        (cache exacto)
+          2. img_dir   / {img_name}.jpg                         (original exacto)
+          3. img_dir   / {img_name}_pp_{TARGET_SIZE}.jpg        (pp en img_dir — cubre
+                 el caso donde img_dir apunta al directorio preprocesado)
+          4. Si img_name termina en '_downsampled', repetir 1-3 con base_name
+             (sin el sufijo _downsampled).
+
+        Returns:
+            (ruta, is_cache): ruta al archivo encontrado y si proviene de cache
+                              o tiene naming _pp_ (→ no necesita preproceso).
+                              (None, False) si no se encuentra.
+        """
+        pp_suffix = f"_pp_{TARGET_SIZE}"
+
+        # Candidatos: (directorio, nombre_archivo, es_cache_o_pp)
+        candidates: list[tuple[Path | None, str, bool]] = [
+            (self.cache_dir, f"{img_name}{pp_suffix}.jpg", True),  # 1
+            (self.img_dir, f"{img_name}.jpg", False),  # 2
+            (self.img_dir, f"{img_name}{pp_suffix}.jpg", True),  # 3
+        ]
+
+        # 4. Variantes sin _downsampled
+        if img_name.endswith("_downsampled"):
+            base = img_name[: -len("_downsampled")]
+            candidates += [
+                (self.cache_dir, f"{base}{pp_suffix}.jpg", True),  # 4a
+                (self.img_dir, f"{base}.jpg", False),  # 4b
+                (self.img_dir, f"{base}{pp_suffix}.jpg", True),  # 4c
+            ]
+
+        for directory, filename, is_cached in candidates:
+            if directory is None:
+                continue
+            path = directory / filename
+            if path.exists():
+                return path, is_cached
+
+        return None, False
+
     @staticmethod
     def get_weighted_sampler(split_df: pd.DataFrame, classes: list[str]):
         """
@@ -270,7 +313,14 @@ class ISICDataset(Dataset):
         split: str = "train",
         cache_dir: str | Path | None = None,
         apply_bcn_crop: bool = True,
+        **kwargs,  # absorbe params extra de callers (ej. transform_standard)
     ):
+        if kwargs:
+            log.debug(
+                "[ISIC] __init__ ignoró kwargs extras: %s",
+                list(kwargs.keys()),
+            )
+
         assert mode in ("embedding", "expert"), (
             f"[ISIC] mode debe ser 'embedding' o 'expert', recibido: '{mode}'"
         )
@@ -337,23 +387,8 @@ class ISICDataset(Dataset):
         # Verificar que CADA imagen del split es accesible (cache o img_dir)
         missing_all: list[str] = []
         for img_n in self.df["image"]:
-            found = False
-            # 1) cache_dir con nombre completo
-            if self.cache_dir is not None:
-                if (self.cache_dir / f"{img_n}_pp_{TARGET_SIZE}.jpg").exists():
-                    found = True
-            # 2) img_dir con nombre completo
-            if not found and (self.img_dir / f"{img_n}.jpg").exists():
-                found = True
-            # 3) nombre alternativo sin _downsampled
-            if not found and img_n.endswith("_downsampled"):
-                base_name = img_n[: -len("_downsampled")]
-                if self.cache_dir is not None:
-                    if (self.cache_dir / f"{base_name}_pp_{TARGET_SIZE}.jpg").exists():
-                        found = True
-                if not found and (self.img_dir / f"{base_name}.jpg").exists():
-                    found = True
-            if not found:
+            path, _ = self._resolve_image_path(img_n)
+            if path is None:
                 missing_all.append(img_n)
 
         if missing_all:
@@ -604,47 +639,25 @@ class ISICDataset(Dataset):
     def __getitem__(self, idx: int):
         img_name = self.df.loc[idx, "image"]
 
-        # ── Cadena de fallback para cargar la imagen ───────────────────
-        #   1. Cache con nombre exacto: {img_name}_pp_{TARGET_SIZE}.jpg
-        #   2. img_dir con nombre exacto: {img_name}.jpg
-        #   3. Si el nombre termina en _downsampled, probar sin ese sufijo
-        #      en cache y en img_dir (mapeo alternativo)
-        #   4. Solo como ÚLTIMO recurso: tensor cero (con error explícito)
+        # ── Resolución unificada de ruta ───────────────────────────────
+        #   _resolve_image_path prueba todas las convenciones de nombres
+        #   (original, preprocesado, con/sin _downsampled) en cache_dir
+        #   e img_dir. Retorna (path, is_cached) o (None, False).
         #
-        # Cuando la imagen se carga desde img_dir (no del cache preprocesado)
-        # se aplica DullRazor + resize on-the-fly para replicar la pipeline
-        # de preprocesamiento de fase0.
+        # Cuando la imagen se carga desde un archivo original (no _pp_)
+        # se aplica DullRazor + resize on-the-fly para replicar la
+        # pipeline de preprocesamiento de fase0.
 
         img = None
         loaded_from_cache = False
 
-        # --- Nivel 1: cache con nombre exacto ---
-        if self.cache_dir is not None:
-            img = self._try_open_image(
-                self.cache_dir / f"{img_name}_pp_{TARGET_SIZE}.jpg"
-            )
+        resolved_path, is_cached = self._resolve_image_path(img_name)
+        if resolved_path is not None:
+            img = self._try_open_image(resolved_path)
             if img is not None:
-                loaded_from_cache = True
+                loaded_from_cache = is_cached
 
-        # --- Nivel 2: img_dir con nombre exacto ---
-        if img is None:
-            img = self._try_open_image(self.img_dir / f"{img_name}.jpg")
-
-        # --- Nivel 3: nombre alternativo sin _downsampled ---
-        if img is None and img_name.endswith("_downsampled"):
-            base_name = img_name[: -len("_downsampled")]
-            # 3a: cache sin _downsampled
-            if self.cache_dir is not None:
-                img = self._try_open_image(
-                    self.cache_dir / f"{base_name}_pp_{TARGET_SIZE}.jpg"
-                )
-                if img is not None:
-                    loaded_from_cache = True
-            # 3b: img_dir sin _downsampled
-            if img is None:
-                img = self._try_open_image(self.img_dir / f"{base_name}.jpg")
-
-        # --- Nivel 4: último recurso — tensor cero ---
+        # --- Último recurso: tensor cero ---
         if img is None:
             ISICDataset._error_count += 1
             if ISICDataset._error_count <= 5:
