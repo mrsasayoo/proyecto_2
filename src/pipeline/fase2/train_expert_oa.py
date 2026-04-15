@@ -19,7 +19,7 @@ Uso:
     python src/pipeline/fase2/train_expert_oa.py
 
 Dependencias:
-    - src/pipeline/fase2/models/expert_oa_efficientnet_b3.py: ExpertOAEfficientNetB0
+    - src/pipeline/fase2/models/expert_oa_efficientnet_b3.py: ExpertOAEfficientNetB3
     - src/pipeline/fase2/dataloader_expert_oa.py: get_oa_dataloaders
     - src/pipeline/fase2/expert_oa_config.py: hiperparámetros
     - src/pipeline/datasets/osteoarthritis.py: OAKneeDataset
@@ -49,7 +49,7 @@ _FASE1_ROOT = _PIPELINE_ROOT / "fase1"
 if str(_FASE1_ROOT) not in sys.path:
     sys.path.insert(0, str(_FASE1_ROOT))
 
-from fase2.models.expert_oa_efficientnet_b3 import ExpertOAEfficientNetB0
+from fase2.models.expert_oa_efficientnet_b3 import ExpertOAEfficientNetB3
 from fase2.dataloader_expert_oa import get_oa_dataloaders
 from fase2.expert_oa_config import (
     EXPERT_OA_LR_BACKBONE,
@@ -77,7 +77,7 @@ logging.basicConfig(
 log = logging.getLogger("expert_oa_train")
 
 # ── Rutas de salida ────────────────────────────────────────────────────
-_CHECKPOINT_DIR = _PROJECT_ROOT / "checkpoints" / "expert_02_vgg16_bn"
+_CHECKPOINT_DIR = _PROJECT_ROOT / "checkpoints" / "expert_02_efficientnet_b3"
 _CHECKPOINT_PATH = _CHECKPOINT_DIR / "expert_oa_best.pt"
 _TRAINING_LOG_PATH = _CHECKPOINT_DIR / "expert_oa_training_log.json"
 
@@ -162,7 +162,7 @@ def train_one_epoch(
     Ejecuta una epoca de entrenamiento con gradient accumulation y FP16.
 
     Args:
-        model: modelo a entrenar (ExpertOAEfficientNetB0)
+        model: modelo a entrenar (ExpertOAEfficientNetB3)
         loader: DataLoader de train
         criterion: funcion de perdida (CrossEntropyLoss)
         optimizer: optimizador (Adam diferencial)
@@ -318,7 +318,7 @@ def train(dry_run: bool = False) -> None:
         log.info("[ExpertOA] FP16 desactivado (no hay GPU). Usando FP32 en CPU.")
 
     # ── Modelo ─────────────────────────────────────────────────────
-    model = ExpertOAEfficientNetB0(
+    model = ExpertOAEfficientNetB3(
         num_classes=EXPERT_OA_NUM_CLASSES,
         dropout=EXPERT_OA_DROPOUT_FC,
     ).to(device)

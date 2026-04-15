@@ -941,8 +941,11 @@ def train(
             f"{model.count_parameters():,} params entrenables (todo descongelado)"
         )
 
-    # Re-envolver con find_unused_parameters=False (todo descongelado)
-    model_ddp = wrap_model_ddp(model, device, find_unused_parameters=False)
+    # Re-envolver con find_unused_parameters=True: aunque el backbone está
+    # descongelado, algunos parámetros (índices 178-179) no participan en el
+    # forward pass y no reciben gradientes, lo que causa RuntimeError en DDP
+    # si find_unused_parameters=False.
+    model_ddp = wrap_model_ddp(model, device, find_unused_parameters=True)
 
     optimizer_ft = torch.optim.AdamW(
         model.parameters(),

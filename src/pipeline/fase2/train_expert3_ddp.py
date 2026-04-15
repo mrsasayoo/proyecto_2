@@ -859,6 +859,14 @@ def train(
                 json.dump(training_log, f, indent=2)
 
         # ── Early stopping (rank=0 decide, broadcast a todos) ──────
+        # Barrier: sincronizar todos los ranks antes del broadcast.
+        # Sin esto, rank 1 puede avanzar a la siguiente época (allreduce
+        # de gradientes) mientras rank 0 aún está en el broadcast,
+        # causando NCCL watchdog timeout por operaciones colectivas
+        # divergentes entre ranks.
+        if is_ddp_initialized():
+            torch.distributed.barrier()
+
         if not dry_run:
             should_stop = False
             if is_main_process():

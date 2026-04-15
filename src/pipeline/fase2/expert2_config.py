@@ -29,7 +29,7 @@ EXPERT2_BATCH_SIZE: int = 32
 EXPERT2_ACCUMULATION_STEPS: int = 3  # batch efectivo = 96
 EXPERT2_NUM_WORKERS: int = 4
 EXPERT2_LABEL_SMOOTHING: float = 0.1
-EXPERT2_CHECKPOINT_DIR: str = "checkpoints/expert_01_efficientnet_b3"
+EXPERT2_CHECKPOINT_DIR: str = "checkpoints/expert_01_convnext_small"
 EXPERT2_CHECKPOINT_NAME: str = "expert2_best.pt"
 EXPERT2_MONITOR: str = "val_f1_macro"  # métrica para checkpoint
 

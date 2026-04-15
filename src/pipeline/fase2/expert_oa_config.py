@@ -111,9 +111,8 @@ EXPERT_OA_EARLY_STOPPING_MONITOR = "val_f1_macro"
 """Métrica a monitorear para early stopping y selección de mejor checkpoint."""
 
 # ── Checkpoint ──────────────────────────────────────────────
-EXPERT_OA_CHECKPOINT_DIR = "checkpoints/expert_02_vgg16_bn"
-"""Directorio de checkpoints. Se mantiene la ruta existente para no
-romper otros scripts que referencien esta ubicación."""
+EXPERT_OA_CHECKPOINT_DIR = "checkpoints/expert_02_efficientnet_b3"
+"""Directorio de checkpoints para el Expert OA (EfficientNet-B3)."""
 
 EXPERT_OA_MONITOR_METRIC = "val_f1_macro"
 """Métrica para seleccionar el mejor checkpoint."""

@@ -60,7 +60,7 @@ from fase2.expert3_config import (
     EXPERT3_EARLY_STOPPING_MONITOR,
     EXPERT3_CONFIG_SUMMARY,
 )
-from losses import FocalLoss
+from fase2.losses import FocalLoss
 
 # ── Logging ────────────────────────────────────────────────────────────
 logging.basicConfig(
@@ -72,9 +72,9 @@ log = logging.getLogger("expert3_train")
 
 # ── Rutas de salida ────────────────────────────────────────────────────
 _CHECKPOINT_DIR = _PROJECT_ROOT / "checkpoints"
-_CHECKPOINT_PATH = _CHECKPOINT_DIR / "expert_03_vivit_tiny" / "expert3_best.pt"
+_CHECKPOINT_PATH = _CHECKPOINT_DIR / "expert_03_densenet3d" / "expert3_best.pt"
 _TRAINING_LOG_PATH = (
-    _CHECKPOINT_DIR / "expert_03_vivit_tiny" / "expert3_training_log.json"
+    _CHECKPOINT_DIR / "expert_03_densenet3d" / "expert3_training_log.json"
 )
 
 # ── Constantes de entrenamiento ────────────────────────────────────────
