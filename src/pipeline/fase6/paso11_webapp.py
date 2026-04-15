@@ -131,7 +131,7 @@ def build_inference_engine(device: str, dry_run: bool):
             Expert2ConvNeXtSmall,
         )
         from src.pipeline.fase2.models.expert_oa_efficientnet_b3 import (
-            ExpertOAEfficientNetB0,
+            ExpertOAEfficientNetB3,
         )
         from src.pipeline.fase2.models.expert3_densenet3d import Expert3MC318
         from src.pipeline.fase2.models.expert4_resnet3d import ExpertPancreasSwin3D
@@ -145,7 +145,7 @@ def build_inference_engine(device: str, dry_run: bool):
             [
                 Expert1ConvNeXtTiny(dropout_fc=0.3, num_classes=14),
                 Expert2ConvNeXtSmall(),
-                ExpertOAEfficientNetB0(),
+                ExpertOAEfficientNetB3(),
                 Expert3MC318(spatial_dropout_p=0.15, fc_dropout_p=0.4, num_classes=2),
                 ExpertPancreasSwin3D(in_channels=1, num_classes=2),
                 ConditionedResUNetAE(in_ch=3, base_ch=64, n_domains=6),

@@ -2,9 +2,8 @@
 Expert OA — EfficientNet-B3 para clasificación de osteoartritis de rodilla (KL 0-4).
 
 Arquitectura:
-    Backbone: torchvision.models.efficientnet_b3 (preentrenado ImageNet1K)
-    Bloques MBConv con Squeeze-and-Excitation → [B, 1536, 7, 7]
-    AdaptiveAvgPool2d(1) → [B, 1536]
+    Backbone: timm efficientnet_b3 (preentrenado ImageNet1K)
+    Bloques MBConv con Squeeze-and-Excitation → [B, 1536]
     Classifier (HEAD reemplazada):
         Dropout(p=0.4)
         Linear(1536 → 5)
@@ -18,27 +17,25 @@ Clases (Kellgren-Lawrence):
     4 = KL 4 — Severo
 
 Adaptaciones respecto al EfficientNet-B3 original (ImageNet, 1000 clases):
-    1. Pesos preentrenados ImageNet1K (transfer learning).
+    1. Pesos preentrenados ImageNet1K via timm (transfer learning).
     2. Clasificador reemplazado: 1000 → 5 clases con Dropout(0.4).
 
 Parámetros: ~10.7M totales (EfficientNet-B3 con head adaptada).
 
-Nota: el archivo conserva su nombre original (expert_oa_vgg16bn.py) para no
-romper imports existentes en el pipeline. La clase interna ahora es
-ExpertOAEfficientNetB3. Se exportan aliases ExpertOAVGG16BN y
-ExpertOAEfficientNetB0 para compatibilidad hacia atrás.
+Nota: se exportan aliases ExpertOAVGG16BN y ExpertOAEfficientNetB0 para
+compatibilidad hacia atrás con imports existentes.
 """
 
+import timm
 import torch
 import torch.nn as nn
-from torchvision.models import efficientnet_b3, EfficientNet_B3_Weights
 
 
 class ExpertOAEfficientNetB3(nn.Module):
     """EfficientNet-B3 preentrenado adaptado para Osteoarthritis Knee — 5 grados KL.
 
-    Reemplaza el head original de 1000 clases por un clasificador ligero
-    (Dropout + Linear) ajustado para los 5 grados de Kellgren-Lawrence.
+    Usa timm.create_model para cargar pesos pretrained, evitando el hash
+    mismatch de torchvision.models.efficientnet_b3.
 
     EfficientNet-B3 tiene feature dimension = 1536 (vs 1280 de B0),
     lo que proporciona mayor capacidad representacional (~10.7M params totales).
@@ -51,22 +48,29 @@ class ExpertOAEfficientNetB3(nn.Module):
             (KL 0, KL 1, KL 2, KL 3, KL 4).
         dropout: probabilidad de Dropout en el clasificador.
             Default: 0.4.
+        pretrained: cargar pesos ImageNet pretrained. Default: True.
     """
 
     def __init__(
         self,
         num_classes: int = 5,
         dropout: float = 0.4,
+        pretrained: bool = True,
     ) -> None:
         super().__init__()
 
-        # ── Cargar backbone EfficientNet-B3 con pesos ImageNet1K ───
-        self.model = efficientnet_b3(weights=EfficientNet_B3_Weights.IMAGENET1K_V1)
+        # ── Cargar backbone EfficientNet-B3 con pesos ImageNet1K via timm ──
+        # num_classes=0 → retorna features [B, 1536] sin head de clasificación
+        self.model = timm.create_model(
+            "efficientnet_b3",
+            pretrained=pretrained,
+            num_classes=0,
+            global_pool="avg",
+        )
 
-        # ── Reemplazar classifier (head) ───────────────────────────
-        # Original: Sequential(Dropout(0.3), Linear(1536, 1000))
-        # Nueva:    Sequential(Dropout(0.4), Linear(1536, 5))
-        self.model.classifier = nn.Sequential(
+        # ── Clasificador personalizado (head) ──────────────────────
+        # Reemplaza el head original de 1000 clases
+        self.classifier = nn.Sequential(
             nn.Dropout(p=dropout),
             nn.Linear(1536, num_classes),
         )
@@ -80,15 +84,16 @@ class ExpertOAEfficientNetB3(nn.Module):
         Returns:
             logits: tensor [B, 5] — logits crudos (antes de softmax).
         """
-        return self.model(x)
+        features = self.model(x)  # [B, 1536]
+        return self.classifier(features)  # [B, num_classes]
 
     def get_backbone_params(self) -> list[nn.Parameter]:
         """Retorna los parámetros del backbone (features) para fine-tuning diferencial."""
-        return list(self.model.features.parameters())
+        return list(self.model.parameters())
 
     def get_head_params(self) -> list[nn.Parameter]:
         """Retorna los parámetros del clasificador (head) para fine-tuning diferencial."""
-        return list(self.model.classifier.parameters())
+        return list(self.classifier.parameters())
 
     def count_parameters(self) -> int:
         """Retorna el número total de parámetros entrenables del modelo."""

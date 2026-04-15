@@ -48,14 +48,13 @@ EXPERT6_EXPERT_ID: int = 5
 """Posición del experto en el ModuleList del MoE. Aunque el modelo
 es la versión 6, ocupa la posición 5 (0-indexed) del sistema."""
 
-EXPERT6_N_DOMAINS: int = 6
+EXPERT6_N_DOMAINS: int = 5
 """Número total de dominios para el FiLMGenerator.
-Dominios 0-4: CXR14, ISIC, Panorama, LUNA16, OA Knee.
-Dominio 5: 'Unknown' — usado en inferencia cuando el dominio no se conoce."""
+Dominios 0-4: CXR14, ISIC, Panorama, LUNA16, OA Knee."""
 
 EXPERT6_EMBED_DIM: int = 64
 """Dimensión del embedding de dominio en FiLMGenerator.
-Valor pequeño (64) suficiente para distinguir 6 dominios sin sobreajustar."""
+Valor pequeño (64) suficiente para distinguir 5 dominios sin sobreajustar."""
 
 # ── Optimizador ─────────────────────────────────────────────
 EXPERT6_LR: float = 1e-3
@@ -128,7 +127,7 @@ imágenes in-distribution más anómalas superarían este umbral."""
 EXPERT6_CONFIG_SUMMARY: str = (
     "Expert 6 (Res-U-Net Autoencoder + FiLM Domain Conditioning, pos=5): "
     "LR=1e-3 | WD=1e-5 | MSE + 0.1*L1 | latent=512 | base_ch=64 | "
-    "n_domains=6 | embed_dim=64 | "
+    "n_domains=5 | embed_dim=64 | "
     "batch=32 | accum=1 (efectivo=32) | FP32 | "
     "CosineAnnealing T_max=50 | patience=10 | max_epochs=50 | "
     "OOD θ_leve=p50, θ_OOD=p99"

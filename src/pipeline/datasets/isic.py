@@ -40,6 +40,16 @@ except ImportError:
     _HAS_BCN_CROP = False
     apply_circular_crop = None  # type: ignore[assignment]
 
+# ── Importar DullRazor + resize para fallback on-the-fly ───────────────
+try:
+    from fase0.pre_isic import remove_hair_dullrazor, resize_shorter_side
+
+    _HAS_PREPROCESS = True
+except ImportError:
+    _HAS_PREPROCESS = False
+    remove_hair_dullrazor = None  # type: ignore[assignment]
+    resize_shorter_side = None  # type: ignore[assignment]
+
 log = logging.getLogger("fase0")
 
 
@@ -313,30 +323,50 @@ class ISICDataset(Dataset):
             else:
                 log.debug("[ISIC] Ground truth one-hot ✓")
 
-        # H3/Item-6 — detectar _downsampled y verificar en disco
+        # H3/Item-6 — verificar accesibilidad de TODAS las imágenes del split
+        #   Chequea cache_dir y img_dir; reporta cuáles NO se encuentran en ninguno.
         ds_names = self.df["image"][
             self.df["image"].str.endswith("_downsampled")
         ].tolist()
         if ds_names:
             pct = 100 * len(ds_names) / len(self.df)
-            log.warning(
-                f"[ISIC] H3/Item-6 — {len(ds_names):,} ({pct:.1f}%) imgs _downsampled (MSK). "
-                f"Verificando en disco..."
+            log.info(
+                f"[ISIC] H3/Item-6 — {len(ds_names):,} ({pct:.1f}%) imgs _downsampled (MSK)."
             )
-            missing_ds = [
-                n for n in ds_names if not (self.img_dir / f"{n}.jpg").exists()
-            ]
-            if missing_ds:
-                log.error(
-                    f"[ISIC] Item-6 — {len(missing_ds)} archivos _downsampled NO en disco. "
-                    f"Primeros 5: {missing_ds[:5]}"
-                )
-            else:
-                log.info(
-                    f"[ISIC] Item-6 — Todos los _downsampled verificados en disco ✓"
-                )
+
+        # Verificar que CADA imagen del split es accesible (cache o img_dir)
+        missing_all: list[str] = []
+        for img_n in self.df["image"]:
+            found = False
+            # 1) cache_dir con nombre completo
+            if self.cache_dir is not None:
+                if (self.cache_dir / f"{img_n}_pp_{TARGET_SIZE}.jpg").exists():
+                    found = True
+            # 2) img_dir con nombre completo
+            if not found and (self.img_dir / f"{img_n}.jpg").exists():
+                found = True
+            # 3) nombre alternativo sin _downsampled
+            if not found and img_n.endswith("_downsampled"):
+                base_name = img_n[: -len("_downsampled")]
+                if self.cache_dir is not None:
+                    if (self.cache_dir / f"{base_name}_pp_{TARGET_SIZE}.jpg").exists():
+                        found = True
+                if not found and (self.img_dir / f"{base_name}.jpg").exists():
+                    found = True
+            if not found:
+                missing_all.append(img_n)
+
+        if missing_all:
+            log.warning(
+                f"[ISIC] Item-6 — {len(missing_all)} imgs NO encontradas en cache NI "
+                f"img_dir (se usará fallback on-the-fly o último recurso). "
+                f"Primeros 5: {missing_all[:5]}"
+            )
         else:
-            log.debug("[ISIC] Item-6 — Sin imágenes _downsampled en este split.")
+            log.info(
+                f"[ISIC] Item-6 — Todas las {len(self.df):,} imgs del split "
+                f"verificadas en disco ✓ (cache o img_dir)"
+            )
 
         # H3/Item-7 — source audit (HAM/BCN/MSK)
         self._source_audit()
@@ -547,43 +577,97 @@ class ISICDataset(Dataset):
     def __len__(self) -> int:
         return len(self.df)
 
+    def _try_open_image(self, path: Path) -> Image.Image | None:
+        """Intenta abrir una imagen; retorna None si falla."""
+        if path.exists():
+            try:
+                return Image.open(path).convert("RGB")
+            except Exception:
+                return None
+        return None
+
+    def _preprocess_on_the_fly(self, img: Image.Image) -> Image.Image:
+        """Aplica DullRazor + resize_shorter_side on-the-fly (misma pipeline de fase0)."""
+        arr = np.array(img)
+        if _HAS_PREPROCESS:
+            try:
+                arr = remove_hair_dullrazor(arr)
+            except Exception:
+                pass  # Si falla hair removal, seguimos con la imagen original
+            arr = resize_shorter_side(arr, TARGET_SIZE)
+        else:
+            # Fallback PIL: solo resize
+            img = self._resize_shorter_side(img, TARGET_SIZE)
+            return img
+        return Image.fromarray(arr)
+
     def __getitem__(self, idx: int):
         img_name = self.df.loc[idx, "image"]
 
-        # Intentar cargar desde cache_dir primero
+        # ── Cadena de fallback para cargar la imagen ───────────────────
+        #   1. Cache con nombre exacto: {img_name}_pp_{TARGET_SIZE}.jpg
+        #   2. img_dir con nombre exacto: {img_name}.jpg
+        #   3. Si el nombre termina en _downsampled, probar sin ese sufijo
+        #      en cache y en img_dir (mapeo alternativo)
+        #   4. Solo como ÚLTIMO recurso: tensor cero (con error explícito)
+        #
+        # Cuando la imagen se carga desde img_dir (no del cache preprocesado)
+        # se aplica DullRazor + resize on-the-fly para replicar la pipeline
+        # de preprocesamiento de fase0.
+
         img = None
         loaded_from_cache = False
-        if self.cache_dir is not None:
-            cache_path = self.cache_dir / f"{img_name}_pp_{TARGET_SIZE}.jpg"
-            if cache_path.exists():
-                try:
-                    img = Image.open(cache_path).convert("RGB")
-                    loaded_from_cache = True
-                except Exception:
-                    img = None
 
-        # Fallback: cargar desde img_dir original
+        # --- Nivel 1: cache con nombre exacto ---
+        if self.cache_dir is not None:
+            img = self._try_open_image(
+                self.cache_dir / f"{img_name}_pp_{TARGET_SIZE}.jpg"
+            )
+            if img is not None:
+                loaded_from_cache = True
+
+        # --- Nivel 2: img_dir con nombre exacto ---
         if img is None:
-            img_path = self.img_dir / f"{img_name}.jpg"
-            try:
-                img = Image.open(img_path).convert("RGB")
-            except Exception as e:
-                ISICDataset._error_count += 1
-                if ISICDataset._error_count <= 1:
-                    log.warning(
-                        f"[ISIC] Error abriendo '{img_path}': {e}. "
-                        f"Reemplazando con tensor cero. "
-                        f"(futuros errores similares se silenciarán)"
-                    )
-                dummy = torch.zeros(3, TARGET_SIZE, TARGET_SIZE)
-                if self.mode == "embedding":
-                    return dummy, self.expert_id, img_name
-                label = (
-                    int(self.df.loc[idx, "class_label"])
-                    if "class_label" in self.df.columns
-                    else 0
+            img = self._try_open_image(self.img_dir / f"{img_name}.jpg")
+
+        # --- Nivel 3: nombre alternativo sin _downsampled ---
+        if img is None and img_name.endswith("_downsampled"):
+            base_name = img_name[: -len("_downsampled")]
+            # 3a: cache sin _downsampled
+            if self.cache_dir is not None:
+                img = self._try_open_image(
+                    self.cache_dir / f"{base_name}_pp_{TARGET_SIZE}.jpg"
                 )
-                return dummy, label, img_name
+                if img is not None:
+                    loaded_from_cache = True
+            # 3b: img_dir sin _downsampled
+            if img is None:
+                img = self._try_open_image(self.img_dir / f"{base_name}.jpg")
+
+        # --- Nivel 4: último recurso — tensor cero ---
+        if img is None:
+            ISICDataset._error_count += 1
+            if ISICDataset._error_count <= 5:
+                log.error(
+                    f"[ISIC] TODAS las rutas de carga fallaron para '{img_name}'. "
+                    f"Paths intentados: cache={self.cache_dir}, img_dir={self.img_dir}. "
+                    f"Retornando tensor cero (error {ISICDataset._error_count}/5 logged)."
+                )
+            dummy = torch.zeros(3, TARGET_SIZE, TARGET_SIZE)
+            if self.mode == "embedding":
+                return dummy, self.expert_id, img_name
+            label = (
+                int(self.df.loc[idx, "class_label"])
+                if "class_label" in self.df.columns
+                else 0
+            )
+            return dummy, label, img_name
+
+        # --- Preprocesamiento on-the-fly para imágenes NO cacheadas ---
+        # Si la imagen se cargó desde img_dir (original), aplicar DullRazor +
+        # resize para replicar la pipeline de fase0 que produjo los caches.
+        if not loaded_from_cache:
+            img = self._preprocess_on_the_fly(img)
 
         # H3/Item-8 — eliminar bordes negros BCN_20000 (solo si no viene de cache)
         if self.apply_bcn_crop and not loaded_from_cache and _HAS_BCN_CROP:

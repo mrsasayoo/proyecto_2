@@ -894,7 +894,7 @@ def train(
         eval_model = get_unwrapped_model(model_ddp)
 
         # Cargar mejor checkpoint para evaluación
-        if _CHECKPOINT_PATH.exists() and not dry_run:
+        if _CHECKPOINT_PATH.exists():
             ckpt = load_checkpoint_ddp(_CHECKPOINT_PATH, map_location=device)
             if ckpt is not None:
                 eval_model.load_state_dict(ckpt["model_state_dict"])
@@ -902,10 +902,16 @@ def train(
                     f"[INFO] [Expert3] [Test] Cargado mejor checkpoint: "
                     f"epoca {ckpt['epoch']} (val_loss={ckpt['val_loss']:.4f})"
                 )
+            else:
+                log.warning(
+                    "[INFO] [Expert3] [Test] Checkpoint existe pero no se pudo "
+                    "cargar. Usando modelo del final del entrenamiento."
+                )
         else:
-            log.info(
-                "[INFO] [Expert3] [Test] Usando modelo del final del "
-                "entrenamiento (no hay checkpoint guardado)"
+            log.warning(
+                "[INFO] [Expert3] [Test] No se encontró checkpoint en "
+                f"{_CHECKPOINT_PATH}. Usando modelo del final del "
+                "entrenamiento (resultados pueden no reflejar el mejor modelo)."
             )
 
         test_results = validate(

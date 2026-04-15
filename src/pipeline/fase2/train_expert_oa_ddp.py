@@ -26,7 +26,7 @@ Lanzamiento:
     torchrun --nproc_per_node=2 src/pipeline/fase2/train_expert_oa_ddp.py --dry-run
 
 Dependencias:
-    - src/pipeline/fase2/models/expert_oa_efficientnet_b3.py: ExpertOAEfficientNetB0
+    - src/pipeline/fase2/models/expert_oa_efficientnet_b3.py: ExpertOAEfficientNetB3
     - src/pipeline/fase2/dataloader_expert_oa.py: get_oa_dataloaders (datasets)
     - src/pipeline/fase2/expert_oa_config.py: hiperparámetros
     - src/pipeline/datasets/osteoarthritis.py: OAKneeDataset
@@ -63,7 +63,7 @@ _FASE1_ROOT = _PIPELINE_ROOT / "fase1"
 if str(_FASE1_ROOT) not in sys.path:
     sys.path.insert(0, str(_FASE1_ROOT))
 
-from fase2.models.expert_oa_efficientnet_b3 import ExpertOAEfficientNetB0
+from fase2.models.expert_oa_efficientnet_b3 import ExpertOAEfficientNetB3
 from fase2.expert_oa_config import (
     EXPERT_OA_LR_BACKBONE,
     EXPERT_OA_LR_HEAD,
@@ -451,10 +451,22 @@ def train(
             )
 
     # ── Modelo ─────────────────────────────────────────────────────
-    model = ExpertOAEfficientNetB0(
-        num_classes=EXPERT_OA_NUM_CLASSES,
-        dropout=EXPERT_OA_DROPOUT_FC,
-    ).to(device)
+    # En DDP, solo rank=0 descarga los pesos pretrained (timm).
+    # Los demás ranks esperan con barrier() y luego cargan desde caché.
+    if is_main_process():
+        model = ExpertOAEfficientNetB3(
+            num_classes=EXPERT_OA_NUM_CLASSES,
+            dropout=EXPERT_OA_DROPOUT_FC,
+            pretrained=True,
+        ).to(device)
+    if is_ddp_initialized():
+        torch.distributed.barrier()
+    if not is_main_process():
+        model = ExpertOAEfficientNetB3(
+            num_classes=EXPERT_OA_NUM_CLASSES,
+            dropout=EXPERT_OA_DROPOUT_FC,
+            pretrained=True,
+        ).to(device)
 
     if is_main_process():
         n_params = model.count_parameters()

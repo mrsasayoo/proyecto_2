@@ -163,7 +163,7 @@ def build_moe_system_dry_run(d_model: int = 192) -> MoESystem:
     """
     from fase2.models.expert1_convnext import Expert1ConvNeXtTiny
     from fase2.models.expert2_convnext_small import Expert2ConvNeXtSmall
-    from fase2.models.expert_oa_efficientnet_b3 import ExpertOAEfficientNetB0
+    from fase2.models.expert_oa_efficientnet_b3 import ExpertOAEfficientNetB3
     from fase2.models.expert3_densenet3d import Expert3MC318
     from fase2.models.expert4_resnet3d import ExpertPancreasSwin3D
     from fase3.models.expert6_resunet import ConditionedResUNetAE
@@ -187,7 +187,7 @@ def build_moe_system_dry_run(d_model: int = 192) -> MoESystem:
         [
             Expert1ConvNeXtTiny(dropout_fc=0.3, num_classes=14),  # Expert 0
             Expert2ConvNeXtSmall(),  # Expert 1
-            ExpertOAEfficientNetB0(),  # Expert 2 — EfficientNet-B0, 5 clases KL
+            ExpertOAEfficientNetB3(),  # Expert 2 — EfficientNet-B3, 5 clases KL
             Expert3MC318(
                 spatial_dropout_p=0.15, fc_dropout_p=0.4, num_classes=2
             ),  # Expert 3

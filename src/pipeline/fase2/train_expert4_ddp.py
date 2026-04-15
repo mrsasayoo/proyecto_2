@@ -885,6 +885,10 @@ def train(
                 "Ejecuta sin --dry-run para entrenar."
             )
 
+    # ── Sincronizar todos los ranks antes de destruir el process group ──
+    if is_ddp_initialized():
+        torch.distributed.barrier()
+
     # ── Cleanup DDP ────────────────────────────────────────────────
     cleanup_ddp()
 

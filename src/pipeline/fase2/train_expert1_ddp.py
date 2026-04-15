@@ -948,17 +948,18 @@ def train(
         lr=EXPERT1_FT_LR,
         weight_decay=EXPERT1_WEIGHT_DECAY,
     )
-    # last_epoch=0: evita que __init__ llame step() antes de que el optimizer
-    # haya dado su primer paso, lo que dispara el warning de PyTorch ≥1.1:
-    #   "Detected call of lr_scheduler.step() before optimizer.step()"
-    # Con last_epoch=0, la primera llamada explícita a scheduler.step() en el
-    # loop de entrenamiento (después de optimizer.step()) avanza a epoch 1.
-    # Epoch 0 ya usa la LR inicial del optimizer (= EXPERT1_FT_LR), que es
-    # idéntica al valor que CosineAnnealingLR asignaría en epoch 0 (cos(0)=1).
+    # last_epoch=-1 (default): indica "scheduler nuevo desde cero". El constructor
+    # de LRScheduler fija 'initial_lr' en cada param_group a partir del lr actual
+    # del optimizer, y luego llama self.step() internamente para computar epoch 0.
+    # Usar last_epoch=0 es INCORRECTO con un optimizer nuevo porque asume que
+    # 'initial_lr' ya existe en los param_groups (modo "resume"), causando:
+    #   KeyError: "param 'initial_lr' is not specified in param_groups[0]..."
+    # La primera llamada explícita a scheduler.step() en el loop de entrenamiento
+    # (línea 594, después de optimizer.step()) avanza correctamente a epoch 1.
     scheduler_ft = torch.optim.lr_scheduler.CosineAnnealingLR(
         optimizer_ft,
         T_max=EXPERT1_FT_EPOCHS,
-        last_epoch=0,
+        last_epoch=-1,
     )
 
     early_stopping = EarlyStoppingAUC(

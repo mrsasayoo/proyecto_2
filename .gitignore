@@ -70,6 +70,7 @@ checkpoints/expert_03_vivit_tiny/archivos_generados/best_luna_model.pth
 # Ignorar checkpoints
 checkpoints/
 *.pt
+*.7z
 *.pth
 __pycache__/
 .ipynb_checkpoints/

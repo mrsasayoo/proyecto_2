@@ -8,6 +8,7 @@
 #   bash run_expert.sh 2              # Expert 2 (ConvNeXt-Small / ISIC 2019)
 #   bash run_expert.sh 3              # Expert 3 (DenseNet3D / LUNA16)
 #   bash run_expert.sh 4              # Expert 4 (ResNet3D)
+#   bash run_expert.sh 5              # Expert 5 (Res-U-Net Autoencoder / OOD)
 #   bash run_expert.sh oa             # Expert OA (EfficientNet-B3)
 #
 #   bash run_expert.sh 1 --dry-run    # Dry-run de Expert 1
@@ -57,7 +58,7 @@ if [ $# -lt 1 ]; then
     echo ""
     echo "Uso: bash run_expert.sh <expert_id> [opciones...]"
     echo ""
-    echo "  expert_id:  1, 2, 3, 4, oa"
+    echo "  expert_id:  1, 2, 3, 4, 5, oa"
     echo "  opciones:   --dry-run, --batch-per-gpu N, --data-root /ruta"
     echo ""
     echo "Ejemplos:"
@@ -77,6 +78,7 @@ EXPERT_SCRIPTS=(
     ["2"]="src/pipeline/fase2/train_expert2_ddp.py"
     ["3"]="src/pipeline/fase2/train_expert3_ddp.py"
     ["4"]="src/pipeline/fase2/train_expert4_ddp.py"
+    ["5"]="src/pipeline/fase3/train_expert5_ddp.py"
     ["oa"]="src/pipeline/fase2/train_expert_oa_ddp.py"
 )
 
@@ -84,7 +86,7 @@ SCRIPT_PATH="${EXPERT_SCRIPTS[$EXPERT_ID]:-}"
 
 if [ -z "$SCRIPT_PATH" ]; then
     echo -e "${RED}Error: expert_id='${EXPERT_ID}' no reconocido.${NC}"
-    echo "IDs válidos: 1, 2, 3, 4, oa"
+    echo "IDs válidos: 1, 2, 3, 4, 5, oa"
     exit 1
 fi
 

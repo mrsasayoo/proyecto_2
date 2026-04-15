@@ -173,7 +173,7 @@ Estos checkpoints deben existir antes de ejecutar el fine-tuning real."""
 EXPERT_HEAD_PREFIXES = {
     0: ["model.classifier"],  # Expert1ConvNeXtTiny
     1: ["head"],  # Expert2ConvNeXtSmall
-    2: ["model.classifier"],  # ExpertOAEfficientNetB0
+    2: ["classifier"],  # ExpertOAEfficientNetB3
     3: ["classifier"],  # Expert3MC318
     4: ["backbone.head"],  # ExpertPancreasSwin3D
     5: ["decoder_fc", "decoder_conv"],  # ConvAutoEncoder

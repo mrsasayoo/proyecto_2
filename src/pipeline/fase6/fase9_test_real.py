@@ -128,7 +128,7 @@ def build_moe_system(
     from src.pipeline.fase2.models.expert1_convnext import Expert1ConvNeXtTiny
     from src.pipeline.fase2.models.expert2_convnext_small import Expert2ConvNeXtSmall
     from src.pipeline.fase2.models.expert_oa_efficientnet_b3 import (
-        ExpertOAEfficientNetB0,
+        ExpertOAEfficientNetB3,
     )
     from src.pipeline.fase2.models.expert3_densenet3d import Expert3MC318
     from src.pipeline.fase2.models.expert4_resnet3d import ExpertPancreasSwin3D
@@ -143,7 +143,7 @@ def build_moe_system(
         [
             Expert1ConvNeXtTiny(dropout_fc=0.3, num_classes=14),  # Expert 0: NIH Chest
             Expert2ConvNeXtSmall(),  # Expert 1: ISIC (8 clases)
-            ExpertOAEfficientNetB0(),  # Expert 2: OA Knee
+            ExpertOAEfficientNetB3(),  # Expert 2: OA Knee
             Expert3MC318(  # Expert 3: LUNA16
                 spatial_dropout_p=0.15, fc_dropout_p=0.4, num_classes=2
             ),
