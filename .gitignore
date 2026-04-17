@@ -45,30 +45,24 @@ datasets/*
 
 # Ignorar los embeddings y archivos pesados generados
 embeddings/
-*.npy
 
 # ═══════════════════════════════════════════════════════════════
 # Logs, Scripts temporales y Monitorización
 # ═══════════════════════════════════════════════════════════════
 *.log
 logs/
-src/pipeline/salida_log/
 datasets/*.sh
-datasets/monitor.sh
 
 # ═══════════════════════════════════════════════════════════════
 # Documentación Extra
 # ═══════════════════════════════════════════════════════════════
 docs/
-luna_patches_archive.tar.gz
-checkpoints/expert_03_vivit_tiny/augmentations
-checkpoints/expert_03_vivit_tiny/transformscheckpoints/expert_03_vivit_tiny/archivos_generados/best_luna_model.pth
-checkpoints/expert_03_vivit_tiny/archivos_generados/best_luna_model.pth
-checkpoints/expert_03_vivit_tiny/archivos_generados/best_luna_model.pth
-*.nii.gz
 
 # Ignorar checkpoints
 checkpoints/
+*.npy
+*.nii.gz
+*.gz
 *.pt
 *.7z
 *.pth
