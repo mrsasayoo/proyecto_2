@@ -71,6 +71,17 @@ from pathlib import Path
 from typing import Iterator
 
 import numpy as np
+
+# ── Variables NCCL (deben definirse ANTES de importar torch/NCCL) ──────
+os.environ.setdefault(
+    "NCCL_TIMEOUT", "1800000"
+)  # 30 min (previene timeout en epoch 9+)
+os.environ.setdefault("NCCL_IB_DISABLE", "1")  # deshabilita InfiniBand si no hay
+os.environ.setdefault("NCCL_P2P_DISABLE", "1")  # fuerza PCIe (más estable con Titan Xp)
+os.environ.setdefault(
+    "NCCL_BLOCKING_WAIT", "1"
+)  # timeout bloqueante (más limpio para debug)
+
 import torch
 import torch.nn as nn
 from torch.amp import GradScaler
@@ -251,6 +262,7 @@ def train_one_epoch(
     accumulation_steps: int,
     use_fp16: bool,
     dry_run: bool = False,
+    max_grad_norm: float = 1.0,
 ) -> float:
     """Ejecuta una época de entrenamiento con DDP + gradient accumulation + FP16.
 
@@ -282,6 +294,8 @@ def train_one_epoch(
             scaler.scale(loss).backward()
 
         if not is_accumulation_step:
+            scaler.unscale_(optimizer)
+            torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=max_grad_norm)
             scaler.step(optimizer)
             scaler.update()
             optimizer.zero_grad()
@@ -299,6 +313,8 @@ def train_one_epoch(
 
     # Flush de gradientes residuales
     if n_batches % accumulation_steps != 0:
+        scaler.unscale_(optimizer)
+        torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=max_grad_norm)
         scaler.step(optimizer)
         scaler.update()
         optimizer.zero_grad()
@@ -674,6 +690,7 @@ def _run_phase(
                 stop_tensor = torch.tensor([1 if should_stop else 0], dtype=torch.int32)
                 if torch.cuda.is_available():
                     stop_tensor = stop_tensor.to(device)
+                    torch.cuda.synchronize()  # Asegurar que todos los kernels finalizaron antes del colectivo
                 torch.distributed.broadcast(stop_tensor, src=0)
                 should_stop = bool(stop_tensor.item())
 
@@ -704,6 +721,7 @@ def train(
     dry_run: bool = False,
     data_root: str | None = None,
     batch_per_gpu: int | None = None,
+    resume: str | None = None,
 ) -> None:
     """Función principal de entrenamiento LP-FT del Expert 1 con DDP.
 
@@ -712,6 +730,7 @@ def train(
         data_root: ruta raíz del proyecto. Si None, se auto-detecta.
         batch_per_gpu: override del batch size por GPU. Si None, se calcula
             automáticamente como EXPERT1_BATCH_SIZE // world_size.
+        resume: path al checkpoint para reanudar entrenamiento.
     """
     # ── Inicializar DDP ────────────────────────────────────────────
     setup_ddp()
@@ -795,12 +814,18 @@ def train(
 
     # ── DataLoaders con DDP ────────────────────────────────────────
     # Train: con DistributedSampler
+    _dl_extra = {}
+    if num_workers_base > 0:
+        _dl_extra["persistent_workers"] = True
+        _dl_extra["prefetch_factor"] = 2
     train_loader, train_sampler = get_ddp_dataloader(
         dataset=train_ds,
         batch_size=effective_batch_per_gpu,
         shuffle=True,
         drop_last=True,
         num_workers=num_workers_base,
+        pin_memory=torch.cuda.is_available(),
+        **_dl_extra,
     )
 
     # Val/Test: SIN DistributedSampler (todos ven todos los datos)
@@ -813,6 +838,7 @@ def train(
         num_workers=num_workers_base,
         pin_memory=torch.cuda.is_available(),
         persistent_workers=num_workers_base > 0,
+        **({"prefetch_factor": 2} if num_workers_base > 0 else {}),
     )
 
     test_loader = DataLoader(
@@ -823,6 +849,7 @@ def train(
         num_workers=num_workers_base,
         pin_memory=torch.cuda.is_available(),
         persistent_workers=num_workers_base > 0,
+        **({"prefetch_factor": 2} if num_workers_base > 0 else {}),
     )
 
     test_flip_loader = DataLoader(
@@ -833,6 +860,7 @@ def train(
         num_workers=num_workers_base,
         pin_memory=torch.cuda.is_available(),
         persistent_workers=num_workers_base > 0,
+        **({"prefetch_factor": 2} if num_workers_base > 0 else {}),
     )
 
     if is_main_process():
@@ -863,6 +891,29 @@ def train(
     # ── Estado global ──────────────────────────────────────────────
     best_macro_auc: float = -float("inf")
     training_log: list[dict] = []
+    resume_epoch: int = 0  # 0 = desde el inicio
+    resume_optimizer_state: dict | None = None
+
+    # ── Reanudación desde checkpoint ───────────────────────────────
+    if resume is not None:
+        resume_path = Path(resume)
+        if resume_path.exists():
+            ckpt = load_checkpoint_ddp(resume_path, map_location=device)
+            if ckpt is not None:
+                model.load_state_dict(ckpt["model_state_dict"])
+                resume_epoch = ckpt.get("epoch", 0)
+                best_macro_auc = ckpt.get("val_macro_auc", -float("inf"))
+                resume_optimizer_state = ckpt.get("optimizer_state_dict", None)
+                if is_main_process():
+                    log.info(
+                        f"[RESUME] Reanudando desde época {resume_epoch}, "
+                        f"best_metric={best_macro_auc:.4f}"
+                    )
+        else:
+            if is_main_process():
+                log.warning(
+                    f"[RESUME] Checkpoint no encontrado: {resume_path}. Iniciando desde cero."
+                )
 
     if is_main_process():
         log.info(f"\n{'=' * 70}")
@@ -888,44 +939,53 @@ def train(
     # ================================================================
     # FASE 1: Linear Probing (backbone congelado)
     # ================================================================
-    model.freeze_backbone()
+    skip_lp = resume_epoch >= EXPERT1_LP_EPOCHS
+    if not skip_lp:
+        model.freeze_backbone()
 
-    if is_main_process():
-        log.info(
-            f"[LP] freeze_backbone() -> "
-            f"{model.count_parameters():,} params entrenables (head + domain_conv)"
+        if is_main_process():
+            log.info(
+                f"[LP] freeze_backbone() -> "
+                f"{model.count_parameters():,} params entrenables (head + domain_conv)"
+            )
+
+        model_ddp = wrap_model_ddp(model, device, find_unused_parameters=True)
+
+        optimizer_lp = torch.optim.AdamW(
+            filter(lambda p: p.requires_grad, model.parameters()),
+            lr=EXPERT1_LP_LR,
+            weight_decay=EXPERT1_WEIGHT_DECAY,
         )
+        # Restaurar estado del optimizer si reanudamos dentro de LP
+        if resume_optimizer_state is not None and resume_epoch < EXPERT1_LP_EPOCHS:
+            optimizer_lp.load_state_dict(resume_optimizer_state)
+            resume_optimizer_state = None  # Consumido
 
-    # En LP el backbone está congelado, así que DDP necesita
-    # find_unused_parameters=True para los parámetros congelados.
-    model_ddp = wrap_model_ddp(model, device, find_unused_parameters=True)
-
-    optimizer_lp = torch.optim.AdamW(
-        filter(lambda p: p.requires_grad, model.parameters()),
-        lr=EXPERT1_LP_LR,
-        weight_decay=EXPERT1_WEIGHT_DECAY,
-    )
-
-    best_macro_auc = _run_phase(
-        phase_name="Linear Probing (backbone congelado)",
-        phase_tag="LP",
-        model=model_ddp,
-        train_loader=train_loader,
-        train_sampler=train_sampler,
-        val_loader=val_loader,
-        criterion=criterion,
-        optimizer=optimizer_lp,
-        scheduler=None,  # Sin scheduler en LP
-        scaler=scaler,
-        device=device,
-        use_fp16=use_fp16,
-        num_epochs=EXPERT1_LP_EPOCHS,
-        global_epoch_offset=0,
-        best_macro_auc=best_macro_auc,
-        training_log=training_log,
-        early_stopping=None,  # Sin early stopping en LP
-        dry_run=dry_run,
-    )
+        lp_remaining = EXPERT1_LP_EPOCHS - resume_epoch
+        best_macro_auc = _run_phase(
+            phase_name="Linear Probing (backbone congelado)",
+            phase_tag="LP",
+            model=model_ddp,
+            train_loader=train_loader,
+            train_sampler=train_sampler,
+            val_loader=val_loader,
+            criterion=criterion,
+            optimizer=optimizer_lp,
+            scheduler=None,
+            scaler=scaler,
+            device=device,
+            use_fp16=use_fp16,
+            num_epochs=lp_remaining,
+            global_epoch_offset=resume_epoch,
+            best_macro_auc=best_macro_auc,
+            training_log=training_log,
+            early_stopping=None,
+            dry_run=dry_run,
+        )
+    else:
+        if is_main_process():
+            log.info(f"[RESUME] Saltando LP (ya completada en época {resume_epoch})")
+        model_ddp = wrap_model_ddp(model, device, find_unused_parameters=True)
 
     # ================================================================
     # FASE 2: Fine-Tuning (todo descongelado)
@@ -952,6 +1012,10 @@ def train(
         lr=EXPERT1_FT_LR,
         weight_decay=EXPERT1_WEIGHT_DECAY,
     )
+    # Restaurar estado del optimizer si reanudamos dentro de FT
+    if resume_optimizer_state is not None and resume_epoch >= EXPERT1_LP_EPOCHS:
+        optimizer_ft.load_state_dict(resume_optimizer_state)
+        resume_optimizer_state = None  # Consumido
     # last_epoch=-1 (default): indica "scheduler nuevo desde cero". El constructor
     # de LRScheduler fija 'initial_lr' en cada param_group a partir del lr actual
     # del optimizer, y luego llama self.step() internamente para computar epoch 0.
@@ -986,6 +1050,11 @@ def train(
             f"patience={EXPERT1_EARLY_STOPPING_PATIENCE}, min_delta={_MIN_DELTA}"
         )
 
+    # Calcular épocas restantes de FT si reanudamos
+    ft_epoch_offset = max(resume_epoch, EXPERT1_LP_EPOCHS)
+    ft_remaining = EXPERT1_FT_EPOCHS - (ft_epoch_offset - EXPERT1_LP_EPOCHS)
+    ft_remaining = max(ft_remaining, 0)
+
     best_macro_auc = _run_phase(
         phase_name="Fine-Tuning (todo descongelado + early stopping)",
         phase_tag="FT",
@@ -999,8 +1068,8 @@ def train(
         scaler=scaler,
         device=device,
         use_fp16=use_fp16,
-        num_epochs=EXPERT1_FT_EPOCHS,
-        global_epoch_offset=EXPERT1_LP_EPOCHS,
+        num_epochs=ft_remaining,
+        global_epoch_offset=ft_epoch_offset,
         best_macro_auc=best_macro_auc,
         training_log=training_log,
         early_stopping=early_stopping,
@@ -1143,9 +1212,19 @@ if __name__ == "__main__":
             "VRAM si la temperatura se mantiene bajo 75°C."
         ),
     )
+    parser.add_argument(
+        "--resume",
+        type=str,
+        default=None,
+        help=(
+            "Path al checkpoint para reanudar entrenamiento. "
+            "Ej: checkpoints/expert_00_convnext_tiny/best.pt"
+        ),
+    )
     args = parser.parse_args()
     train(
         dry_run=args.dry_run,
         data_root=args.data_root,
         batch_per_gpu=args.batch_per_gpu,
+        resume=args.resume,
     )

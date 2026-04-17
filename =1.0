@@ -1,0 +1,22 @@
+Collecting torchmetrics
+  Downloading torchmetrics-1.9.0-py3-none-any.whl.metadata (23 kB)
+Requirement already satisfied: numpy>1.20.0 in /home/mrsasayo_mesa/.pyenv/versions/3.14.3/lib/python3.14/site-packages (from torchmetrics) (2.4.2)
+Requirement already satisfied: packaging>17.1 in /home/mrsasayo_mesa/.pyenv/versions/3.14.3/lib/python3.14/site-packages (from torchmetrics) (26.0)
+Requirement already satisfied: torch>=2.0.0 in /home/mrsasayo_mesa/.pyenv/versions/3.14.3/lib/python3.14/site-packages (from torchmetrics) (2.11.0+cpu)
+Collecting lightning-utilities>=0.15.3 (from torchmetrics)
+  Downloading lightning_utilities-0.15.3-py3-none-any.whl.metadata (5.5 kB)
+Requirement already satisfied: typing_extensions in /home/mrsasayo_mesa/.pyenv/versions/3.14.3/lib/python3.14/site-packages (from lightning-utilities>=0.15.3->torchmetrics) (4.15.0)
+Requirement already satisfied: filelock in /home/mrsasayo_mesa/.pyenv/versions/3.14.3/lib/python3.14/site-packages (from torch>=2.0.0->torchmetrics) (3.25.2)
+Requirement already satisfied: setuptools<82 in /home/mrsasayo_mesa/.pyenv/versions/3.14.3/lib/python3.14/site-packages (from torch>=2.0.0->torchmetrics) (81.0.0)
+Requirement already satisfied: sympy>=1.13.3 in /home/mrsasayo_mesa/.pyenv/versions/3.14.3/lib/python3.14/site-packages (from torch>=2.0.0->torchmetrics) (1.14.0)
+Requirement already satisfied: networkx>=2.5.1 in /home/mrsasayo_mesa/.pyenv/versions/3.14.3/lib/python3.14/site-packages (from torch>=2.0.0->torchmetrics) (3.6.1)
+Requirement already satisfied: jinja2 in /home/mrsasayo_mesa/.pyenv/versions/3.14.3/lib/python3.14/site-packages (from torch>=2.0.0->torchmetrics) (3.1.6)
+Requirement already satisfied: fsspec>=0.8.5 in /home/mrsasayo_mesa/.pyenv/versions/3.14.3/lib/python3.14/site-packages (from torch>=2.0.0->torchmetrics) (2026.3.0)
+Requirement already satisfied: mpmath<1.4,>=1.1.0 in /home/mrsasayo_mesa/.pyenv/versions/3.14.3/lib/python3.14/site-packages (from sympy>=1.13.3->torch>=2.0.0->torchmetrics) (1.3.0)
+Requirement already satisfied: MarkupSafe>=2.0 in /home/mrsasayo_mesa/.pyenv/versions/3.14.3/lib/python3.14/site-packages (from jinja2->torch>=2.0.0->torchmetrics) (3.0.3)
+Downloading torchmetrics-1.9.0-py3-none-any.whl (983 kB)
+   ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 983.4/983.4 kB 9.1 MB/s  0:00:00
+Downloading lightning_utilities-0.15.3-py3-none-any.whl (31 kB)
+Installing collected packages: lightning-utilities, torchmetrics
+
+Successfully installed lightning-utilities-0.15.3 torchmetrics-1.9.0
