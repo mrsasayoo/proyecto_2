@@ -141,17 +141,18 @@ class ChestXray14Dataset(Dataset):
                 f"Regenera con pre_chestxray14.py."
             )
 
-        # Validar que los .npy existen (muestreo rápido)
-        sample_file = self.split_dir / self.df.loc[0, "filename"]
-        if not sample_file.is_file():
-            raise RuntimeError(
-                f"[Chest] Archivo .npy no encontrado: '{sample_file}'. "
-                f"Ejecuta pre_chestxray14.py primero."
-            )
-
         if len(self.df) == 0:
             raise RuntimeError(
                 f"[Chest] El split '{split}' no tiene imágenes en '{split_dir}'. "
+                f"Ejecuta pre_chestxray14.py primero."
+            )
+
+        # Validar que los .npy existen (muestreo rápido)
+        sample_npy = self._to_npy_name(self.df.loc[0, "filename"])
+        sample_file = self.split_dir / sample_npy
+        if not sample_file.is_file():
+            raise RuntimeError(
+                f"[Chest] Archivo .npy no encontrado: '{sample_file}'. "
                 f"Ejecuta pre_chestxray14.py primero."
             )
 
@@ -254,6 +255,17 @@ class ChestXray14Dataset(Dataset):
         return idx
 
     # ──────────────────────────────────────────────────────────────────
+    # Helpers
+    # ──────────────────────────────────────────────────────────────────
+
+    @staticmethod
+    def _to_npy_name(filename: str) -> str:
+        """Ensure filename has .npy extension (handles both 'img.png' and 'img.npy')."""
+        from pathlib import Path as _P
+
+        return _P(filename).stem + ".npy"
+
+    # ──────────────────────────────────────────────────────────────────
     # __len__ / __getitem__
     # ──────────────────────────────────────────────────────────────────
 
@@ -265,7 +277,8 @@ class ChestXray14Dataset(Dataset):
         img_name: str = row["filename"]
 
         # ── Cargar imagen preprocesada (.npy float32, 256×256) ────────
-        npy_path = self.split_dir / img_name
+        npy_name = self._to_npy_name(img_name)
+        npy_path = self.split_dir / npy_name
         try:
             img = np.load(npy_path)  # (256, 256) float32 [0, 1]
         except Exception as e:

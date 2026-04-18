@@ -197,7 +197,7 @@ def process_split(
         npy_path = out_dir / npy_name
 
         # Idempotency: skip if already processed and in metadata
-        if npy_path.exists() and fname in existing_files:
+        if npy_path.exists() and npy_name in existing_files:
             stats.skipped_exists += 1
             # Still need stats for train even if skipped
             if compute_stats:
@@ -241,7 +241,7 @@ def process_split(
 
         new_meta_rows.append(
             {
-                "filename": fname,
+                "filename": npy_name,
                 "patient_id": _extract_patient_id(fname),
                 "label_vector": json.dumps(label_vec),
                 "sha256": sha,
