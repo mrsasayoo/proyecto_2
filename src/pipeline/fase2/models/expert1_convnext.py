@@ -25,9 +25,9 @@ Fase 3 — 3 bloques ResNet:
 
 Fase 4 — Cabezal de clasificación:
     GAP + GMP → concat [B,256] → Linear(256,128) → ReLU → Dropout(0.4)
-    → Linear(128,14) → Sigmoid.
+    → Linear(128,14) — logits crudos (sin activación).
 
-Salida: [B, 14] — probabilidades para 14 patologías (multilabel).
+Salida: [B, 14] — logits crudos para 14 patologías (multilabel, usar con Focal Loss).
 
 Autor: Pipeline Expert1 — Fase 2
 """
@@ -158,7 +158,7 @@ class HybridDeepVision(nn.Module):
         1. Dense-Inception backbone (5 blocks): [B,1,256,256] → [B,1024,8,8]
         2. Transition bottleneck (3× Conv 1×1): [B,1024,8,8] → [B,128,8,8]
         3. ResNet blocks (3×): [B,128,8,8] → [B,128,8,8]
-        4. Classification head: GAP+GMP → [B,256] → FC → [B,14] (sigmoid)
+        4. Classification head: GAP+GMP → [B,256] → FC → [B,14] (raw logits)
 
     Args:
         num_classes: number of output classes. Default: 14.
@@ -211,7 +211,6 @@ class HybridDeepVision(nn.Module):
             nn.ReLU(inplace=True),
             nn.Dropout(p=dropout_fc),
             nn.Linear(128, num_classes),
-            nn.Sigmoid(),
         )
 
         # ── Weight initialization (Kaiming for training from scratch) ──
@@ -237,7 +236,7 @@ class HybridDeepVision(nn.Module):
             x: tensor [B, 1, 256, 256] — grayscale chest X-ray, float32.
 
         Returns:
-            Probabilities [B, num_classes] after sigmoid (multilabel).
+            Raw logits [B, num_classes] for multilabel classification.
         """
         # Phase 1: Inception backbone
         x = self.inception_blocks(x)  # [B, 1024, 8, 8]
@@ -292,9 +291,6 @@ def _test_model() -> None:
     )
 
     assert out.shape == (2, 14), f"Wrong shape: {out.shape}"
-    assert (out >= 0).all() and (out <= 1).all(), (
-        "Output not in [0, 1] — sigmoid missing?"
-    )
     print("[Expert1/HybridDeepVision] Verification completed successfully ✓")
 
 

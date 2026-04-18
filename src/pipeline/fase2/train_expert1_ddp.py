@@ -56,6 +56,7 @@ os.environ.setdefault(
 
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 from torch.amp import GradScaler
 from torch.utils.data import DataLoader
 from sklearn.metrics import roc_auc_score
@@ -419,6 +420,7 @@ def _build_datasets(
     """
     csv_path = str(paths["csv_path"])
     images_dir = str(paths["images_dir"])
+    preprocessed_dir = str(paths["images_dir"].parent / "preprocessed")
 
     if max_samples is not None:
         use_cache = False
@@ -431,6 +433,7 @@ def _build_datasets(
         csv_path=csv_path,
         img_dir=images_dir,
         file_list=str(paths["train_split"]),
+        preprocessed_dir=preprocessed_dir,
         transform=train_tfm,
         mode="expert",
         split="train",
@@ -441,6 +444,7 @@ def _build_datasets(
         csv_path=csv_path,
         img_dir=images_dir,
         file_list=str(paths["val_split"]),
+        preprocessed_dir=preprocessed_dir,
         transform=val_tfm,
         mode="expert",
         split="val",
@@ -451,6 +455,7 @@ def _build_datasets(
         csv_path=csv_path,
         img_dir=images_dir,
         file_list=str(paths["test_split"]),
+        preprocessed_dir=preprocessed_dir,
         transform=val_tfm,
         mode="expert",
         split="test",
@@ -461,6 +466,7 @@ def _build_datasets(
         csv_path=csv_path,
         img_dir=images_dir,
         file_list=str(paths["test_split"]),
+        preprocessed_dir=preprocessed_dir,
         transform=flip_tfm,
         mode="expert",
         split="test",
@@ -840,29 +846,17 @@ def train(
         )
 
     # ── Loss ───────────────────────────────────────────────────────
-    # El modelo produce probabilidades (post-sigmoid), usamos BCELoss.
-    # pos_weight no es compatible con BCELoss, así que usamos un wrapper
-    # que aplica el pos_weight manualmente.
+    # El modelo produce logits crudos (sin sigmoid). Usamos Focal Loss
+    # que aplica sigmoid internamente y reduce el peso de ejemplos fáciles.
     # Cap pos_weight a 50 para evitar overflow/gradientes explosivos
     # (Hernia tenía ~538, peligroso incluso en FP32).
     pos_weight = pos_weight.clamp(max=50.0)
     pos_weight = pos_weight.to(device)
-    criterion = nn.BCEWithLogitsLoss(pos_weight=pos_weight)
-    # NOTA: Aunque el modelo ya aplica sigmoid, BCEWithLogitsLoss espera
-    # logits. Para mantener compatibilidad con pos_weight (que BCELoss no
-    # soporta), aplicamos log-odds inverso NO es viable. En su lugar,
-    # quitamos sigmoid del modelo en entrenamiento y lo aplicamos solo
-    # en inferencia. Sin embargo, la especificación requiere sigmoid en
-    # el modelo. Solución: usar BCELoss con ponderación manual.
-
-    # Reconsideración: la especificación dice sigmoid en el modelo.
-    # BCELoss sí funciona con probabilidades. Para pos_weight, aplicamos
-    # ponderación manual via reduction='none' y multiplicación.
-    criterion = _WeightedBCELoss(pos_weight=pos_weight)
+    criterion = FocalLoss(alpha=pos_weight, gamma=2.0, reduction="mean")
 
     if is_main_process():
         log.info(
-            f"[Expert1] Loss: WeightedBCELoss(pos_weight shape={pos_weight.shape})"
+            f"[Expert1] Loss: FocalLoss(alpha shape={pos_weight.shape}, gamma=2.0)"
         )
 
     # ── GradScaler para FP16 ───────────────────────────────────────
@@ -1078,45 +1072,73 @@ def train(
     cleanup_ddp()
 
 
-class _WeightedBCELoss(nn.Module):
-    """BCELoss with per-class pos_weight, compatible with sigmoid outputs.
+class FocalLoss(nn.Module):
+    """Binary Focal Loss for multi-label classification over raw logits.
 
-    Standard BCEWithLogitsLoss expects logits, but HybridDeepVision outputs
-    probabilities (post-sigmoid). This loss applies BCE on probabilities
-    with manual pos_weight weighting.
-
-    The weighting scheme matches BCEWithLogitsLoss: positive samples are
-    weighted by pos_weight[c], negative samples have weight 1.0.
+    Implements FL(pt) = -alpha * (1 - pt)^gamma * log(pt) where pt is the
+    predicted probability of the correct class.  Built on top of
+    ``F.binary_cross_entropy_with_logits`` for numerical stability (log-sum-exp
+    trick), with the focal modulating factor applied multiplicatively.
 
     Args:
-        pos_weight: tensor [num_classes] with n_neg/n_pos per class.
+        alpha: Tensor [num_classes] with per-class positive weights (e.g.
+            n_neg / n_pos).  Applied only to positive samples, matching the
+            ``pos_weight`` semantics of ``BCEWithLogitsLoss``.
+        gamma: Focusing parameter.  ``gamma=0`` recovers standard weighted BCE.
+            Default: ``2.0``.
+        reduction: ``"mean"`` (default) or ``"none"``.
     """
 
-    def __init__(self, pos_weight: torch.Tensor) -> None:
+    def __init__(
+        self,
+        alpha: torch.Tensor | None = None,
+        gamma: float = 2.0,
+        reduction: str = "mean",
+    ) -> None:
         super().__init__()
-        self.register_buffer("pos_weight", pos_weight)
+        self.gamma = gamma
+        self.reduction = reduction
+        if alpha is not None:
+            self.register_buffer("alpha", alpha)
+        else:
+            self.alpha: torch.Tensor | None = None
 
-    def forward(self, probs: torch.Tensor, targets: torch.Tensor) -> torch.Tensor:
-        """Compute weighted BCE loss.
+    def forward(self, logits: torch.Tensor, targets: torch.Tensor) -> torch.Tensor:
+        """Compute focal loss.
 
         Args:
-            probs: [B, C] probabilities in (0, 1) from sigmoid.
-            targets: [B, C] binary labels.
+            logits: [B, C] raw scores (pre-sigmoid) from the model.
+            targets: [B, C] binary labels (0 or 1).
 
         Returns:
-            Scalar loss.
+            Scalar loss (if reduction="mean") or [B, C] tensor (if "none").
         """
-        # Clamp for numerical stability (avoid log(0))
-        eps = 1e-7
-        probs = probs.clamp(min=eps, max=1.0 - eps)
-
-        # BCE: -[w_p * t * log(p) + (1-t) * log(1-p)]
-        # where w_p = pos_weight for positive samples
-        bce = -(
-            self.pos_weight * targets * torch.log(probs)
-            + (1.0 - targets) * torch.log(1.0 - probs)
+        # Numerically stable BCE per element (no reduction yet).
+        bce = F.binary_cross_entropy_with_logits(
+            logits,
+            targets,
+            reduction="none",
         )
-        return bce.mean()
+
+        # Probabilities for the focal modulating factor.
+        probs = torch.sigmoid(logits)
+        # pt = p when target=1, (1-p) when target=0
+        pt = targets * probs + (1.0 - targets) * (1.0 - probs)
+
+        # Focal modulating factor: (1 - pt)^gamma
+        focal_weight = (1.0 - pt).pow(self.gamma)
+
+        loss = focal_weight * bce
+
+        # Per-class alpha weighting (positive samples only, like pos_weight).
+        if self.alpha is not None:
+            # alpha_t: alpha for positives, 1.0 for negatives
+            alpha_t = targets * self.alpha + (1.0 - targets)
+            loss = alpha_t * loss
+
+        if self.reduction == "mean":
+            return loss.mean()
+        return loss
 
 
 if __name__ == "__main__":
