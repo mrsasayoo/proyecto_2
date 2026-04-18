@@ -1,0 +1,10 @@
+Métrica,Validación,Test,Δ (Test-Val)
+F1-Macro,0.9438,0.9353,-0.0085
+F1-Binary,0.8981,0.8820,-0.0161
+Accuracy,0.9810,0.9791,-0.0018
+Precision,0.8739,0.9075,+0.0336
+Recall,0.9238,0.8579,-0.0659
+AUC-ROC,0.9911,0.9821,-0.0090
+N_samples,1155,2013,—
+N_positives,105,183,—
+N_negatives,1050,1830,—

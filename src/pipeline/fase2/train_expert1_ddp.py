@@ -1,18 +1,15 @@
 """
-Script de entrenamiento DDP para Expert 1 — ConvNeXt-Tiny sobre NIH ChestXray14.
+Script de entrenamiento DDP para Expert 1 — Hybrid-Deep-Vision sobre NIH ChestXray14.
 
 Versión multi-GPU de train_expert1.py usando DistributedDataParallel (DDP).
 Funciona transparentemente en modo single-GPU si solo hay 1 GPU disponible.
 
-Pipeline LP-FT (Linear Probing → Fine-Tuning):
-
-    Fase 1 (LP, 5 épocas):  Backbone congelado, solo head + domain_conv entrenables.
-                             AdamW(lr=1e-3) sin scheduler.
-    Fase 2 (FT, 30 épocas): Todo descongelado.
-                             AdamW(lr=1e-4) + CosineAnnealingLR + early stopping.
+Entrenamiento directo desde cero (sin LP-FT):
+    AdamW(lr=1e-3, wd=1e-4) + CosineAnnealingLR + early stopping.
+    50 épocas máximo con patience=10.
 
 Evaluación final con TTA (Test-Time Augmentation):
-    Promedia logits de test original + test con HorizontalFlip determinista.
+    Promedia probabilidades de test original + test con HorizontalFlip.
     Reporta AUC-ROC por clase (14 patologías) y macro AUC.
 
 Lanzamiento (usa torchrun para detectar GPUs automáticamente):
@@ -22,38 +19,13 @@ Lanzamiento (usa torchrun para detectar GPUs automáticamente):
     # Single-GPU (fallback transparente):
     torchrun --nproc_per_node=1 src/pipeline/fase2/train_expert1_ddp.py
 
-    # O con el script wrapper:
-    bash run_expert.sh 1
-
     # Dry-run:
     torchrun --nproc_per_node=2 src/pipeline/fase2/train_expert1_ddp.py --dry-run
 
-Nota técnica sobre térmica y batch balanceado:
-    Con la configuración original (1 GPU, batch_size=32, accumulation=4):
-        - GPU 0: 100% carga → 84°C, batch efectivo=128
-        - GPU 1: 0% carga → idle
-
-    Con DDP en 2× Titan Xp (batch_per_gpu = 32 // 2 = 16):
-        - GPU 0: ~50% carga → ~65-70°C estimado
-        - GPU 1: ~50% carga → ~65-70°C estimado
-        - Batch efectivo total: 16 × 2 GPUs × 4 acumulación = 128 (idéntico)
-
-    En la práctica, con 12 GB VRAM por Titan Xp y ConvNeXt-Tiny en FP16
-    (imágenes 224×224 RGB), el consumo de VRAM por batch de 16 es ~500 MiB.
-    Se puede subir a batch_per_gpu=24-28 para aprovechar mejor los 12 GB
-    de VRAM sin saturar temperatura (estimado ~72-76°C). Para esto,
-    ajustar accumulation_steps a 2 para mantener batch efectivo ~112-128:
-        batch_per_gpu=24, accum=2 → efectivo = 24 × 2 GPUs × 2 = 96
-        batch_per_gpu=28, accum=2 → efectivo = 28 × 2 GPUs × 2 = 112
-
-    Recomendación: empezar con los defaults (16 per GPU) y monitorizar
-    nvidia-smi. Si la temperatura se estabiliza bajo 75°C, probar
-    --batch-per-gpu 24 para reducir el tiempo de entrenamiento ~30%.
-
 Dependencias:
-    - src/pipeline/fase2/models/expert1_convnext.py: Expert1ConvNeXtTiny
+    - src/pipeline/fase2/models/expert1_convnext.py: HybridDeepVision
     - src/pipeline/fase2/dataloader_expert1.py: build_expert1_dataloaders (datasets)
-    - src/pipeline/fase2/expert1_config.py: hiperparámetros LP-FT
+    - src/pipeline/fase2/expert1_config.py: hiperparámetros de entrenamiento
     - src/pipeline/fase2/ddp_utils.py: utilidades DDP
 """
 
@@ -95,18 +67,17 @@ if str(_PIPELINE_ROOT) not in sys.path:
     sys.path.insert(0, str(_PIPELINE_ROOT))
 
 from config import CHEST_PATHOLOGIES
-from fase2.models.expert1_convnext import Expert1ConvNeXtTiny
+from fase2.models.expert1_convnext import HybridDeepVision
 from fase2.dataloader_expert1 import (
     build_expert1_dataloaders,
     _build_train_transform,
     _build_val_transform,
     _build_flip_transform,
+    _load_dataset_stats,
 )
 from fase2.expert1_config import (
-    EXPERT1_LP_EPOCHS,
-    EXPERT1_FT_EPOCHS,
-    EXPERT1_LP_LR,
-    EXPERT1_FT_LR,
+    EXPERT1_EPOCHS,
+    EXPERT1_LR,
     EXPERT1_WEIGHT_DECAY,
     EXPERT1_DROPOUT_FC,
     EXPERT1_BATCH_SIZE,
@@ -146,15 +117,20 @@ log = logging.getLogger("expert1_train_ddp")
 
 # ── Rutas de salida ────────────────────────────────────────────────────
 _CHECKPOINT_DIR = _PROJECT_ROOT / "checkpoints"
-_CHECKPOINT_PATH = _CHECKPOINT_DIR / "expert_00_convnext_tiny" / "best.pt"
+_CHECKPOINT_PATH = _CHECKPOINT_DIR / "expert_01_hybrid_deep_vision" / "best.pt"
 _TRAINING_LOG_PATH = (
-    _CHECKPOINT_DIR / "expert_00_convnext_tiny" / "expert1_ddp_training_log.json"
+    _CHECKPOINT_DIR / "expert_01_hybrid_deep_vision" / "expert1_ddp_training_log.json"
 )
 
 # ── Constantes de entrenamiento ────────────────────────────────────────
 _SEED = 42
 _MIN_DELTA = 0.001  # Mejora mínima para considerar progreso en early stopping
-_TOTAL_EPOCHS = EXPERT1_LP_EPOCHS + EXPERT1_FT_EPOCHS
+_TOTAL_EPOCHS = EXPERT1_EPOCHS
+
+# ── Ruta por defecto a stats.json ─────────────────────────────────────
+_DEFAULT_STATS_PATH = (
+    _PROJECT_ROOT / "datasets" / "nih_chest_xrays" / "preprocessed" / "stats.json"
+)
 
 
 # ── Rutas por defecto del dataset ──────────────────────────────────────
@@ -237,8 +213,7 @@ def ddp_no_sync(model: nn.Module, active: bool) -> Iterator[None]:
 
     DDP sincroniza gradientes en cada .backward(). Con gradient accumulation,
     solo necesitamos sincronizar en el último paso del bloque de acumulación.
-    model.no_sync() evita la comunicación allreduce en los pasos intermedios,
-    reduciendo overhead de red ~(accumulation_steps - 1) / accumulation_steps.
+    model.no_sync() evita la comunicación allreduce en los pasos intermedios.
 
     Args:
         model: modelo (posiblemente envuelto en DDP).
@@ -287,8 +262,8 @@ def train_one_epoch(
 
         with ddp_no_sync(model, active=is_accumulation_step):
             with torch.amp.autocast(device_type=device.type, enabled=use_fp16):
-                logits = model(imgs)
-                loss = criterion(logits, labels)
+                probs = model(imgs)
+                loss = criterion(probs, labels)
                 loss = loss / accumulation_steps
 
             scaler.scale(loss).backward()
@@ -307,7 +282,7 @@ def train_one_epoch(
             log.info(
                 f"  [Train batch {batch_idx}] "
                 f"imgs={list(imgs.shape)} | "
-                f"logits={list(logits.shape)} | "
+                f"probs={list(probs.shape)} | "
                 f"loss={loss.item() * accumulation_steps:.4f}"
             )
 
@@ -333,15 +308,14 @@ def validate(
 ) -> dict[str, float | list[float]]:
     """Ejecuta validación y calcula métricas multilabel.
 
-    En modo DDP, la validación se ejecuta en todos los procesos pero las
-    métricas se computan solo en rank=0 (el DataLoader de val no usa
-    DistributedSampler para evitar pérdida de samples por padding).
+    El modelo produce probabilidades (post-sigmoid), por lo que se usan
+    directamente para calcular AUC-ROC.
     """
     model.eval()
     total_loss = 0.0
     n_batches = 0
 
-    all_logits: list[torch.Tensor] = []
+    all_probs: list[torch.Tensor] = []
     all_labels: list[torch.Tensor] = []
 
     for batch_idx, (imgs, labels, _stems) in enumerate(loader):
@@ -352,44 +326,40 @@ def validate(
         labels = labels.to(device, non_blocking=True)
 
         with torch.amp.autocast(device_type=device.type, enabled=use_fp16):
-            logits = model(imgs)
-            loss = criterion(logits, labels)
+            probs = model(imgs)
+            loss = criterion(probs, labels)
 
         total_loss += loss.item()
         n_batches += 1
 
-        all_logits.append(logits.cpu())
+        all_probs.append(probs.cpu())
         all_labels.append(labels.cpu())
 
         if dry_run and is_main_process():
             log.info(
                 f"  [Val batch {batch_idx}] "
                 f"imgs={list(imgs.shape)} | "
-                f"logits={list(logits.shape)} | "
+                f"probs={list(probs.shape)} | "
                 f"loss={loss.item():.4f}"
             )
 
     avg_loss = total_loss / max(n_batches, 1)
 
-    all_logits_t = torch.cat(all_logits, dim=0)  # [N, 14]
+    all_probs_np = torch.cat(all_probs, dim=0).numpy()  # [N, 14]
     all_labels_np = torch.cat(all_labels, dim=0).numpy().astype(int)  # [N, 14]
-    probs = torch.sigmoid(all_logits_t).numpy()  # [N, 14]
 
     # AUC-ROC por clase (skip clases sin positivos o sin negativos en este split)
     auc_per_class: list[float] = []
     for c in range(EXPERT1_NUM_CLASSES):
         y_true_c = all_labels_np[:, c]
-        # Necesitamos al menos 1 positivo y 1 negativo para calcular AUC
         if y_true_c.sum() == 0 or y_true_c.sum() == len(y_true_c):
             auc_per_class.append(float("nan"))
         else:
             try:
-                auc_per_class.append(roc_auc_score(y_true_c, probs[:, c]))
+                auc_per_class.append(roc_auc_score(y_true_c, all_probs_np[:, c]))
             except ValueError:
                 auc_per_class.append(float("nan"))
-    # nanmean ignora clases sin positivos/negativos (NaN) para que el macro AUC
-    # refleje solo las clases evaluables. Funciona tanto en dry-run (pocos
-    # samples → muchas clases NaN) como en producción (dataset completo).
+
     n_valid = sum(1 for a in auc_per_class if not np.isnan(a))
     if n_valid < EXPERT1_NUM_CLASSES and is_main_process():
         log.warning(
@@ -413,9 +383,9 @@ def eval_with_tta(
     device: torch.device,
     use_fp16: bool,
 ) -> tuple[torch.Tensor, torch.Tensor]:
-    """Evaluación con TTA: promedia logits de original + HorizontalFlip."""
+    """Evaluación con TTA: promedia probabilidades de original + HorizontalFlip."""
     model.eval()
-    all_logits: list[torch.Tensor] = []
+    all_probs: list[torch.Tensor] = []
     all_labels: list[torch.Tensor] = []
 
     for (x_orig, labels_orig, _s1), (x_flip, _labels_flip, _s2) in zip(
@@ -425,20 +395,20 @@ def eval_with_tta(
         x_flip = x_flip.to(device, non_blocking=True)
 
         with torch.amp.autocast(device_type=device.type, enabled=use_fp16):
-            logits_orig = model(x_orig)
-            logits_flip = model(x_flip)
+            probs_orig = model(x_orig)
+            probs_flip = model(x_flip)
 
-        tta_logits = (logits_orig + logits_flip) / 2.0
-        all_logits.append(tta_logits.cpu())
+        tta_probs = (probs_orig + probs_flip) / 2.0
+        all_probs.append(tta_probs.cpu())
         all_labels.append(labels_orig.cpu())
 
-    return torch.cat(all_logits, dim=0), torch.cat(all_labels, dim=0)
+    return torch.cat(all_probs, dim=0), torch.cat(all_labels, dim=0)
 
 
 def _build_datasets(
     paths: dict[str, Path],
-    model_mean: tuple[float, ...],
-    model_std: tuple[float, ...],
+    dataset_mean: list[float],
+    dataset_std: list[float],
     use_cache: bool,
     max_samples: int | None,
 ) -> dict[str, ChestXray14Dataset | Subset | torch.Tensor]:
@@ -453,9 +423,9 @@ def _build_datasets(
     if max_samples is not None:
         use_cache = False
 
-    train_tfm = _build_train_transform(model_mean, model_std)
-    val_tfm = _build_val_transform(model_mean, model_std)
-    flip_tfm = _build_flip_transform(model_mean, model_std)
+    train_tfm = _build_train_transform(dataset_mean, dataset_std)
+    val_tfm = _build_val_transform(dataset_mean, dataset_std)
+    flip_tfm = _build_flip_transform(dataset_mean, dataset_std)
 
     train_ds = ChestXray14Dataset(
         csv_path=csv_path,
@@ -525,42 +495,42 @@ def _build_datasets(
     }
 
 
-def _run_phase(
-    phase_name: str,
-    phase_tag: str,
+def _run_training(
     model: nn.Module,
     train_loader: DataLoader,
-    train_sampler,
+    train_sampler: object,
     val_loader: DataLoader,
     criterion: nn.Module,
     optimizer: torch.optim.Optimizer,
-    scheduler: torch.optim.lr_scheduler.LRScheduler | None,
+    scheduler: torch.optim.lr_scheduler.LRScheduler,
     scaler: GradScaler,
     device: torch.device,
     use_fp16: bool,
     num_epochs: int,
-    global_epoch_offset: int,
+    start_epoch: int,
     best_macro_auc: float,
     training_log: list[dict],
-    early_stopping: EarlyStoppingAUC | None,
+    early_stopping: EarlyStoppingAUC,
     dry_run: bool,
 ) -> float:
-    """Ejecuta una fase completa de entrenamiento (LP o FT) con soporte DDP.
+    """Ejecuta el loop de entrenamiento completo con soporte DDP.
 
-    Diferencias clave vs. versión sin DDP:
-    - train_sampler.set_epoch(epoch) al inicio de cada época para shuffle correcto.
-    - Solo rank=0 hace logging, checkpointing, y escritura de métricas.
-    - Gradient accumulation con model.no_sync() en pasos intermedios.
+    Args:
+        start_epoch: epoch number to start from (for resume support).
+        best_macro_auc: best metric so far (for resume support).
+
+    Returns:
+        Best val_macro_auc achieved during training.
     """
     max_epochs = 1 if dry_run else num_epochs
     raw_model = get_unwrapped_model(model)
 
     if is_main_process():
         log.info(f"\n{'=' * 70}")
-        log.info(f"  {phase_tag}: {phase_name}")
+        log.info("  ENTRENAMIENTO: Hybrid-Deep-Vision desde cero")
         log.info(
             f"  Épocas: {max_epochs} "
-            f"(global {global_epoch_offset + 1}-{global_epoch_offset + max_epochs})"
+            f"(desde {start_epoch + 1} hasta {start_epoch + max_epochs})"
         )
         log.info(f"  Params entrenables: {raw_model.count_parameters():,}")
         for i, pg in enumerate(optimizer.param_groups):
@@ -577,11 +547,11 @@ def _run_phase(
         log.info(f"{'=' * 70}\n")
 
     for epoch_local in range(max_epochs):
-        epoch_global = global_epoch_offset + epoch_local + 1
+        epoch_global = start_epoch + epoch_local + 1
         epoch_start = time.time()
 
         # ── Actualizar epoch en DistributedSampler para shuffle correcto ──
-        if train_sampler is not None:
+        if train_sampler is not None and hasattr(train_sampler, "set_epoch"):
             train_sampler.set_epoch(epoch_global)
 
         # ── Train ──────────────────────────────────────────────────
@@ -597,7 +567,7 @@ def _run_phase(
             dry_run=dry_run,
         )
 
-        # ── Validation (solo en rank=0, loader sin DistributedSampler) ──
+        # ── Validation ─────────────────────────────────────────────
         val_results = validate(
             model=model,
             loader=val_loader,
@@ -607,9 +577,8 @@ def _run_phase(
             dry_run=dry_run,
         )
 
-        # ── Scheduler step (solo FT) ──────────────────────────────
-        if scheduler is not None:
-            scheduler.step()
+        # ── Scheduler step ─────────────────────────────────────────
+        scheduler.step()
         current_lr = optimizer.param_groups[0]["lr"]
 
         # ── Extraer métricas ───────────────────────────────────────
@@ -622,7 +591,7 @@ def _run_phase(
         # ── Logging (solo rank=0) ──────────────────────────────────
         if is_main_process():
             log.info(
-                f"[Epoch {epoch_global:3d}/{_TOTAL_EPOCHS} | {phase_tag}] "
+                f"[Epoch {epoch_global:3d}/{_TOTAL_EPOCHS}] "
                 f"train_loss={train_loss:.4f} | val_loss={val_loss:.4f} | "
                 f"val_macro_auc={val_macro_auc:.4f} | "
                 f"lr={current_lr:.2e} | time={epoch_time:.1f}s"
@@ -634,7 +603,6 @@ def _run_phase(
         if is_main_process():
             epoch_log: dict = {
                 "epoch": epoch_global,
-                "phase": phase_tag,
                 "train_loss": train_loss,
                 "val_loss": val_loss,
                 "val_macro_auc": val_macro_auc,
@@ -651,22 +619,19 @@ def _run_phase(
             best_macro_auc = val_macro_auc
             checkpoint = {
                 "epoch": epoch_global,
-                "phase": phase_tag,
                 "model_state_dict": get_model_state_dict(model),
                 "optimizer_state_dict": optimizer.state_dict(),
                 "val_macro_auc": val_macro_auc,
                 "val_loss": val_loss,
                 "val_auc_per_class": val_results["val_auc_per_class"],
                 "config": {
-                    "lp_lr": EXPERT1_LP_LR,
-                    "ft_lr": EXPERT1_FT_LR,
+                    "lr": EXPERT1_LR,
                     "weight_decay": EXPERT1_WEIGHT_DECAY,
                     "dropout_fc": EXPERT1_DROPOUT_FC,
                     "batch_size": EXPERT1_BATCH_SIZE,
                     "accumulation_steps": EXPERT1_ACCUMULATION_STEPS,
                     "fp16": EXPERT1_FP16,
-                    "lp_epochs": EXPERT1_LP_EPOCHS,
-                    "ft_epochs": EXPERT1_FT_EPOCHS,
+                    "epochs": EXPERT1_EPOCHS,
                     "seed": _SEED,
                     "world_size": get_world_size(),
                 },
@@ -679,8 +644,8 @@ def _run_phase(
             with open(_TRAINING_LOG_PATH, "w") as f:
                 json.dump(training_log, f, indent=2)
 
-        # ── Early stopping (solo rank=0 decide, todos los procesos paran) ──
-        if early_stopping is not None and not dry_run:
+        # ── Early stopping ─────────────────────────────────────────
+        if not dry_run:
             should_stop = False
             if is_main_process():
                 should_stop = early_stopping.step(val_macro_auc)
@@ -690,7 +655,7 @@ def _run_phase(
                 stop_tensor = torch.tensor([1 if should_stop else 0], dtype=torch.int32)
                 if torch.cuda.is_available():
                     stop_tensor = stop_tensor.to(device)
-                    torch.cuda.synchronize()  # Asegurar que todos los kernels finalizaron antes del colectivo
+                    torch.cuda.synchronize()
                 torch.distributed.broadcast(stop_tensor, src=0)
                 should_stop = bool(stop_tensor.item())
 
@@ -704,13 +669,12 @@ def _run_phase(
                     )
                 break
 
-    # ── Resumen de fase ────────────────────────────────────────────
-    if is_main_process():
-        phase_logs = [e for e in training_log if e["phase"] == phase_tag]
-        if phase_logs:
-            best_epoch_log = max(phase_logs, key=lambda x: x["val_macro_auc"])
+    # ── Resumen ────────────────────────────────────────────────────
+    if is_main_process() and training_log:
+        best_epoch_log = max(training_log, key=lambda x: x.get("val_macro_auc", 0))
+        if "epoch" in best_epoch_log:
             log.info(
-                f"\n[{phase_tag} resumen] Mejor época: {best_epoch_log['epoch']} | "
+                f"\n[Resumen] Mejor época: {best_epoch_log['epoch']} | "
                 f"val_macro_auc={best_epoch_log['val_macro_auc']:.4f}"
             )
 
@@ -723,7 +687,7 @@ def train(
     batch_per_gpu: int | None = None,
     resume: str | None = None,
 ) -> None:
-    """Función principal de entrenamiento LP-FT del Expert 1 con DDP.
+    """Función principal de entrenamiento del Expert 1 con DDP.
 
     Args:
         dry_run: si True, ejecuta 2 batches de train y 1 de val.
@@ -756,8 +720,6 @@ def train(
     # ── Configuración ──────────────────────────────────────────────
     world_size = get_world_size()
 
-    # Batch por GPU: dividir el batch total entre las GPUs para mantener
-    # el mismo batch efectivo (batch_per_gpu * world_size * accum ≈ original)
     if batch_per_gpu is None:
         effective_batch_per_gpu = EXPERT1_BATCH_SIZE // world_size
     else:
@@ -779,29 +741,34 @@ def train(
         log.info("[Expert1] FP16 desactivado (no hay GPU). Usando FP32 en CPU.")
 
     # ── Modelo ─────────────────────────────────────────────────────
-    model = Expert1ConvNeXtTiny(
+    model = HybridDeepVision(
         dropout_fc=EXPERT1_DROPOUT_FC,
         num_classes=EXPERT1_NUM_CLASSES,
-        pretrained=True,
     ).to(device)
 
     if is_main_process():
         n_params_total = model.count_all_parameters()
         log.info(
-            f"[Expert1] Modelo ConvNeXt-Tiny creado: "
+            f"[Expert1] Modelo Hybrid-Deep-Vision creado: "
             f"{n_params_total:,} parámetros totales"
         )
         _log_vram("post-model")
 
+    # ── Cargar estadísticas del dataset desde stats.json ───────────
+    project_root = Path(data_root) if data_root else _PROJECT_ROOT
+    stats_path = (
+        project_root / "datasets" / "nih_chest_xrays" / "preprocessed" / "stats.json"
+    )
+    dataset_mean, dataset_std = _load_dataset_stats(stats_path)
+
     # ── Datasets (sin DataLoader, para aplicar DDP sampler) ────────
     num_workers_base = 0 if dry_run else EXPERT1_NUM_WORKERS
-    project_root = Path(data_root) if data_root else _PROJECT_ROOT
     paths = get_default_paths(project_root)
 
     datasets = _build_datasets(
         paths=paths,
-        model_mean=model.model_mean,
-        model_std=model.model_std,
+        dataset_mean=dataset_mean,
+        dataset_std=dataset_std,
         use_cache=True,
         max_samples=64 if dry_run else None,
     )
@@ -813,8 +780,7 @@ def train(
     pos_weight = datasets["pos_weight"]
 
     # ── DataLoaders con DDP ────────────────────────────────────────
-    # Train: con DistributedSampler
-    _dl_extra = {}
+    _dl_extra: dict = {}
     if num_workers_base > 0:
         _dl_extra["persistent_workers"] = True
         _dl_extra["prefetch_factor"] = 2
@@ -829,7 +795,6 @@ def train(
     )
 
     # Val/Test: SIN DistributedSampler (todos ven todos los datos)
-    # Esto es intencional: en evaluación queremos métricas sobre el dataset completo.
     val_loader = DataLoader(
         val_ds,
         batch_size=effective_batch_per_gpu,
@@ -874,14 +839,29 @@ def train(
         )
 
     # ── Loss ───────────────────────────────────────────────────────
+    # El modelo produce probabilidades (post-sigmoid), usamos BCELoss.
+    # pos_weight no es compatible con BCELoss, así que usamos un wrapper
+    # que aplica el pos_weight manualmente.
     pos_weight = pos_weight.to(device)
     criterion = nn.BCEWithLogitsLoss(pos_weight=pos_weight)
+    # NOTA: Aunque el modelo ya aplica sigmoid, BCEWithLogitsLoss espera
+    # logits. Para mantener compatibilidad con pos_weight (que BCELoss no
+    # soporta), aplicamos log-odds inverso NO es viable. En su lugar,
+    # quitamos sigmoid del modelo en entrenamiento y lo aplicamos solo
+    # en inferencia. Sin embargo, la especificación requiere sigmoid en
+    # el modelo. Solución: usar BCELoss con ponderación manual.
+
+    # Reconsideración: la especificación dice sigmoid en el modelo.
+    # BCELoss sí funciona con probabilidades. Para pos_weight, aplicamos
+    # ponderación manual via reduction='none' y multiplicación.
+    criterion = _WeightedBCELoss(pos_weight=pos_weight)
+
     if is_main_process():
         log.info(
-            f"[Expert1] Loss: BCEWithLogitsLoss(pos_weight shape={pos_weight.shape})"
+            f"[Expert1] Loss: WeightedBCELoss(pos_weight shape={pos_weight.shape})"
         )
 
-    # ── GradScaler para FP16 (compartido entre fases) ──────────────
+    # ── GradScaler para FP16 ───────────────────────────────────────
     scaler = GradScaler(device=device.type, enabled=use_fp16)
 
     # ── Directorio de checkpoints ──────────────────────────────────
@@ -891,8 +871,7 @@ def train(
     # ── Estado global ──────────────────────────────────────────────
     best_macro_auc: float = -float("inf")
     training_log: list[dict] = []
-    resume_epoch: int = 0  # 0 = desde el inicio
-    resume_optimizer_state: dict | None = None
+    resume_epoch: int = 0
 
     # ── Reanudación desde checkpoint ───────────────────────────────
     if resume is not None:
@@ -903,7 +882,6 @@ def train(
                 model.load_state_dict(ckpt["model_state_dict"])
                 resume_epoch = ckpt.get("epoch", 0)
                 best_macro_auc = ckpt.get("val_macro_auc", -float("inf"))
-                resume_optimizer_state = ckpt.get("optimizer_state_dict", None)
                 if is_main_process():
                     log.info(
                         f"[RESUME] Reanudando desde época {resume_epoch}, "
@@ -912,17 +890,51 @@ def train(
         else:
             if is_main_process():
                 log.warning(
-                    f"[RESUME] Checkpoint no encontrado: {resume_path}. Iniciando desde cero."
+                    f"[RESUME] Checkpoint no encontrado: {resume_path}. "
+                    "Iniciando desde cero."
                 )
+
+    # ── Envolver con DDP ───────────────────────────────────────────
+    model_ddp = wrap_model_ddp(model, device, find_unused_parameters=False)
+
+    # ── Optimizer ──────────────────────────────────────────────────
+    optimizer = torch.optim.AdamW(
+        model.parameters(),
+        lr=EXPERT1_LR,
+        weight_decay=EXPERT1_WEIGHT_DECAY,
+    )
+
+    # ── Scheduler ──────────────────────────────────────────────────
+    warnings.filterwarnings(
+        "ignore",
+        message=r"Detected call of.*lr_scheduler",
+        category=UserWarning,
+    )
+    scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
+        optimizer,
+        T_max=EXPERT1_EPOCHS,
+        last_epoch=-1,
+    )
+
+    # ── Early stopping ─────────────────────────────────────────────
+    early_stopping = EarlyStoppingAUC(
+        patience=EXPERT1_EARLY_STOPPING_PATIENCE,
+        min_delta=_MIN_DELTA,
+    )
+    if is_main_process():
+        log.info(
+            f"[Expert1] EarlyStopping: monitor=val_macro_auc, "
+            f"patience={EXPERT1_EARLY_STOPPING_PATIENCE}, min_delta={_MIN_DELTA}"
+        )
 
     if is_main_process():
         log.info(f"\n{'=' * 70}")
         log.info(
-            "  INICIO DE ENTRENAMIENTO — Expert 1 DDP (ConvNeXt-Tiny / ChestXray14)"
+            "  INICIO DE ENTRENAMIENTO — Expert 1 DDP "
+            "(Hybrid-Deep-Vision / ChestXray14)"
         )
         log.info(
-            f"  LP: {EXPERT1_LP_EPOCHS} épocas (LR={EXPERT1_LP_LR}) | "
-            f"FT: {EXPERT1_FT_EPOCHS} épocas (LR={EXPERT1_FT_LR})"
+            f"  Épocas: {EXPERT1_EPOCHS} | LR={EXPERT1_LR} | WD={EXPERT1_WEIGHT_DECAY}"
         )
         log.info(
             f"  Batch efectivo: "
@@ -936,140 +948,21 @@ def train(
         )
         log.info(f"{'=' * 70}\n")
 
-    # ================================================================
-    # FASE 1: Linear Probing (backbone congelado)
-    # ================================================================
-    skip_lp = resume_epoch >= EXPERT1_LP_EPOCHS
-    if not skip_lp:
-        model.freeze_backbone()
-
-        if is_main_process():
-            log.info(
-                f"[LP] freeze_backbone() -> "
-                f"{model.count_parameters():,} params entrenables (head + domain_conv)"
-            )
-
-        model_ddp = wrap_model_ddp(model, device, find_unused_parameters=True)
-
-        optimizer_lp = torch.optim.AdamW(
-            filter(lambda p: p.requires_grad, model.parameters()),
-            lr=EXPERT1_LP_LR,
-            weight_decay=EXPERT1_WEIGHT_DECAY,
-        )
-        # Restaurar estado del optimizer si reanudamos dentro de LP
-        if resume_optimizer_state is not None and resume_epoch < EXPERT1_LP_EPOCHS:
-            optimizer_lp.load_state_dict(resume_optimizer_state)
-            resume_optimizer_state = None  # Consumido
-
-        lp_remaining = EXPERT1_LP_EPOCHS - resume_epoch
-        best_macro_auc = _run_phase(
-            phase_name="Linear Probing (backbone congelado)",
-            phase_tag="LP",
-            model=model_ddp,
-            train_loader=train_loader,
-            train_sampler=train_sampler,
-            val_loader=val_loader,
-            criterion=criterion,
-            optimizer=optimizer_lp,
-            scheduler=None,
-            scaler=scaler,
-            device=device,
-            use_fp16=use_fp16,
-            num_epochs=lp_remaining,
-            global_epoch_offset=resume_epoch,
-            best_macro_auc=best_macro_auc,
-            training_log=training_log,
-            early_stopping=None,
-            dry_run=dry_run,
-        )
-    else:
-        if is_main_process():
-            log.info(f"[RESUME] Saltando LP (ya completada en época {resume_epoch})")
-        model_ddp = wrap_model_ddp(model, device, find_unused_parameters=True)
-
-    # ================================================================
-    # FASE 2: Fine-Tuning (todo descongelado)
-    # ================================================================
-    # Desempaquetar DDP para cambiar el estado de freeze del modelo,
-    # luego re-envolver. DDP no permite cambiar parámetros in-place.
-    model = get_unwrapped_model(model_ddp)
-    model.unfreeze_backbone()
-
-    if is_main_process():
-        log.info(
-            f"[FT] unfreeze_backbone() -> "
-            f"{model.count_parameters():,} params entrenables (todo descongelado)"
-        )
-
-    # Re-envolver con find_unused_parameters=True: aunque el backbone está
-    # descongelado, algunos parámetros (índices 178-179) no participan en el
-    # forward pass y no reciben gradientes, lo que causa RuntimeError en DDP
-    # si find_unused_parameters=False.
-    model_ddp = wrap_model_ddp(model, device, find_unused_parameters=True)
-
-    optimizer_ft = torch.optim.AdamW(
-        model.parameters(),
-        lr=EXPERT1_FT_LR,
-        weight_decay=EXPERT1_WEIGHT_DECAY,
-    )
-    # Restaurar estado del optimizer si reanudamos dentro de FT
-    if resume_optimizer_state is not None and resume_epoch >= EXPERT1_LP_EPOCHS:
-        optimizer_ft.load_state_dict(resume_optimizer_state)
-        resume_optimizer_state = None  # Consumido
-    # last_epoch=-1 (default): indica "scheduler nuevo desde cero". El constructor
-    # de LRScheduler fija 'initial_lr' en cada param_group a partir del lr actual
-    # del optimizer, y luego llama self.step() internamente para computar epoch 0.
-    # Usar last_epoch=0 es INCORRECTO con un optimizer nuevo porque asume que
-    # 'initial_lr' ya existe en los param_groups (modo "resume"), causando:
-    #   KeyError: "param 'initial_lr' is not specified in param_groups[0]..."
-    # La primera llamada explícita a scheduler.step() en el loop de entrenamiento
-    # (línea 594, después de optimizer.step()) avanza correctamente a epoch 1.
-    # Suprimir falso positivo "lr_scheduler.step() before optimizer.step()".
-    # En dry-run con FP16+DDP, GradScaler puede saltar optimizer.step() si detecta
-    # inf/nan (accum_steps > n_batches), dejando optimizer._step_count == 0.
-    # PyTorch 2.3.0 verifica _step_count, no _opt_called, así que el hack anterior
-    # no funciona. warnings.filterwarnings es el enfoque robusto.
-    warnings.filterwarnings(
-        "ignore",
-        message=r"Detected call of.*lr_scheduler",
-        category=UserWarning,
-    )
-    scheduler_ft = torch.optim.lr_scheduler.CosineAnnealingLR(
-        optimizer_ft,
-        T_max=EXPERT1_FT_EPOCHS,
-        last_epoch=-1,
-    )
-
-    early_stopping = EarlyStoppingAUC(
-        patience=EXPERT1_EARLY_STOPPING_PATIENCE,
-        min_delta=_MIN_DELTA,
-    )
-    if is_main_process():
-        log.info(
-            f"[FT] EarlyStopping: monitor=val_macro_auc, "
-            f"patience={EXPERT1_EARLY_STOPPING_PATIENCE}, min_delta={_MIN_DELTA}"
-        )
-
-    # Calcular épocas restantes de FT si reanudamos
-    ft_epoch_offset = max(resume_epoch, EXPERT1_LP_EPOCHS)
-    ft_remaining = EXPERT1_FT_EPOCHS - (ft_epoch_offset - EXPERT1_LP_EPOCHS)
-    ft_remaining = max(ft_remaining, 0)
-
-    best_macro_auc = _run_phase(
-        phase_name="Fine-Tuning (todo descongelado + early stopping)",
-        phase_tag="FT",
+    # ── Entrenamiento ──────────────────────────────────────────────
+    remaining_epochs = EXPERT1_EPOCHS - resume_epoch
+    best_macro_auc = _run_training(
         model=model_ddp,
         train_loader=train_loader,
         train_sampler=train_sampler,
         val_loader=val_loader,
         criterion=criterion,
-        optimizer=optimizer_ft,
-        scheduler=scheduler_ft,
+        optimizer=optimizer,
+        scheduler=scheduler,
         scaler=scaler,
         device=device,
         use_fp16=use_fp16,
-        num_epochs=ft_remaining,
-        global_epoch_offset=ft_epoch_offset,
+        num_epochs=remaining_epochs,
+        start_epoch=resume_epoch,
         best_macro_auc=best_macro_auc,
         training_log=training_log,
         early_stopping=early_stopping,
@@ -1101,7 +994,7 @@ def train(
                 "[TTA] Usando modelo del final del entrenamiento (no hay checkpoint)"
             )
 
-        tta_logits, tta_labels = eval_with_tta(
+        tta_probs, tta_labels = eval_with_tta(
             model=model,
             dl_orig=test_loader,
             dl_flip=test_flip_loader,
@@ -1109,8 +1002,8 @@ def train(
             use_fp16=use_fp16,
         )
 
-        # Calcular métricas TTA
-        tta_probs = torch.sigmoid(tta_logits).numpy()
+        # Calcular métricas TTA (probs ya son probabilidades post-sigmoid)
+        tta_probs_np = tta_probs.numpy()
         tta_labels_np = tta_labels.numpy().astype(int)
 
         test_auc_per_class: list[float] = []
@@ -1120,7 +1013,7 @@ def train(
                 auc_c = float("nan")
             else:
                 try:
-                    auc_c = roc_auc_score(y_true_c, tta_probs[:, c])
+                    auc_c = roc_auc_score(y_true_c, tta_probs_np[:, c])
                 except ValueError:
                     auc_c = float("nan")
             test_auc_per_class.append(auc_c)
@@ -1153,7 +1046,8 @@ def train(
         # Resumen final
         log.info(f"\n{'=' * 70}")
         log.info(
-            "  ENTRENAMIENTO FINALIZADO — Expert 1 DDP (ConvNeXt-Tiny / ChestXray14)"
+            "  ENTRENAMIENTO FINALIZADO — Expert 1 DDP "
+            "(Hybrid-Deep-Vision / ChestXray14)"
         )
         log.info(f"  Mejor val_macro_auc: {best_macro_auc:.4f}")
         log.info(f"  Test macro AUC (TTA): {test_macro_auc:.4f}")
@@ -1162,8 +1056,7 @@ def train(
             if epoch_logs:
                 best_epoch = max(epoch_logs, key=lambda x: x["val_macro_auc"])
                 log.info(
-                    f"  Mejor época: {best_epoch['epoch']} "
-                    f"({best_epoch['phase']}) | "
+                    f"  Mejor época: {best_epoch['epoch']} | "
                     f"val_macro_auc: {best_epoch['val_macro_auc']:.4f}"
                 )
         if not dry_run:
@@ -1181,10 +1074,51 @@ def train(
     cleanup_ddp()
 
 
+class _WeightedBCELoss(nn.Module):
+    """BCELoss with per-class pos_weight, compatible with sigmoid outputs.
+
+    Standard BCEWithLogitsLoss expects logits, but HybridDeepVision outputs
+    probabilities (post-sigmoid). This loss applies BCE on probabilities
+    with manual pos_weight weighting.
+
+    The weighting scheme matches BCEWithLogitsLoss: positive samples are
+    weighted by pos_weight[c], negative samples have weight 1.0.
+
+    Args:
+        pos_weight: tensor [num_classes] with n_neg/n_pos per class.
+    """
+
+    def __init__(self, pos_weight: torch.Tensor) -> None:
+        super().__init__()
+        self.register_buffer("pos_weight", pos_weight)
+
+    def forward(self, probs: torch.Tensor, targets: torch.Tensor) -> torch.Tensor:
+        """Compute weighted BCE loss.
+
+        Args:
+            probs: [B, C] probabilities in (0, 1) from sigmoid.
+            targets: [B, C] binary labels.
+
+        Returns:
+            Scalar loss.
+        """
+        # Clamp for numerical stability (avoid log(0))
+        eps = 1e-7
+        probs = probs.clamp(min=eps, max=1.0 - eps)
+
+        # BCE: -[w_p * t * log(p) + (1-t) * log(1-p)]
+        # where w_p = pos_weight for positive samples
+        bce = -(
+            self.pos_weight * targets * torch.log(probs)
+            + (1.0 - targets) * torch.log(1.0 - probs)
+        )
+        return bce.mean()
+
+
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(
         description=(
-            "Entrenamiento Expert 1 DDP — ConvNeXt-Tiny / ChestXray14 (LP-FT). "
+            "Entrenamiento Expert 1 DDP — Hybrid-Deep-Vision / ChestXray14. "
             "Usar con torchrun para multi-GPU."
         )
     )
@@ -1207,9 +1141,7 @@ if __name__ == "__main__":
         type=int,
         default=None,
         help=(
-            "Override del batch size por GPU. Default: EXPERT1_BATCH_SIZE // world_size "
-            "(32//2=16 con 2 GPUs). Subir a 24-28 para mejor aprovechamiento de "
-            "VRAM si la temperatura se mantiene bajo 75°C."
+            "Override del batch size por GPU. Default: EXPERT1_BATCH_SIZE // world_size."
         ),
     )
     parser.add_argument(
@@ -1218,7 +1150,7 @@ if __name__ == "__main__":
         default=None,
         help=(
             "Path al checkpoint para reanudar entrenamiento. "
-            "Ej: checkpoints/expert_00_convnext_tiny/best.pt"
+            "Ej: checkpoints/expert_01_hybrid_deep_vision/best.pt"
         ),
     )
     args = parser.parse_args()

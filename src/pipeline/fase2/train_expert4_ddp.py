@@ -133,7 +133,7 @@ log = logging.getLogger("expert4_train_ddp")
 
 # ── Rutas de salida ────────────────────────────────────────────────────
 _CHECKPOINT_DIR = _PROJECT_ROOT / "checkpoints"
-_CHECKPOINT_BASE = _CHECKPOINT_DIR / "expert_04_swin3d_tiny"
+_CHECKPOINT_BASE = _CHECKPOINT_DIR / "expert_04_resnet3d_r3d18"
 _CHECKPOINT_PATH = _CHECKPOINT_BASE / "expert4_best.pt"
 _TRAINING_LOG_PATH = _CHECKPOINT_BASE / "expert4_ddp_training_log.json"
 

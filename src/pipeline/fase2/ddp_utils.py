@@ -195,6 +195,7 @@ def get_ddp_dataloader(
     num_workers: int | None = None,
     pin_memory: bool | None = None,
     persistent_workers: bool | None = None,
+    prefetch_factor: int | None = None,
 ) -> tuple[DataLoader, DistributedSampler | None]:
     """Crea un DataLoader compatible con DDP.
 
@@ -252,6 +253,11 @@ def get_ddp_dataloader(
             num_workers=num_workers,
             pin_memory=pin_memory,
             persistent_workers=persistent_workers,
+            **(
+                {"prefetch_factor": prefetch_factor}
+                if prefetch_factor is not None
+                else {}
+            ),
         )
     else:
         loader = DataLoader(
@@ -262,6 +268,11 @@ def get_ddp_dataloader(
             num_workers=num_workers,
             pin_memory=pin_memory,
             persistent_workers=persistent_workers,
+            **(
+                {"prefetch_factor": prefetch_factor}
+                if prefetch_factor is not None
+                else {}
+            ),
         )
 
     return loader, sampler

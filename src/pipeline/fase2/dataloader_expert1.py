@@ -4,23 +4,36 @@ DataLoader para Expert 1 — NIH ChestXray14 (14 patologías, multilabel).
 Construye DataLoaders para train, val, test y test_flip (TTA) del Expert 1
 (ConvNeXt-Tiny). Transforms gestionados con Albumentations.
 
-Pipeline offline (dentro de ChestXray14Dataset):
-    cv2 grayscale → CLAHE → multistage_resize → cache RAM (uint8 224×224)
+Pipeline offline (pre_chestxray14.py):
+    raw PNG → grayscale → CLAHE → multistage_resize → .npy float32 256×256
 
 Pipeline online (__getitem__ del dataset + transforms de este módulo):
-    GRAY2RGB → Albumentations (aug + Normalize + ToTensorV2) → tensor float32
+    .npy float32 (256,256) → expand (256,256,1) → Albumentations (aug + Normalize + ToTensorV2) → tensor float32 (1,256,256)
+
+Fase 2 — Transform Train (pasos 9–16):
+    9.  HorizontalFlip(p=0.5)
+    10. ShiftScaleRotate(shift=0.06, scale=(-0.15,0.10), rotate=0, p=0.5)
+    11. Rotate(limit=10, p=0.5)
+    12. ElasticTransform(alpha=30, sigma=5, p=0.1)
+    13. RandomBrightnessContrast(brightness=0.15, contrast=0.15, p=0.5)
+    14. GaussianBlur(blur_limit=(3,5), p=0.1)
+    15. GaussNoise(var_limit=(0.009²,0.022²), p=0.1) — std en [0,1]
+    16. CoarseDropout(holes=1–3, h=8–24, w=8–24, fill=0, p=0.15)
+
+Paso 17 — Normalización (train + val/test):
+    A.Normalize(mean=[μ], std=[σ]) con stats de stats.json (canal único)
+
+Paso 18 — Val/Test:
+    Solo Normalize + ToTensorV2 (sin augmentación estocástica)
 
 Dependencias:
-    - src/pipeline/datasets/chest.py: ChestXray14Dataset / NIHChestDataset
+    - src/pipeline/datasets/chest.py: ChestXray14Dataset
     - src/pipeline/fase2/expert1_config.py: EXPERT1_BATCH_SIZE, EXPERT1_NUM_WORKERS
+    - datasets/nih_chest_xrays/preprocessed/stats.json: {"mean": float, "std": float}
 
 Uso:
     from dataloader_expert1 import build_expert1_dataloaders
-    loaders = build_expert1_dataloaders(
-        csv_path=..., images_dir=...,
-        train_split_file=..., val_split_file=..., test_split_file=...,
-        model_mean=model.model_mean, model_std=model.model_std,
-    )
+    loaders = build_expert1_dataloaders()
     train_loader = loaders["train"]
     test_loader  = loaders["test"]
     test_flip    = loaders["test_flip"]  # TTA con HorizontalFlip=1.0
@@ -29,11 +42,13 @@ Uso:
 
 from __future__ import annotations
 
+import json
 import logging
 import sys
 from pathlib import Path
 
 import albumentations as A
+import cv2
 import torch
 from albumentations.pytorch import ToTensorV2
 from torch.utils.data import DataLoader, Dataset, Subset
@@ -49,57 +64,136 @@ from fase2.expert1_config import EXPERT1_BATCH_SIZE, EXPERT1_NUM_WORKERS
 
 log = logging.getLogger("expert1_dataloader")
 
+# ── Path por defecto al stats.json ────────────────────────────────────
+_DEFAULT_STATS_PATH = (
+    _PROJECT_ROOT / "datasets" / "nih_chest_xrays" / "preprocessed" / "stats.json"
+)
+_DEFAULT_PREPROCESSED_DIR = (
+    _PROJECT_ROOT / "datasets" / "nih_chest_xrays" / "preprocessed"
+)
+
+
+# ── Carga de estadísticas ─────────────────────────────────────────────
+
+
+def _load_dataset_stats(
+    stats_path: str | Path = _DEFAULT_STATS_PATH,
+) -> tuple[list[float], list[float]]:
+    """Lee mean y std desde stats.json generado por pre_chestxray14.py.
+
+    Returns:
+        (mean, std) como listas de un solo elemento para canal único.
+
+    Raises:
+        RuntimeError: si el archivo no existe o tiene formato inválido.
+    """
+    stats_path = Path(stats_path)
+    if not stats_path.is_file():
+        raise RuntimeError(
+            f"[Expert1/DataLoader] stats.json no encontrado: '{stats_path}'. "
+            f"Ejecuta pre_chestxray14.py primero para calcular las estadísticas "
+            f"del dataset preprocesado."
+        )
+
+    with open(stats_path) as f:
+        stats = json.load(f)
+
+    if "mean" not in stats or "std" not in stats:
+        raise RuntimeError(
+            f"[Expert1/DataLoader] stats.json debe contener 'mean' y 'std'. "
+            f"Contenido actual: {stats}. Regenera con pre_chestxray14.py."
+        )
+
+    mean = [float(stats["mean"])]
+    std = [float(stats["std"])]
+    log.info(
+        f"[Expert1/DataLoader] Dataset stats: mean={mean[0]:.6f}, std={std[0]:.6f}"
+    )
+    return mean, std
+
 
 # ── Transforms (Albumentations) ───────────────────────────────────────
 
 
 def _build_train_transform(
-    model_mean: tuple[float, ...],
-    model_std: tuple[float, ...],
+    mean: list[float],
+    std: list[float],
 ) -> A.Compose:
-    """Transform de entrenamiento con augmentation moderada para rayos X.
+    """Transform de entrenamiento — Fase 2, pasos 9–17.
 
-    Incluye HorizontalFlip, brightness/contrast, gamma y ruido gaussiano
-    con probabilidades conservadoras apropiadas para imágenes médicas.
+    8 augmentaciones estocásticas (solo train) + normalización con stats
+    del propio dataset (canal único).
     """
     return A.Compose(
         [
+            # 9. HorizontalFlip — solo horizontal, NO vertical
             A.HorizontalFlip(p=0.5),
-            A.RandomBrightnessContrast(
-                brightness_limit=0.1,
-                contrast_limit=0.1,
+            # 10. ShiftScaleRotate — traslación + escala, sin rotación (rotate_limit=0)
+            A.ShiftScaleRotate(
+                shift_limit=0.06,
+                scale_limit=(-0.15, 0.10),
+                rotate_limit=0,
+                border_mode=cv2.BORDER_CONSTANT,
+                value=0,
                 p=0.5,
             ),
-            A.RandomGamma(gamma_limit=(85, 115), p=0.5),
-            A.GaussNoise(std_range=(0.01, 0.02), p=0.1),
-            A.Normalize(mean=model_mean, std=model_std),
+            # 11. Rotate — rotación leve, separada de ShiftScaleRotate
+            A.Rotate(
+                limit=10,
+                border_mode=cv2.BORDER_CONSTANT,
+                value=0,
+                p=0.5,
+            ),
+            # 12. ElasticTransform — deformación elástica suave
+            A.ElasticTransform(alpha=30, sigma=5, p=0.1),
+            # 13. RandomBrightnessContrast — ajuste de brillo/contraste
+            A.RandomBrightnessContrast(
+                brightness_limit=0.15,
+                contrast_limit=0.15,
+                p=0.5,
+            ),
+            # 14. GaussianBlur — blur leve
+            A.GaussianBlur(blur_limit=(3, 5), p=0.1),
+            # 15. GaussNoise — ruido gaussiano, std ∈ [0.009, 0.022] en escala [0,1]
+            #     var_limit espera varianza (σ²), así que (0.009², 0.022²)
+            A.GaussNoise(var_limit=(0.009**2, 0.022**2), p=0.1),
+            # 16. CoarseDropout — cutout con huecos pequeños
+            A.CoarseDropout(
+                num_holes_range=(1, 3),
+                hole_height_range=(8, 24),
+                hole_width_range=(8, 24),
+                fill=0,
+                p=0.15,
+            ),
+            # 17. Normalización con stats del propio dataset (canal único)
+            A.Normalize(mean=mean, std=std),
             ToTensorV2(),
         ]
     )
 
 
 def _build_val_transform(
-    model_mean: tuple[float, ...],
-    model_std: tuple[float, ...],
+    mean: list[float],
+    std: list[float],
 ) -> A.Compose:
-    """Transform de validación/test: solo normalización + tensor."""
+    """Transform de validación/test — Paso 18: solo normalización + tensor."""
     return A.Compose(
         [
-            A.Normalize(mean=model_mean, std=model_std),
+            A.Normalize(mean=mean, std=std),
             ToTensorV2(),
         ]
     )
 
 
 def _build_flip_transform(
-    model_mean: tuple[float, ...],
-    model_std: tuple[float, ...],
+    mean: list[float],
+    std: list[float],
 ) -> A.Compose:
     """Transform para TTA: HorizontalFlip determinista (p=1.0) + normalización."""
     return A.Compose(
         [
             A.HorizontalFlip(p=1.0),
-            A.Normalize(mean=model_mean, std=model_std),
+            A.Normalize(mean=mean, std=std),
             ToTensorV2(),
         ]
     )
@@ -109,36 +203,26 @@ def _build_flip_transform(
 
 
 def build_expert1_dataloaders(
-    csv_path: str,
-    images_dir: str,
-    train_split_file: str,
-    val_split_file: str,
-    test_split_file: str,
-    model_mean: tuple[float, ...],
-    model_std: tuple[float, ...],
+    preprocessed_dir: str | Path = _DEFAULT_PREPROCESSED_DIR,
+    stats_path: str | Path | None = None,
     batch_size: int = EXPERT1_BATCH_SIZE,
     num_workers: int = EXPERT1_NUM_WORKERS,
-    use_cache: bool = True,
     max_samples: int | None = None,
 ) -> dict[str, DataLoader | torch.Tensor]:
     """Construye DataLoaders para train, val, test y test_flip (TTA).
 
+    Lee imágenes preprocesadas desde ``preprocessed_dir/{train,val,test}/``
+    y normaliza con estadísticas de ``stats.json``.
+
     Args:
-        csv_path: ruta al Data_Entry_2017.csv del NIH ChestXray14.
-        images_dir: directorio con las imágenes (all_images/).
-        train_split_file: archivo .txt con nombres de imágenes del split train.
-        val_split_file: archivo .txt con nombres de imágenes del split val.
-        test_split_file: archivo .txt con nombres de imágenes del split test.
-        model_mean: tupla RGB de medias de normalización del backbone pretrained
-            (obtenida de ``model.model_mean``).
-        model_std: tupla RGB de desviaciones estándar de normalización del backbone
-            (obtenida de ``model.model_std``).
-        batch_size: tamaño de batch por GPU. Default: EXPERT1_BATCH_SIZE (32).
-        num_workers: workers para DataLoader. Default: EXPERT1_NUM_WORKERS (4).
-        use_cache: precargar imágenes en RAM. Default: True.
+        preprocessed_dir: directorio raíz con subcarpetas train/, val/, test/
+            y stats.json. Default: datasets/nih_chest_xrays/preprocessed/.
+        stats_path: ruta al stats.json. Si None, se busca en
+            ``preprocessed_dir/stats.json``.
+        batch_size: tamaño de batch por GPU. Default: EXPERT1_BATCH_SIZE.
+        num_workers: workers para DataLoader. Default: EXPERT1_NUM_WORKERS.
         max_samples: si se proporciona, limita cada dataset a este número de
-            muestras y desactiva el preload en RAM. Útil para dry-run rápido
-            sin cargar ~90K imágenes. Default: None (usa todo el dataset).
+            muestras. Útil para dry-run rápido. Default: None (todo el dataset).
 
     Returns:
         dict con claves:
@@ -150,88 +234,53 @@ def build_expert1_dataloaders(
               BCEWithLogitsLoss.
 
     Raises:
-        FileNotFoundError: si alguna ruta de entrada no existe.
-        RuntimeError: si el dataset no expone class_weights (mode != 'expert').
+        RuntimeError: si stats.json no existe o el directorio preprocesado
+            no está disponible.
     """
-    csv_path_p = Path(csv_path)
-    images_dir_p = Path(images_dir)
-    train_split_p = Path(train_split_file)
-    val_split_p = Path(val_split_file)
-    test_split_p = Path(test_split_file)
+    preprocessed_dir = Path(preprocessed_dir)
 
-    # ── Verificar rutas ────────────────────────────────────────────────
-    for name, path in [
-        ("CSV", csv_path_p),
-        ("images_dir", images_dir_p),
-        ("train_split_file", train_split_p),
-        ("val_split_file", val_split_p),
-        ("test_split_file", test_split_p),
-    ]:
-        if not path.exists():
-            raise FileNotFoundError(
-                f"[Expert1/DataLoader] {name} no encontrado: {path}"
-            )
+    # ── Resolver stats_path ────────────────────────────────────────────
+    if stats_path is None:
+        stats_path = preprocessed_dir / "stats.json"
 
-    log.info(f"[Expert1/DataLoader] CSV: {csv_path_p}")
-    log.info(f"[Expert1/DataLoader] Imágenes: {images_dir_p}")
-    log.info(
-        f"[Expert1/DataLoader] Batch: {batch_size} | Workers: {num_workers} | "
-        f"Cache: {use_cache}"
-    )
-    log.info(f"[Expert1/DataLoader] model_mean={model_mean}  model_std={model_std}")
+    # ── Cargar estadísticas del dataset ────────────────────────────────
+    mean, std = _load_dataset_stats(stats_path)
 
-    # ── Dry-run: desactivar cache y limitar muestras ───────────────────
-    if max_samples is not None:
-        use_cache = False
-        log.info(
-            f"[Expert1/DataLoader] max_samples={max_samples} — "
-            f"cache desactivado, cada dataset limitado a {max_samples} muestras"
-        )
+    log.info(f"[Expert1/DataLoader] preprocessed_dir: {preprocessed_dir}")
+    log.info(f"[Expert1/DataLoader] Batch: {batch_size} | Workers: {num_workers}")
 
     # ── Builds transforms ──────────────────────────────────────────────
-    train_tfm = _build_train_transform(model_mean, model_std)
-    val_tfm = _build_val_transform(model_mean, model_std)
-    flip_tfm = _build_flip_transform(model_mean, model_std)
+    train_tfm = _build_train_transform(mean, std)
+    val_tfm = _build_val_transform(mean, std)
+    flip_tfm = _build_flip_transform(mean, std)
 
     # ── Crear datasets ─────────────────────────────────────────────────
     train_ds = ChestXray14Dataset(
-        csv_path=str(csv_path_p),
-        img_dir=str(images_dir_p),
-        file_list=str(train_split_p),
+        split="train",
+        preprocessed_dir=str(preprocessed_dir),
         transform=train_tfm,
         mode="expert",
-        split="train",
-        use_cache=use_cache,
     )
 
     val_ds = ChestXray14Dataset(
-        csv_path=str(csv_path_p),
-        img_dir=str(images_dir_p),
-        file_list=str(val_split_p),
+        split="val",
+        preprocessed_dir=str(preprocessed_dir),
         transform=val_tfm,
         mode="expert",
-        split="val",
-        use_cache=use_cache,
     )
 
     test_ds = ChestXray14Dataset(
-        csv_path=str(csv_path_p),
-        img_dir=str(images_dir_p),
-        file_list=str(test_split_p),
+        split="test",
+        preprocessed_dir=str(preprocessed_dir),
         transform=val_tfm,
         mode="expert",
-        split="test",
-        use_cache=use_cache,
     )
 
     test_flip_ds = ChestXray14Dataset(
-        csv_path=str(csv_path_p),
-        img_dir=str(images_dir_p),
-        file_list=str(test_split_p),
+        split="test",
+        preprocessed_dir=str(preprocessed_dir),
         transform=flip_tfm,
         mode="expert",
-        split="test",
-        use_cache=use_cache,
     )
 
     # ── Extraer pos_weight ANTES de hacer Subset (necesita dataset completo) ─
@@ -253,6 +302,10 @@ def build_expert1_dataloaders(
     test_flip_ds_final: Dataset = test_flip_ds
 
     if max_samples is not None:
+        log.info(
+            f"[Expert1/DataLoader] max_samples={max_samples} — "
+            f"cada dataset limitado a {max_samples} muestras"
+        )
         for name, ds in [
             ("train", train_ds),
             ("val", val_ds),
@@ -261,7 +314,7 @@ def build_expert1_dataloaders(
         ]:
             log.info(
                 f"[Expert1/DataLoader] {name}: {len(ds):,} → "
-                f"{min(max_samples, len(ds)):,} muestras (max_samples={max_samples})"
+                f"{min(max_samples, len(ds)):,} muestras"
             )
         n_train = min(max_samples, len(train_ds))
         n_val = min(max_samples, len(val_ds))
@@ -340,9 +393,6 @@ def build_tta_loaders(
 ) -> dict[str, DataLoader]:
     """Construye loaders para Test-Time Augmentation a partir de datasets existentes.
 
-    Útil cuando ya tienes instancias de dataset (por ejemplo, para crear
-    loaders TTA con transforms distintos sin re-leer el CSV).
-
     Args:
         ds_orig: dataset con transform de val (sin flip).
         ds_flip: dataset con transform de flip (HorizontalFlip=1.0).
@@ -382,73 +432,44 @@ def build_dataloaders_expert1(
     num_workers: int = EXPERT1_NUM_WORKERS,
     model_mean: tuple[float, ...] | None = None,
     model_std: tuple[float, ...] | None = None,
+    preprocessed_dir: str | Path | None = None,
+    stats_path: str | Path | None = None,
 ) -> tuple[DataLoader, DataLoader, DataLoader, torch.Tensor]:
     """Wrapper de compatibilidad con la API anterior.
 
     Convierte la llamada legacy (positional 4-tupla) a la nueva API (dict).
-    Si no se pasan model_mean/model_std, usa los defaults de ImageNet
-    (ImageNet-1K: [0.485, 0.456, 0.406] / [0.229, 0.224, 0.225]).
+    Los parámetros legacy (csv_path, img_dir, train_list, val_list, test_list,
+    model_mean, model_std) se ignoran con un warning — la nueva API lee
+    desde preprocessed_dir y stats.json.
 
     Returns:
         (train_loader, val_loader, test_loader, pos_weight)
     """
-    # ── Defaults de rutas ──────────────────────────────────────────────
-    _csv = (
-        str(csv_path)
-        if csv_path
-        else str(_PROJECT_ROOT / "datasets" / "nih_chest_xrays" / "Data_Entry_2017.csv")
-    )
-    _img = (
-        str(img_dir)
-        if img_dir
-        else str(_PROJECT_ROOT / "datasets" / "nih_chest_xrays" / "all_images")
-    )
-    _train = (
-        str(train_list)
-        if train_list
-        else str(
-            _PROJECT_ROOT
-            / "datasets"
-            / "nih_chest_xrays"
-            / "splits"
-            / "nih_train_list.txt"
+    # Warn about legacy params
+    _legacy = {
+        k: v
+        for k, v in [
+            ("csv_path", csv_path),
+            ("img_dir", img_dir),
+            ("train_list", train_list),
+            ("val_list", val_list),
+            ("test_list", test_list),
+            ("model_mean", model_mean),
+            ("model_std", model_std),
+        ]
+        if v is not None
+    }
+    if _legacy:
+        log.warning(
+            f"[Expert1/DataLoader] Parámetros legacy ignorados: {list(_legacy.keys())}. "
+            f"El dataloader ahora lee desde preprocessed_dir + stats.json."
         )
-    )
-    _val = (
-        str(val_list)
-        if val_list
-        else str(
-            _PROJECT_ROOT
-            / "datasets"
-            / "nih_chest_xrays"
-            / "splits"
-            / "nih_val_list.txt"
-        )
-    )
-    _test = (
-        str(test_list)
-        if test_list
-        else str(
-            _PROJECT_ROOT
-            / "datasets"
-            / "nih_chest_xrays"
-            / "splits"
-            / "nih_test_list.txt"
-        )
-    )
 
-    # ── Defaults de normalización (ImageNet-1K) si no se pasan ─────────
-    _mean = model_mean if model_mean is not None else (0.485, 0.456, 0.406)
-    _std = model_std if model_std is not None else (0.229, 0.224, 0.225)
+    _preprocessed = preprocessed_dir or _DEFAULT_PREPROCESSED_DIR
 
     result = build_expert1_dataloaders(
-        csv_path=_csv,
-        images_dir=_img,
-        train_split_file=_train,
-        val_split_file=_val,
-        test_split_file=_test,
-        model_mean=_mean,
-        model_std=_std,
+        preprocessed_dir=_preprocessed,
+        stats_path=stats_path,
         batch_size=batch_size or EXPERT1_BATCH_SIZE,
         num_workers=num_workers,
     )
@@ -486,7 +507,7 @@ def _print_summary(
         ("flip", test_flip_ds, test_flip_loader),
     ]:
         aug_tag = (
-            "train-aug"
+            "train-aug(8steps)"
             if name == "train"
             else ("TTA-flip" if name == "flip" else "val/test")
         )

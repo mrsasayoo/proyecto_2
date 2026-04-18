@@ -1,26 +1,27 @@
 """
 NIH ChestXray14 — Experto 0: Multi-label, 14 patologías.
 
-Pipeline modernizado: cv2 + CLAHE + multistage_resize (preload en RAM)
+Pipeline refactorizado: lee imágenes preprocesadas desde disco (.npy float32)
 + Albumentations online (augmentación por batch).
+
+Las imágenes deben preprocesarse offline con ``pre_chestxray14.py`` antes de
+usar este dataset.  Cada split vive en
+``datasets/nih_chest_xrays/preprocessed/{train,val,test}/`` con archivos
+``.npy`` (256×256, float32, [0,1]) y un ``metadata.csv``.
 
 Hallazgos implementados:
   H1 → modo expert: vector multi-label [14] + BCEWithLogitsLoss
-  H2 → verificación cruzada de Patient ID entre splits (sin leakage)
-  H3 → warning de ruido NLP + benchmark AUC en logs
-  H4 → filtro opcional por View Position (PA/AP)
   H5 → load_bbox_index() para validar heatmaps del dashboard
   H6 → pos_weight automático + FocalLossMultiLabel disponible
 """
 
 from __future__ import annotations
 
+import json
 import logging
-import os
 from pathlib import Path
 from typing import Any
 
-import cv2
 import numpy as np
 import pandas as pd
 import torch
@@ -33,28 +34,7 @@ log = logging.getLogger("fase0")
 
 # ── Constantes ────────────────────────────────────────────────────────
 FINDING_LABELS: list[str] = list(CHEST_PATHOLOGIES)  # alias público (14 etiquetas)
-TARGET_SIZE: int = 224
-
-
-# ── Utilidades de preprocesamiento offline ────────────────────────────
-
-
-def _multistage_resize(img: np.ndarray, target: int = TARGET_SIZE) -> np.ndarray:
-    """Halvings iterativos con INTER_AREA, nunca factor >2× en un paso.
-
-    Evita aliasing al reducir imágenes de alta resolución (e.g. 1024→224)
-    haciendo pasos intermedios de ½ hasta que el lado menor esté a ≤2×
-    del target, y luego un resize final exacto.
-    """
-    h, w = img.shape[:2]
-    while min(h, w) > target * 2:
-        h, w = h // 2, w // 2
-        img = cv2.resize(img, (w, h), interpolation=cv2.INTER_AREA)
-    return cv2.resize(img, (target, target), interpolation=cv2.INTER_AREA)
-
-
-# CLAHE singleton — reutilizado por todas las instancias del dataset.
-_CLAHE = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
+TARGET_SIZE: int = 256
 
 
 # ── Dataset ───────────────────────────────────────────────────────────
@@ -63,211 +43,143 @@ _CLAHE = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
 class ChestXray14Dataset(Dataset):
     """NIH ChestXray14 — Multi-label, 14 patologías.
 
+    Lee imágenes **ya preprocesadas** (CLAHE + resize) desde disco como
+    archivos ``.npy`` float32 256×256.  No realiza ningún preprocesamiento
+    pesado en RAM.
+
     Dos modos de uso:
       mode="embedding" → FASE 0: devuelve (img, expert_id=0, img_name)
       mode="expert"    → FASE 2: devuelve (img, label_vector_14, img_name)
 
-    Pipeline:
-      Offline (_preload): cv2.imread grayscale → CLAHE → multistage_resize → cache RAM
-      Online (__getitem__): GRAY2RGB → Albumentations transform → tensor
+    Constructor (nueva firma)::
+
+        ChestXray14Dataset(split="train",
+                           preprocessed_dir="datasets/nih_chest_xrays/preprocessed",
+                           transform=albumentations_compose)
+
+    Compatibilidad con la firma legacy (keyword args ``csv_path``,
+    ``img_dir``, ``file_list``, ``use_cache``) se mantiene: los parámetros
+    legacy se ignoran con un warning y se requiere ``split`` +
+    ``preprocessed_dir``.
     """
 
     FINDING_LABELS: list[str] = list(CHEST_PATHOLOGIES)
 
     def __init__(
         self,
-        csv_path: str | Path,
-        img_dir: str | Path,
-        file_list: str | Path,
-        transform: Any = None,
-        mode: str = "embedding",
         split: str = "train",
+        preprocessed_dir: str | Path = "datasets/nih_chest_xrays/preprocessed",
+        transform: Any = None,
+        mode: str = "expert",
+        # ── parámetros legacy (ignorados, mantienen compatibilidad) ───
+        csv_path: str | Path | None = None,
+        img_dir: str | Path | None = None,
+        file_list: str | Path | None = None,
         use_cache: bool = True,
         patient_ids_other: set[int] | None = None,
         filter_view: str | None = None,
-        # ── parámetros legacy (ignorados, mantienen compatibilidad) ───
         aug_transform: Any = None,
     ) -> None:
         assert mode in ("embedding", "expert"), (
             f"[Chest] mode debe ser 'embedding' o 'expert', recibido: '{mode}'"
         )
+        assert split in ("train", "val", "test"), (
+            f"[Chest] split debe ser 'train', 'val' o 'test', recibido: '{split}'"
+        )
 
-        self.img_dir = Path(img_dir)
-        self.transform = transform
+        # Warn about legacy params
+        _legacy = {
+            k: v
+            for k, v in [
+                ("csv_path", csv_path),
+                ("img_dir", img_dir),
+                ("file_list", file_list),
+            ]
+            if v is not None
+        }
+        if _legacy:
+            log.warning(
+                f"[Chest] Parámetros legacy ignorados: {list(_legacy.keys())}. "
+                f"El dataset ahora lee desde preprocessed_dir='{preprocessed_dir}'."
+            )
+
         self.split = split
+        self.transform = transform
         self.expert_id: int = EXPERT_IDS["chest"]
         self.mode = mode
-        self.filter_view = filter_view
-        self.use_cache = use_cache
-        self._cache: dict[int, np.ndarray] = {}
 
-        # ── H2+H3: Verificación de columnas del CSV ───────────────────
-        df_full = pd.read_csv(csv_path)
-        log.debug(f"[Chest] CSV cargado: {len(df_full):,} filas en {csv_path}")
+        # ── Validar directorio preprocesado ───────────────────────────
+        split_dir = Path(preprocessed_dir) / split
+        metadata_path = split_dir / "metadata.csv"
 
-        required_cols = {
-            "Image Index",
-            "Finding Labels",
-            "Patient ID",
-            "View Position",
-            "Follow-up #",
-        }
-        missing_cols = required_cols - set(df_full.columns)
+        if not split_dir.is_dir():
+            raise RuntimeError(
+                f"[Chest] Directorio preprocesado no encontrado: '{split_dir}'. "
+                f"Ejecuta pre_chestxray14.py primero para generar las imágenes "
+                f"preprocesadas."
+            )
+        if not metadata_path.is_file():
+            raise RuntimeError(
+                f"[Chest] metadata.csv no encontrado en '{split_dir}'. "
+                f"Ejecuta pre_chestxray14.py primero."
+            )
+
+        self.split_dir = split_dir
+
+        # ── Cargar metadata ───────────────────────────────────────────
+        self.df = pd.read_csv(metadata_path)
+        log.info(
+            f"[Chest] Metadata cargada: {len(self.df):,} imágenes "
+            f"desde '{metadata_path}'"
+        )
+
+        required_cols = {"filename", "patient_id", "label_vector"}
+        missing_cols = required_cols - set(self.df.columns)
         if missing_cols:
-            log.error(
-                f"[Chest] Columnas faltantes en el CSV: {missing_cols}. "
-                f"Verifica que sea Data_Entry_2017.csv oficial."
+            raise RuntimeError(
+                f"[Chest] Columnas faltantes en metadata.csv: {missing_cols}. "
+                f"Regenera con pre_chestxray14.py."
             )
-        else:
-            log.debug(f"[Chest] Columnas verificadas: {sorted(required_cols)} ✓")
 
-        # ── H2: Aplicar split oficial (por Patient ID, no aleatorio) ──
-        with open(file_list) as f:
-            valid_files = set(f.read().splitlines())
-        log.debug(
-            f"[Chest] file_list '{Path(file_list).name}': {len(valid_files):,} nombres"
+        # Validar que los .npy existen (muestreo rápido)
+        sample_file = self.split_dir / self.df.loc[0, "filename"]
+        if not sample_file.is_file():
+            raise RuntimeError(
+                f"[Chest] Archivo .npy no encontrado: '{sample_file}'. "
+                f"Ejecuta pre_chestxray14.py primero."
+            )
+
+        if len(self.df) == 0:
+            raise RuntimeError(
+                f"[Chest] El split '{split}' no tiene imágenes en '{split_dir}'. "
+                f"Ejecuta pre_chestxray14.py primero."
+            )
+
+        # ── Parsear label_vectors ─────────────────────────────────────
+        self.df["_label_vec"] = self.df["label_vector"].apply(
+            lambda s: np.array(json.loads(s), dtype=np.float32)
         )
 
-        self.df = df_full[df_full["Image Index"].isin(valid_files)].reset_index(
-            drop=True
+        # ── Patient IDs ───────────────────────────────────────────────
+        self.patient_ids: set[int] = set(self.df["patient_id"].unique())
+        log.info(
+            f"[Chest] Pacientes únicos en split '{split}': {len(self.patient_ids):,}"
         )
-        n_before_view = len(self.df)
-        n_missing_csv = len(valid_files) - n_before_view
-
-        if n_before_view == 0:
-            log.error(
-                "[Chest] ¡Dataset vacío tras aplicar file_list! "
-                "Verifica que chest_csv y chest_train_list sean del mismo release."
-            )
-        elif n_missing_csv > 0:
-            log.warning(
-                f"[Chest] {n_missing_csv:,} nombres del file_list no están en el CSV "
-                f"(aceptable en subsets). Imágenes cargadas: {n_before_view:,}"
-            )
-        else:
-            log.info(
-                f"[Chest] {n_before_view:,} imágenes cargadas (split '{Path(file_list).name}')"
-            )
-
-        # ── H4: Filtro por View Position (PA vs AP) ───────────────────
-        if "View Position" in self.df.columns:
-            view_counts = self.df["View Position"].value_counts()
-            log.info(
-                f"[Chest] Distribución View Position ANTES del filtro: "
-                + " | ".join(f"{v}: {c:,}" for v, c in view_counts.items())
-            )
-
-            if filter_view is not None:
-                n_antes = len(self.df)
-                self.df = self.df[self.df["View Position"] == filter_view].reset_index(
-                    drop=True
-                )
-                n_filtradas = n_antes - len(self.df)
-                log.info(
-                    f"[Chest] H4 — Filtro View Position='{filter_view}' aplicado: "
-                    f"{n_filtradas:,} imágenes eliminadas → "
-                    f"{len(self.df):,} imágenes restantes."
-                )
-                log.info(
-                    f"[Chest] H4 — Documenta este filtro en el Reporte Técnico "
-                    f"(sección 3 — decisiones de preprocesado)."
-                )
-                if len(self.df) == 0:
-                    log.error(
-                        f"[Chest] ¡Dataset vacío tras filtrar View Position='{filter_view}'! "
-                        f"Verifica que la columna tenga ese valor. "
-                        f"Valores disponibles: {list(view_counts.index)}"
-                    )
-            else:
-                if "AP" in view_counts and "PA" in view_counts:
-                    ap_pct = 100 * view_counts.get("AP", 0) / n_before_view
-                    log.warning(
-                        f"[Chest] H4 — {ap_pct:.1f}% de imágenes son vistas AP (pacientes "
-                        f"encamados). Las AP tienen corazón aparentemente más grande y mayor "
-                        f"distorsión geométrica — sesgo de dominio potencial. "
-                        f"Para estudios controlados: usa filter_view='PA' o "
-                        f"--chest_view_filter PA en CLI."
-                    )
-
-        n_matched = len(self.df)
-
-        # ── H2: Verificación cruzada de Patient ID (leakage) ──────────
-        self.patient_ids: set[int] = set(self.df["Patient ID"].unique())
-        log.info(f"[Chest] Pacientes únicos en este split: {len(self.patient_ids):,}")
 
         if patient_ids_other is not None:
             leaked = self.patient_ids & patient_ids_other
             if leaked:
                 log.error(
-                    f"[Chest] ¡DATA LEAKAGE! {len(leaked)} Patient IDs aparecen en AMBOS "
-                    f"splits. Primeros 5: {list(leaked)[:5]}. "
-                    f"Usa EXCLUSIVAMENTE train_val_list.txt y test_list.txt oficiales."
+                    f"[Chest] ¡DATA LEAKAGE! {len(leaked)} Patient IDs en ambos splits. "
+                    f"Primeros 5: {list(leaked)[:5]}"
                 )
             else:
-                log.info(
-                    f"[Chest] H2 — Verificación de leakage: 0 Patient IDs compartidos ✓"
-                )
-        else:
-            log.warning(
-                "[Chest] patient_ids_other=None — verificación de leakage H2 OMITIDA. "
-                "Pasa el set de Patient IDs del split complementario para validar."
-            )
+                log.info("[Chest] Verificación de leakage: 0 Patient IDs compartidos ✓")
 
-        # ── H2: Estadísticas de seguimiento longitudinal ──────────────
-        if "Follow-up #" in self.df.columns:
-            followup_count = (self.df["Follow-up #"] > 0).sum()
-            pct_followup = 100 * followup_count / n_matched if n_matched > 0 else 0
-            log.info(
-                f"[Chest] H2 — Imágenes con Follow-up # > 0 (visitas repetidas): "
-                f"{followup_count:,} ({pct_followup:.1f}%) — "
-                f"refuerza la importancia de separar por Patient ID en el split."
-            )
-
-        # ── Archivos en disco ─────────────────────────────────────────
-        try:
-            on_disk = set(os.listdir(str(self.img_dir)))
-        except FileNotFoundError:
-            log.error(
-                f"[Chest] Directorio de imágenes NO encontrado: '{self.img_dir}'. "
-                f"Verifica que --chest_imgs apunte a la carpeta all_images/."
-            )
-            on_disk = set()
-        missing_disk = [r for r in self.df["Image Index"] if r not in on_disk]
-        if missing_disk:
-            log.warning(
-                f"[Chest] {len(missing_disk):,} archivos no encontrados en disco "
-                f"'{self.img_dir}'. Primeros 5: {missing_disk[:5]}"
-            )
-
-        # ── H1 + H6: Modo expert — vector multi-label + pesos de clase
+        # ── Modo expert: estadísticas y pos_weight ────────────────────
         self.class_weights: torch.Tensor | None = None
         if self.mode == "expert":
-            log.info(
-                "[Chest] Modo 'expert': preparando vectores multi-label de 14 patologías."
-            )
-            log.info(
-                "[Chest] H1  — Loss obligatoria: BCEWithLogitsLoss (NO CrossEntropyLoss)."
-            )
-            log.info(
-                "[Chest] H6  — Alternativa: FocalLossMultiLabel(gamma=2.0) — "
-                "útil para Hernia/Pneumonia. Justificar en reporte si se usa."
-            )
-            log.info(
-                "[Chest] H6  — ⚠ NUNCA usar Accuracy como métrica principal. "
-                "Usar: AUC-ROC por clase + F1 Macro + AUPRC. "
-                "Benchmark: Wang et al. ResNet-50 ≈ 0.745, CheXNet DenseNet-121 ≈ 0.841 AUC macro."
-            )
-            log.info(
-                "[Chest] H3  — Etiquetas generadas por NLP (~>90% precisión). "
-                "AUC > 0.85 significativo → revisar confounding antes de reportar."
-            )
-
-            self.df = self.df.copy()
-            self.df["label_vector"] = self.df["Finding Labels"].apply(
-                self._parse_finding_labels
-            )
-
-            all_labels = np.stack(self.df["label_vector"].values)  # [N, 14]
+            all_labels = np.stack(self.df["_label_vec"].values)  # [N, 14]
             prevalence = all_labels.mean(axis=0)
             log.info("[Chest] Prevalencia por patología:")
             for name, prev in zip(CHEST_PATHOLOGIES, prevalence):
@@ -279,68 +191,13 @@ class ChestXray14Dataset(Dataset):
             n_neg = len(all_labels) - n_pos
             self.class_weights = torch.tensor(n_neg / n_pos, dtype=torch.float32)
             log.info(
-                f"[Chest] H6  — pos_weight BCEWithLogitsLoss — "
+                f"[Chest] pos_weight — "
                 f"min: {self.class_weights.min():.1f} ({CHEST_PATHOLOGIES[self.class_weights.argmin()]}) | "
                 f"max: {self.class_weights.max():.1f} ({CHEST_PATHOLOGIES[self.class_weights.argmax()]})"
             )
-            log.debug(
-                "[Chest] pos_weight por clase: "
-                + " | ".join(
-                    f"{n}:{w:.1f}"
-                    for n, w in zip(CHEST_PATHOLOGIES, self.class_weights.tolist())
-                )
-            )
 
-            no_finding_only = self.df["Finding Labels"].str.strip() == "No Finding"
-            nf_count = no_finding_only.sum()
-            log.info(
-                f"[Chest] Imágenes 'No Finding' (vector todo-ceros): "
-                f"{nf_count:,} ({100 * nf_count / n_matched:.1f}%) — "
-                f"la clase dominante que inflaría Accuracy."
-            )
-
-        # ── Preload en RAM (pipeline offline) ─────────────────────────
-        if self.use_cache:
-            self._preload()
-
-    # ──────────────────────────────────────────────────────────────────
-    # Pipeline offline: preload con cv2
-    # ──────────────────────────────────────────────────────────────────
-
-    def _preload(self) -> None:
-        """Carga todas las imágenes en RAM: cv2 grayscale → CLAHE → multistage_resize.
-
-        Almacena arrays uint8 (224×224, 1 canal) en ``self._cache``.
-        Ejecutado una sola vez al instanciar el dataset.
-        """
-        n = len(self.df)
-        log.info(f"[Chest] _preload: cargando {n:,} imágenes en RAM (cv2 + CLAHE)...")
-        n_ok = 0
-        n_err = 0
-        for idx in range(n):
-            img_name: str = self.df.loc[idx, "Image Index"]
-            img_path = str(self.img_dir / img_name)
-            try:
-                img = cv2.imread(img_path, cv2.IMREAD_GRAYSCALE)
-                if img is None:
-                    raise FileNotFoundError(
-                        f"cv2.imread returned None for '{img_path}'"
-                    )
-                # CLAHE en alta resolución (antes del resize)
-                img = _CLAHE.apply(img)
-                # Multistage resize al target
-                img = _multistage_resize(img, target=TARGET_SIZE)
-                self._cache[idx] = img
-                n_ok += 1
-            except Exception as e:
-                if n_err < 5:
-                    log.warning(f"[Chest] _preload error idx={idx} '{img_name}': {e}")
-                n_err += 1
-                # Placeholder: array negro del tamaño correcto
-                self._cache[idx] = np.zeros((TARGET_SIZE, TARGET_SIZE), dtype=np.uint8)
         log.info(
-            f"[Chest] _preload completado: {n_ok:,} OK, {n_err:,} errores. "
-            f"RAM ≈ {n * TARGET_SIZE * TARGET_SIZE / 1024**2:.0f} MB (uint8 gray)"
+            f"[Chest] Dataset listo: {len(self.df):,} imágenes, split='{split}', mode='{mode}'"
         )
 
     # ──────────────────────────────────────────────────────────────────
@@ -404,56 +261,35 @@ class ChestXray14Dataset(Dataset):
         return len(self.df)
 
     def __getitem__(self, idx: int) -> tuple[torch.Tensor, Any, str]:
-        img_name: str = self.df.loc[idx, "Image Index"]
+        row = self.df.iloc[idx]
+        img_name: str = row["filename"]
 
-        # ── Obtener imagen preprocesada (grayscale uint8 224×224) ─────
-        if self.use_cache:
-            gray = self._cache[idx]
-        else:
-            # Fallback: carga en disco sin preload (sin cache en RAM)
-            gray = self._load_single(idx, img_name)
-
-        # ── Convertir a RGB (3 canales) para Albumentations / modelo ──
-        img_rgb = cv2.cvtColor(gray, cv2.COLOR_GRAY2RGB)  # (224, 224, 3) uint8
+        # ── Cargar imagen preprocesada (.npy float32, 256×256) ────────
+        npy_path = self.split_dir / img_name
+        try:
+            img = np.load(npy_path)  # (256, 256) float32 [0, 1]
+        except Exception as e:
+            log.warning(
+                f"[Chest] Error cargando '{npy_path}': {e}. Usando imagen cero."
+            )
+            img = np.zeros((TARGET_SIZE, TARGET_SIZE), dtype=np.float32)
 
         # ── Aplicar transform (Albumentations Compose o None) ─────────
+        # Albumentations espera HWC, así que expandimos a (256, 256, 1)
         if self.transform is not None:
-            augmented = self.transform(image=img_rgb)
+            img_hwc = img[:, :, np.newaxis]  # (256, 256, 1)
+            augmented = self.transform(image=img_hwc)
             img_tensor: torch.Tensor = augmented["image"]
         else:
-            # Fallback sin transform: HWC uint8 → CHW float32 [0, 1]
-            img_tensor = torch.from_numpy(
-                img_rgb.transpose(2, 0, 1).astype(np.float32) / 255.0
-            )
+            # Fallback sin transform: (256, 256) → (1, 256, 256) float32
+            img_tensor = torch.from_numpy(img[np.newaxis, :, :])
 
         # ── Retorno según modo ────────────────────────────────────────
         if self.mode == "embedding":
             return img_tensor, self.expert_id, img_name
         else:
-            label_vec = torch.tensor(
-                self.df.loc[idx, "label_vector"], dtype=torch.float32
-            )
+            label_vec = torch.from_numpy(row["_label_vec"])
             return img_tensor, label_vec, img_name
-
-    def _load_single(self, idx: int, img_name: str) -> np.ndarray:
-        """Carga y preprocesa una imagen sin usar cache (fallback use_cache=False).
-
-        Aplica el mismo pipeline offline: cv2 grayscale → CLAHE → multistage_resize.
-        """
-        img_path = str(self.img_dir / img_name)
-        try:
-            img = cv2.imread(img_path, cv2.IMREAD_GRAYSCALE)
-            if img is None:
-                raise FileNotFoundError(f"cv2.imread returned None for '{img_path}'")
-            img = _CLAHE.apply(img)
-            img = _multistage_resize(img, target=TARGET_SIZE)
-            return img
-        except Exception as e:
-            log.warning(
-                f"[Chest] Error cargando '{img_path}': {e}. "
-                f"Reemplazando con imagen cero."
-            )
-            return np.zeros((TARGET_SIZE, TARGET_SIZE), dtype=np.uint8)
 
 
 # ── Alias para compatibilidad ─────────────────────────────────────────

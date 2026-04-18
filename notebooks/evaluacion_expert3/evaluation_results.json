@@ -1,0 +1,47 @@
+{
+  "model": "Expert3DenseNet3D",
+  "checkpoint_epoch": 23,
+  "device": "cpu",
+  "validation": {
+    "F1-Macro": 0.9438209699671017,
+    "F1-Binary": 0.8981481481481481,
+    "Accuracy": 0.9809523809523809,
+    "Precision": 0.8738738738738738,
+    "Recall": 0.9238095238095239,
+    "AUC-ROC": 0.9911473922902494,
+    "N_samples": 1155,
+    "N_positives": 105,
+    "N_negatives": 1050
+  },
+  "test": {
+    "F1-Macro": 0.9352891651103696,
+    "F1-Binary": 0.8820224719101124,
+    "Accuracy": 0.9791356184798807,
+    "Precision": 0.9075144508670521,
+    "Recall": 0.8579234972677595,
+    "AUC-ROC": 0.9820985995401477,
+    "N_samples": 2013,
+    "N_positives": 183,
+    "N_negatives": 1830
+  },
+  "confusion_matrix_val": [
+    [
+      1036,
+      14
+    ],
+    [
+      8,
+      97
+    ]
+  ],
+  "confusion_matrix_test": [
+    [
+      1814,
+      16
+    ],
+    [
+      26,
+      157
+    ]
+  ]
+}

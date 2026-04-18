@@ -21,7 +21,7 @@ Manejo del desbalance de clases:
 Datos 3D y VRAM:
     Patches de forma (1, 64, 64, 64) — volúmenes CT monocanal.
     Con 2× Titan Xp (12 GB), batch_per_gpu = EXPERT3_BATCH_SIZE // world_size
-    = 4 // 2 = 2. Batch efectivo = 2 × 2 GPUs × 8 accum = 32 (idéntico al original).
+    = 8 // 2 = 4. Batch efectivo = 4 × 2 GPUs × 4 accum = 32 (idéntico al original).
     FP16 habilitado — obligatorio para 12 GB VRAM con volúmenes 3D.
 
 Lanzamiento (usa torchrun para detectar GPUs automáticamente):
@@ -525,6 +525,7 @@ def train(
     dry_run: bool = False,
     data_root: str | None = None,
     batch_per_gpu: int | None = None,
+    gradient_checkpointing: bool = False,
 ) -> None:
     """Función principal de entrenamiento del Expert 3 con DDP.
 
@@ -603,9 +604,11 @@ def train(
         )
         _log_vram("post-model")
 
-    # ── Gradient checkpointing (reduce VRAM para volúmenes 3D) ─────
-    if device.type == "cuda":
+    # ── Gradient checkpointing (opcional — solo si se pide con --gradient-checkpointing) ─
+    if gradient_checkpointing and device.type == "cuda":
         _enable_gradient_checkpointing(model)
+    elif is_main_process():
+        log.info("[INFO] [Expert3] Gradient checkpointing DESACTIVADO (default)")
 
     # ── Envolver en DDP ────────────────────────────────────────────
     # Expert 3 es from-scratch → todos los params participan → find_unused=False
@@ -1025,9 +1028,18 @@ if __name__ == "__main__":
             "VRAM en FP16 — hay margen para subir a 3-4 si la temperatura lo permite."
         ),
     )
+    parser.add_argument(
+        "--gradient-checkpointing",
+        action="store_true",
+        help=(
+            "Habilitar gradient checkpointing en dense blocks (reduce VRAM, "
+            "aumenta tiempo). Usar solo si hay OOM con batch actual."
+        ),
+    )
     args = parser.parse_args()
     train(
         dry_run=args.dry_run,
         data_root=args.data_root,
         batch_per_gpu=args.batch_per_gpu,
+        gradient_checkpointing=args.gradient_checkpointing,
     )

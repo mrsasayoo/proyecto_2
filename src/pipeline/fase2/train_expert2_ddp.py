@@ -130,9 +130,9 @@ log = logging.getLogger("expert2_train_ddp")
 
 # ── Rutas de salida ────────────────────────────────────────────────────
 _CHECKPOINT_DIR = _PROJECT_ROOT / "checkpoints"
-_CHECKPOINT_PATH = _CHECKPOINT_DIR / "expert_01_convnext_small" / "best.pt"
+_CHECKPOINT_PATH = _CHECKPOINT_DIR / "expert_02_convnext_small" / "best.pt"
 _TRAINING_LOG_PATH = (
-    _CHECKPOINT_DIR / "expert_01_convnext_small" / "expert2_ddp_training_log.json"
+    _CHECKPOINT_DIR / "expert_02_convnext_small" / "expert2_ddp_training_log.json"
 )
 
 # ── Constantes de entrenamiento ────────────────────────────────────────
@@ -357,12 +357,14 @@ def train_one_epoch(
             with torch.amp.autocast(device_type=device.type, enabled=use_fp16):
                 if use_cutmix:
                     imgs, y_a, y_b, lam = cutmix_data(imgs, labels)
+                    imgs = imgs.contiguous()
                     logits = model(imgs)
                     loss = lam * criterion(logits, y_a) + (1.0 - lam) * criterion(
                         logits, y_b
                     )
                 elif use_mixup:
                     imgs, y_a, y_b, lam = mixup_data(imgs, labels)
+                    imgs = imgs.contiguous()
                     logits = model(imgs)
                     loss = lam * criterion(logits, y_a) + (1.0 - lam) * criterion(
                         logits, y_b
@@ -896,8 +898,9 @@ def train(
             f"{model.count_parameters():,} params entrenables (solo head)"
         )
 
-    # En Fase 1 el backbone está congelado → find_unused_parameters=True
-    model_ddp = wrap_model_ddp(model, device, find_unused_parameters=True)
+    # En Fase 1 el backbone está congelado pero todos los params participan
+    # en el graph → find_unused_parameters=False evita overhead de detección.
+    model_ddp = wrap_model_ddp(model, device, find_unused_parameters=False)
 
     optimizer_p1 = torch.optim.AdamW(
         model.get_head_params(),
@@ -944,8 +947,9 @@ def train(
             f"{model.count_parameters():,} params entrenables"
         )
 
-    # Parcialmente congelado → find_unused_parameters=True
-    model_ddp = wrap_model_ddp(model, device, find_unused_parameters=True)
+    # Parcialmente congelado → find_unused_parameters=False (solo head+last2 stages
+    # participan en forward, pero no hay overhead de detección de params sin usar).
+    model_ddp = wrap_model_ddp(model, device, find_unused_parameters=False)
 
     optimizer_p2 = torch.optim.AdamW(
         [

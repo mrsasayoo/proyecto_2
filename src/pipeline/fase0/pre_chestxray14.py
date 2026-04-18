@@ -1,198 +1,388 @@
 #!/usr/bin/env python3
 """
-pre_chestxray14.py — Post-procesado específico de NIH ChestXray14
-==================================================================
-Fase 0 — Preparación de Datos | Proyecto MoE Médico
+pre_chestxray14.py — Fase 1 offline: preprocesamiento completo de NIH ChestX-ray14
+===================================================================================
+Pipeline: carga grayscale → validación → resize → CLAHE → float32 → guardado .npy + metadatos
 
-Responsabilidad única: preparación post-extracción de NIH ChestXray14.
-- Crear directorio unificado all_images/ con symlinks relativos
-- Verificar archivos de split oficiales
-- Auditar Data_Entry_2017.csv
-
-Origen: post_nih() de setup_datasets.py + fix1_nih_val_split() de fix_alignment.py
+Ejecutar como script standalone:
+    python src/pipeline/fase0/pre_chestxray14.py
 """
 
 from __future__ import annotations
 
+import csv
+import hashlib
+import json
 import logging
-import os
-import shutil
-import zipfile
-from collections import defaultdict
+import sys
+from dataclasses import dataclass, field
 from pathlib import Path
 
-log = logging.getLogger("fase0.pre_chestxray14")
+import cv2
+import numpy as np
+import pandas as pd
+from tqdm import tqdm
+
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s [%(levelname)s] %(message)s",
+    datefmt="%H:%M:%S",
+)
+log = logging.getLogger("fase1.pre_chestxray14")
+
+# ---------------------------------------------------------------------------
+# Constants
+# ---------------------------------------------------------------------------
+
+LABELS_14: list[str] = [
+    "Atelectasis",
+    "Cardiomegaly",
+    "Effusion",
+    "Infiltration",
+    "Mass",
+    "Nodule",
+    "Pneumonia",
+    "Pneumothorax",
+    "Consolidation",
+    "Edema",
+    "Emphysema",
+    "Fibrosis",
+    "Pleural_Thickening",
+    "Hernia",
+]
+
+TARGET_SIZE: int = 256
+MIN_DIM: int = 800
+CLAHE_CLIP: float = 2.0
+CLAHE_TILE: tuple[int, int] = (8, 8)
+
+SPLIT_NAMES: dict[str, str] = {
+    "train": "nih_train_list.txt",
+    "val": "nih_val_list.txt",
+    "test": "nih_test_list.txt",
+}
 
 
-def crear_symlinks_all_images(nih_dir):
-    # type: (Path) -> int
-    """
-    Crea all_images/ con symlinks relativos a los PNGs en las 12 subcarpetas.
-    Symlinks relativos para portabilidad entre servidores.
-    Retorna el número de symlinks creados.
-    """
-    all_imgs = nih_dir / "all_images"
-
-    # Count available PNGs in extracted image folders
-    available_pngs = sorted(nih_dir.glob("images_*/images/*.png"))
-
-    if all_imgs.is_dir():
-        n_links = sum(1 for p in all_imgs.iterdir() if p.is_symlink())
-        if n_links >= len(available_pngs) and n_links > 0:
-            log.info(
-                "[NIH] all_images/ completo (%d/%d symlinks), saltando.",
-                n_links,
-                len(available_pngs),
-            )
-            return n_links
-        elif n_links > 0:
-            log.info(
-                "[NIH] all_images/ incompleto (%d symlinks, %d PNGs disponibles) — completando...",
-                n_links,
-                len(available_pngs),
-            )
-            # Fall through to add missing symlinks
-
-    if not available_pngs:
-        log.warning("[NIH] No se encontraron .png — all_images pendiente.")
-        return 0
-
-    all_imgs.mkdir(parents=True, exist_ok=True)
-    created = 0
-    for png in available_pngs:
-        link = all_imgs / png.name
-        if not link.exists():
-            # Symlink relativo para portabilidad
-            target = os.path.relpath(png, all_imgs)
-            link.symlink_to(target)
-            created += 1
-    total = sum(1 for p in all_imgs.iterdir() if p.is_symlink())
-    log.info(
-        "[NIH] %d symlinks nuevos creados en all_images/ (total: %d)", created, total
-    )
-    return total
+# ---------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------
 
 
-def verificar_split_txts(nih_dir):
-    # type: (Path) -> dict
-    """
-    Comprueba que train_val_list.txt y test_list.txt existen y no están truncados.
-    Extrae desde data.zip si es necesario.
-    Retorna dict con conteos.
-    """
-    min_lines = {"train_val_list.txt": 80000, "test_list.txt": 20000}
-    result = {}
+@dataclass
+class ProcessingStats:
+    """Accumulates per-split processing statistics."""
 
-    for txt_name, min_count in min_lines.items():
-        txt_path = nih_dir / txt_name
-        needs_extract = False
-
-        if not txt_path.exists():
-            log.warning("[NIH] %s no encontrado.", txt_name)
-            needs_extract = True
-        else:
-            count = sum(1 for _ in open(txt_path, encoding="utf-8"))
-            if count < min_count:
-                log.warning("[NIH] %s truncado (%d < %d).", txt_name, count, min_count)
-                needs_extract = True
-            else:
-                log.info("[NIH] %s OK (%d entradas)", txt_name, count)
-                result[txt_name] = count
-
-        if needs_extract:
-            data_zip = nih_dir / "data.zip"
-            if data_zip.exists():
-                log.info("[NIH] Extrayendo %s de data.zip...", txt_name)
-                try:
-                    with zipfile.ZipFile(data_zip, "r") as zf:
-                        candidates = [n for n in zf.namelist() if n.endswith(txt_name)]
-                        if candidates:
-                            data = zf.read(candidates[0])
-                            txt_path.write_bytes(data)
-                            count = data.count(b"\n")
-                            log.info("[NIH] %s extraído (%d líneas)", txt_name, count)
-                            result[txt_name] = count
-                except Exception as e:
-                    log.error("[NIH] Error extrayendo %s: %s", txt_name, e)
-
-    return result
+    processed: int = 0
+    skipped_exists: int = 0
+    skipped_corrupt: int = 0
+    skipped_small: int = 0
+    skipped_missing: int = 0
 
 
-def auditar_csv(nih_dir):
-    # type: (Path) -> dict|None
-    """
-    Verifica Data_Entry_2017.csv: columnas requeridas y prevalencias por patología.
-    Retorna dict de estadísticas o None si falta pandas.
-    """
-    csv_path = nih_dir / "Data_Entry_2017.csv"
-    if not csv_path.exists():
-        log.warning("[NIH] Data_Entry_2017.csv no encontrado.")
-        return None
-
-    try:
-        import pandas as pd
-    except ImportError:
-        log.warning("[NIH] pandas no disponible — saltando auditoría CSV.")
-        return None
-
+def _build_label_lookup(csv_path: Path) -> dict[str, list[int]]:
+    """Parse Data_Entry_2017.csv into {filename: 14-dim binary vector}."""
     df = pd.read_csv(csv_path)
-    required_cols = [
-        "Image Index",
-        "Finding Labels",
-        "Patient ID",
-        "View Position",
-        "Follow-up #",
-    ]
-    missing = [c for c in required_cols if c not in df.columns]
-    if missing:
-        log.error("[NIH] Columnas faltantes en CSV: %s", missing)
-        return {"ok": False, "missing_cols": missing}
-
-    # Prevalencia por patología
-    all_labels = df["Finding Labels"].str.split("|").explode().str.strip()
-    prevalence = all_labels.value_counts().to_dict()
-    log.info(
-        "[NIH] CSV OK — %d imágenes, %d pacientes, %d patologías",
-        len(df),
-        df["Patient ID"].nunique(),
-        len(prevalence),
-    )
-    for label, count in sorted(prevalence.items(), key=lambda x: -x[1])[:5]:
-        log.info("[NIH]   %s: %d (%.1f%%)", label, count, 100 * count / len(df))
-
-    return {
-        "ok": True,
-        "total_images": len(df),
-        "n_patients": int(df["Patient ID"].nunique()),
-        "n_labels": len(prevalence),
-        "prevalence": prevalence,
-    }
+    label_to_idx = {label: i for i, label in enumerate(LABELS_14)}
+    lookup: dict[str, list[int]] = {}
+    for fname, findings in zip(df["Image Index"], df["Finding Labels"]):
+        vec = [0] * 14
+        for lbl in str(findings).split("|"):
+            lbl = lbl.strip()
+            if lbl in label_to_idx:
+                vec[label_to_idx[lbl]] = 1
+        lookup[str(fname)] = vec
+    return lookup
 
 
-def run_pre_chestxray14(datasets_dir):
-    # type: (Path) -> dict
+def _find_raw_image(nih_dir: Path, filename: str) -> Path | None:
+    """Locate a raw image across images_001..images_012 subdirectories."""
+    for subdir in sorted(nih_dir.glob("images_*")):
+        candidate = subdir / "images" / filename
+        if candidate.is_file():
+            return candidate
+    return None
+
+
+def _sha256_file(path: Path) -> str:
+    """Compute SHA-256 hex digest of a file."""
+    h = hashlib.sha256()
+    with open(path, "rb") as f:
+        for chunk in iter(lambda: f.read(1 << 16), b""):
+            h.update(chunk)
+    return h.hexdigest()
+
+
+def _extract_patient_id(filename: str) -> str:
+    """Extract patient ID from filename like '00012345_001.png' → '00012345'."""
+    return filename.split("_")[0]
+
+
+# ---------------------------------------------------------------------------
+# Core processing
+# ---------------------------------------------------------------------------
+
+
+def _process_single_image(
+    raw_path: Path,
+    out_path: Path,
+    clahe: cv2.CLAHE,
+) -> np.ndarray | None:
+    """Load, validate, resize, CLAHE, convert to float32.
+
+    Returns:
+        float32 array [0,1] shape (256,256) if successful, else None.
+        Side-effect: saves .npy to out_path.
     """
-    Ejecuta toda la preparación post-extracción de NIH ChestXray14.
-    Retorna dict de estado.
+    img = cv2.imread(str(raw_path), cv2.IMREAD_GRAYSCALE)
+    if img is None:
+        return None
+
+    h, w = img.shape[:2]
+    if h < MIN_DIM or w < MIN_DIM:
+        return None  # sentinel: caller checks
+
+    # Resize
+    img = cv2.resize(img, (TARGET_SIZE, TARGET_SIZE), interpolation=cv2.INTER_LINEAR)
+
+    # CLAHE (after resize)
+    img = clahe.apply(img)
+
+    # float32 [0, 1]
+    arr = img.astype(np.float32) / 255.0
+
+    # Save as .npy (float32) — fast for downstream numpy/albumentations loading
+    np.save(str(out_path), arr)
+
+    return arr
+
+
+def process_split(
+    split_name: str,
+    filenames: list[str],
+    nih_dir: Path,
+    out_dir: Path,
+    label_lookup: dict[str, list[int]],
+    clahe: cv2.CLAHE,
+    compute_stats: bool = False,
+) -> tuple[ProcessingStats, dict[str, float] | None]:
+    """Process all images for one split.
+
+    Args:
+        compute_stats: If True, accumulate running mean/std (for train split).
+
+    Returns:
+        (stats, channel_stats) where channel_stats is {"mean": ..., "std": ...} or None.
     """
+    out_dir.mkdir(parents=True, exist_ok=True)
+    stats = ProcessingStats()
+
+    # Metadata CSV — append mode with header check
+    meta_csv_path = out_dir / "metadata.csv"
+    existing_files: set[str] = set()
+    if meta_csv_path.exists():
+        with open(meta_csv_path, "r", encoding="utf-8") as f:
+            reader = csv.DictReader(f)
+            for row in reader:
+                existing_files.add(row["filename"])
+
+    # Running stats accumulators (Welford-like with sum/sum_sq for simplicity)
+    pixel_sum: float = 0.0
+    pixel_sq_sum: float = 0.0
+    pixel_count: int = 0
+
+    new_meta_rows: list[dict[str, str]] = []
+
+    for fname in tqdm(filenames, desc=f"  {split_name}", unit="img", leave=False):
+        npy_name = Path(fname).stem + ".npy"
+        npy_path = out_dir / npy_name
+
+        # Idempotency: skip if already processed and in metadata
+        if npy_path.exists() and fname in existing_files:
+            stats.skipped_exists += 1
+            # Still need stats for train even if skipped
+            if compute_stats:
+                arr = np.load(str(npy_path))
+                pixel_sum += float(arr.sum())
+                pixel_sq_sum += float((arr * arr).sum())
+                pixel_count += arr.size
+            continue
+
+        # Find raw image
+        raw_path = _find_raw_image(nih_dir, fname)
+        if raw_path is None:
+            stats.skipped_missing += 1
+            continue
+
+        # Process
+        img = cv2.imread(str(raw_path), cv2.IMREAD_GRAYSCALE)
+        if img is None:
+            stats.skipped_corrupt += 1
+            continue
+
+        h, w = img.shape[:2]
+        if h < MIN_DIM or w < MIN_DIM:
+            stats.skipped_small += 1
+            continue
+
+        img = cv2.resize(
+            img, (TARGET_SIZE, TARGET_SIZE), interpolation=cv2.INTER_LINEAR
+        )
+        img = clahe.apply(img)
+        arr = img.astype(np.float32) / 255.0
+
+        np.save(str(npy_path), arr)
+        stats.processed += 1
+
+        # Compute SHA-256 of saved file
+        sha = _sha256_file(npy_path)
+
+        # Label vector
+        label_vec = label_lookup.get(fname, [0] * 14)
+
+        new_meta_rows.append(
+            {
+                "filename": fname,
+                "patient_id": _extract_patient_id(fname),
+                "label_vector": json.dumps(label_vec),
+                "sha256": sha,
+            }
+        )
+
+        # Running stats
+        if compute_stats:
+            pixel_sum += float(arr.sum())
+            pixel_sq_sum += float((arr * arr).sum())
+            pixel_count += arr.size
+
+    # Write new metadata rows
+    if new_meta_rows:
+        write_header = not meta_csv_path.exists() or meta_csv_path.stat().st_size == 0
+        with open(meta_csv_path, "a", encoding="utf-8", newline="") as f:
+            writer = csv.DictWriter(
+                f, fieldnames=["filename", "patient_id", "label_vector", "sha256"]
+            )
+            if write_header:
+                writer.writeheader()
+            writer.writerows(new_meta_rows)
+
+    # Channel stats
+    channel_stats: dict[str, float] | None = None
+    if compute_stats and pixel_count > 0:
+        mean = pixel_sum / pixel_count
+        std = float(np.sqrt(pixel_sq_sum / pixel_count - mean * mean))
+        channel_stats = {"mean": float(mean), "std": std}
+
+    return stats, channel_stats
+
+
+# ---------------------------------------------------------------------------
+# Main entry point
+# ---------------------------------------------------------------------------
+
+
+def run_preprocessing(datasets_dir: Path | None = None) -> dict[str, object]:
+    """Run full Fase 1 offline preprocessing for NIH ChestX-ray14.
+
+    Returns:
+        Summary dict with per-split statistics.
+    """
+    if datasets_dir is None:
+        datasets_dir = Path(__file__).resolve().parents[3] / "datasets"
+
     nih_dir = datasets_dir / "nih_chest_xrays"
+    splits_dir = nih_dir / "splits"
+    preprocessed_dir = nih_dir / "preprocessed"
+    csv_path = nih_dir / "Data_Entry_2017.csv"
+
+    # Validate prerequisites
     if not nih_dir.exists():
-        log.warning("[NIH] Directorio %s no existe — saltando.", nih_dir)
-        return {"status": "⚠️", "reason": "directorio no existe"}
+        log.error("NIH directory not found: %s", nih_dir)
+        sys.exit(1)
+    if not csv_path.exists():
+        log.error("Data_Entry_2017.csv not found: %s", csv_path)
+        sys.exit(1)
 
-    result = {}
+    # Load label lookup
+    log.info("Loading label lookup from %s ...", csv_path.name)
+    label_lookup = _build_label_lookup(csv_path)
+    log.info("Label lookup: %d entries", len(label_lookup))
 
-    # 1. Symlinks
-    n_symlinks = crear_symlinks_all_images(nih_dir)
-    result["symlinks"] = n_symlinks
+    # Load splits
+    splits: dict[str, list[str]] = {}
+    for split_name, txt_name in SPLIT_NAMES.items():
+        txt_path = splits_dir / txt_name
+        if not txt_path.exists():
+            log.error("Split file not found: %s", txt_path)
+            sys.exit(1)
+        filenames = [
+            line.strip()
+            for line in txt_path.read_text(encoding="utf-8").splitlines()
+            if line.strip()
+        ]
+        splits[split_name] = filenames
+        log.info("Split '%s': %d filenames", split_name, len(filenames))
 
-    # 2. Verificar splits oficiales
-    split_info = verificar_split_txts(nih_dir)
-    result["splits"] = split_info
+    # CLAHE instance (reusable)
+    clahe = cv2.createCLAHE(clipLimit=CLAHE_CLIP, tileGridSize=CLAHE_TILE)
 
-    # 3. Auditar CSV
-    csv_info = auditar_csv(nih_dir)
-    result["csv_audit"] = csv_info
+    # Process each split (train first for stats)
+    summary: dict[str, object] = {}
+    train_stats_dict: dict[str, float] | None = None
 
-    result["status"] = "✅" if n_symlinks > 0 and split_info else "⚠️"
-    return result
+    for split_name in ["train", "val", "test"]:
+        filenames = splits[split_name]
+        out_dir = preprocessed_dir / split_name
+        is_train = split_name == "train"
+
+        log.info("Processing split '%s' (%d images) ...", split_name, len(filenames))
+        pstats, channel_stats = process_split(
+            split_name=split_name,
+            filenames=filenames,
+            nih_dir=nih_dir,
+            out_dir=out_dir,
+            label_lookup=label_lookup,
+            clahe=clahe,
+            compute_stats=is_train,
+        )
+
+        if is_train and channel_stats is not None:
+            train_stats_dict = channel_stats
+
+        summary[split_name] = {
+            "processed": pstats.processed,
+            "skipped_exists": pstats.skipped_exists,
+            "skipped_corrupt": pstats.skipped_corrupt,
+            "skipped_small": pstats.skipped_small,
+            "skipped_missing": pstats.skipped_missing,
+        }
+
+        log.info(
+            "  → %s: %d processed, %d skipped (exists=%d, corrupt=%d, small=%d, missing=%d)",
+            split_name,
+            pstats.processed,
+            pstats.skipped_exists,
+            pstats.skipped_exists,
+            pstats.skipped_corrupt,
+            pstats.skipped_small,
+            pstats.skipped_missing,
+        )
+
+    # Save train channel stats
+    if train_stats_dict is not None:
+        stats_path = preprocessed_dir / "stats.json"
+        stats_path.write_text(json.dumps(train_stats_dict, indent=2), encoding="utf-8")
+        log.info(
+            "Train stats saved: mean=%.6f, std=%.6f",
+            train_stats_dict["mean"],
+            train_stats_dict["std"],
+        )
+        summary["train_stats"] = train_stats_dict
+    else:
+        log.warning("No train pixel stats computed (0 images processed?).")
+
+    log.info("Preprocessing complete.")
+    return summary
+
+
+if __name__ == "__main__":
+    run_preprocessing()

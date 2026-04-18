@@ -108,9 +108,9 @@ log = logging.getLogger("expert_oa_train_ddp")
 
 # ── Rutas de salida ────────────────────────────────────────────────────
 _CHECKPOINT_DIR = _PROJECT_ROOT / "checkpoints"
-_CHECKPOINT_PATH = _CHECKPOINT_DIR / "expert_02_efficientnet_b3" / "best.pt"
+_CHECKPOINT_PATH = _CHECKPOINT_DIR / "expert_oa_efficientnet_b3" / "best.pt"
 _TRAINING_LOG_PATH = (
-    _CHECKPOINT_DIR / "expert_02_efficientnet_b3" / "expert_oa_ddp_training_log.json"
+    _CHECKPOINT_DIR / "expert_oa_efficientnet_b3" / "expert_oa_ddp_training_log.json"
 )
 
 # ── Constantes de entrenamiento ────────────────────────────────────────

@@ -50,15 +50,14 @@ más efectivo para datos volumétricos donde las activaciones son
 espacialmente correlacionadas."""
 
 # ── Batch y entrenamiento ───────────────────────────────────
-EXPERT3_BATCH_SIZE = 4
-"""Batch size real por GPU. Limitado por VRAM (12 GB) con volúmenes 64³.
-Con FP16 + gradient checkpointing, batch_size=4 es viable."""
+EXPERT3_BATCH_SIZE = 8
+"""Batch size real por GPU. Con Titan Xp (12 GB) y volúmenes 64³ en FP16,
+batch_size=8 utiliza ~4-5 GB VRAM — margen amplio sin gradient checkpointing."""
 
-EXPERT3_ACCUMULATION_STEPS = 8
+EXPERT3_ACCUMULATION_STEPS = 4
 """Gradient accumulation steps. Batch efectivo = batch_size × accumulation_steps
-= 4 × 8 = 32. Simula un batch mayor sin requerir más VRAM.
-NOTA: ACCUMULATION_STEPS=4 es el mínimo obligatorio del proyecto;
-aquí usamos 8 para mayor estabilidad del gradiente con FocalLoss."""
+= 8 × 4 = 32. Mismo batch efectivo que antes (4 × 8 = 32).
+NOTA: ACCUMULATION_STEPS=4 es el mínimo obligatorio del proyecto."""
 
 EXPERT3_FP16 = True
 """Usar mixed precision (torch.cuda.amp). Obligatorio para 12 GB VRAM con
@@ -84,6 +83,6 @@ EXPERT3_CONFIG_SUMMARY = (
     "Expert 3 (LUNA16 / DenseNet3D): LR=3e-4 | WD=0.03 | "
     "FocalLoss(γ=2, α=0.85) | label_smooth=0.05 | "
     "dropout_fc=0.4 | spatial_drop3d=0.15 | "
-    "batch=4 | accum=8 (efectivo=32) | FP16=True | "
+    "batch=8 | accum=4 (efectivo=32) | FP16=True | "
     "patience=20 | max_epochs=100"
 )

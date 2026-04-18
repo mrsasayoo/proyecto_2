@@ -120,12 +120,12 @@ logging.basicConfig(
 log = logging.getLogger("expert5_train_ddp")
 
 # ── Rutas de salida ───────────────────────────────────────────────────
-_CHECKPOINT_DIR = _PROJECT_ROOT / "checkpoints" / "expert5"
+_CHECKPOINT_DIR = _PROJECT_ROOT / "checkpoints" / "expert_05_resunet_film"
 _BEST_CKPT_PATH = _CHECKPOINT_DIR / "best.pt"
 _LAST_CKPT_PATH = _CHECKPOINT_DIR / "last.pt"
 _OOD_THRESHOLDS_PATH = _CHECKPOINT_DIR / "ood_thresholds.json"
 
-_LOG_DIR = _PROJECT_ROOT / "logs" / "expert5"
+_LOG_DIR = _PROJECT_ROOT / "logs" / "expert_05_resunet_film"
 _METRICS_CSV_PATH = _LOG_DIR / "train_metrics_ddp.csv"
 
 # ── CSV path ──────────────────────────────────────────────────────────
