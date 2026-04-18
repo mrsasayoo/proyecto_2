@@ -697,7 +697,8 @@ def train(
         resume: path al checkpoint para reanudar entrenamiento.
     """
     # ── Inicializar DDP ────────────────────────────────────────────
-    setup_ddp()
+    # Auto-detectar backend: NCCL para GPU, Gloo para CPU
+    setup_ddp(backend="auto")
 
     set_seed(_SEED)
 
@@ -842,6 +843,9 @@ def train(
     # El modelo produce probabilidades (post-sigmoid), usamos BCELoss.
     # pos_weight no es compatible con BCELoss, así que usamos un wrapper
     # que aplica el pos_weight manualmente.
+    # Cap pos_weight a 50 para evitar overflow/gradientes explosivos
+    # (Hernia tenía ~538, peligroso incluso en FP32).
+    pos_weight = pos_weight.clamp(max=50.0)
     pos_weight = pos_weight.to(device)
     criterion = nn.BCEWithLogitsLoss(pos_weight=pos_weight)
     # NOTA: Aunque el modelo ya aplica sigmoid, BCEWithLogitsLoss espera

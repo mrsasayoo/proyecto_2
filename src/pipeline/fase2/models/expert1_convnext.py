@@ -226,7 +226,7 @@ class HybridDeepVision(nn.Module):
                 nn.init.ones_(m.weight)
                 nn.init.zeros_(m.bias)
             elif isinstance(m, nn.Linear):
-                nn.init.kaiming_normal_(m.weight, mode="fan_out", nonlinearity="relu")
+                nn.init.normal_(m.weight, mean=0.0, std=0.01)
                 if m.bias is not None:
                     nn.init.zeros_(m.bias)
 

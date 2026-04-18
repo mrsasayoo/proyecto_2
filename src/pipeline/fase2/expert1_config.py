@@ -19,14 +19,14 @@ Análisis del dataset:
 """
 
 # ── Épocas ──────────────────────────────────────────────────
-EXPERT1_EPOCHS = 50
+EXPERT1_EPOCHS = 100
 """Épocas de entrenamiento directo desde cero. Sin fases LP/FT.
-50 épocas con early stopping (patience=10) para convergencia completa."""
+100 épocas con early stopping (patience=20) para convergencia completa."""
 
 # ── Learning rate ───────────────────────────────────────────
-EXPERT1_LR = 1e-3
-"""Learning rate para AdamW. Valor estándar para entrenamiento desde cero
-de redes convolucionales de tamaño medio."""
+EXPERT1_LR = 3e-4
+"""Learning rate para AdamW. Valor conservador para entrenamiento desde cero
+con pos_weight alto — reduce riesgo de gradientes explosivos."""
 
 # ── Regularización del modelo ───────────────────────────────
 EXPERT1_WEIGHT_DECAY = 1e-4
@@ -40,8 +40,7 @@ dataset con desbalance significativo entre clases."""
 
 # ── Batch y entrenamiento ───────────────────────────────────
 EXPERT1_BATCH_SIZE = 32
-"""Batch size real por GPU. Con imágenes 256×256 grayscale y la
-arquitectura Hybrid-Deep-Vision en FP16, cabe en 12 GB VRAM."""
+"""Batch size real por GPU. Reducido a 16 para caber en RAM limitada (CPU training)."""
 
 EXPERT1_NUM_WORKERS = 4
 """Workers para DataLoader. 4 es suficiente para saturar el I/O
@@ -51,9 +50,9 @@ EXPERT1_ACCUMULATION_STEPS = 4
 """Gradient accumulation steps. Batch efectivo = batch_size × accum
 = 32 × 4 = 128. Mínimo obligatorio del proyecto es 4."""
 
-EXPERT1_FP16 = True
-"""Usar mixed precision (torch.amp). Reduce consumo de VRAM ~40% y
-acelera el entrenamiento ~1.5x en GPUs con soporte de Tensor Cores."""
+EXPERT1_FP16 = False
+"""FP32 obligatorio: pos_weight máximo ~538 (Hernia) causa overflow en FP16
+(rango máximo ~65504). FP32 tiene rango suficiente (~3.4e38)."""
 
 # ── Imagen y clases ─────────────────────────────────────────
 EXPERT1_IMG_SIZE = 256
@@ -64,7 +63,7 @@ EXPERT1_NUM_CLASSES = 14
 """Número de patologías del dataset NIH ChestXray14."""
 
 # ── Scheduler y stopping ───────────────────────────────────
-EXPERT1_EARLY_STOPPING_PATIENCE = 10
+EXPERT1_EARLY_STOPPING_PATIENCE = 20
 """Épocas sin mejora en val_macro_auc antes de detener el entrenamiento.
 10 épocas es razonable para un dataset grande con augmentation."""
 
@@ -78,6 +77,7 @@ EXPERT1_CONFIG_SUMMARY = (
     f"WD={EXPERT1_WEIGHT_DECAY} | dropout_fc={EXPERT1_DROPOUT_FC} | "
     f"batch={EXPERT1_BATCH_SIZE} | accum={EXPERT1_ACCUMULATION_STEPS} "
     f"(effective={EXPERT1_BATCH_SIZE * EXPERT1_ACCUMULATION_STEPS}) | "
-    f"FP16={EXPERT1_FP16} | img={EXPERT1_IMG_SIZE} | "
+    f"FP16={EXPERT1_FP16} (FP32 forced: pos_weight>500) | "
+    f"img={EXPERT1_IMG_SIZE} | "
     f"patience={EXPERT1_EARLY_STOPPING_PATIENCE}"
 )

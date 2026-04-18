@@ -79,7 +79,7 @@ def is_main_process() -> bool:
 # ─────────────────────────────────────────────────────────────────────────────
 
 
-def setup_ddp(backend: str = "nccl") -> None:
+def setup_ddp(backend: str = "auto") -> None:
     """Inicializa el process group de DDP si las variables de entorno lo indican.
 
     torchrun configura automáticamente RANK, WORLD_SIZE, LOCAL_RANK y
@@ -87,7 +87,8 @@ def setup_ddp(backend: str = "nccl") -> None:
     función no hace nada (modo single-GPU transparente).
 
     Args:
-        backend: backend de comunicación. "nccl" para GPU, "gloo" para CPU.
+        backend: backend de comunicación. "nccl" para GPU, "gloo" para CPU,
+                 o "auto" para detectar automáticamente.
     """
     # torchrun define RANK y WORLD_SIZE; si no están, no estamos en modo DDP
     if "RANK" not in os.environ:
@@ -97,6 +98,9 @@ def setup_ddp(backend: str = "nccl") -> None:
         )
         return
 
+    # Auto-detectar backend si se especifica "auto"
+    if backend == "auto":
+        backend = "nccl" if torch.cuda.is_available() else "gloo"
     rank = int(os.environ["RANK"])
     world_size = int(os.environ["WORLD_SIZE"])
     local_rank = int(os.environ.get("LOCAL_RANK", 0))
