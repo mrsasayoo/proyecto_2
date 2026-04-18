@@ -12,7 +12,7 @@ Pipeline online (__getitem__ del dataset + transforms de este módulo):
 
 Fase 2 — Transform Train (pasos 9–16):
     9.  HorizontalFlip(p=0.5)
-    10. ShiftScaleRotate(shift=0.06, scale=(-0.15,0.10), rotate=0, p=0.5)
+    10. Affine(translate=±0.06, scale=(0.85,1.10), rotate=0, p=0.5)
     11. Rotate(limit=10, p=0.5)
     12. ElasticTransform(alpha=30, sigma=5, p=0.1)
     13. RandomBrightnessContrast(brightness=0.15, contrast=0.15, p=0.5)
@@ -128,20 +128,20 @@ def _build_train_transform(
         [
             # 9. HorizontalFlip — solo horizontal, NO vertical
             A.HorizontalFlip(p=0.5),
-            # 10. ShiftScaleRotate — traslación + escala, sin rotación (rotate_limit=0)
-            A.ShiftScaleRotate(
-                shift_limit=0.06,
-                scale_limit=(-0.15, 0.10),
-                rotate_limit=0,
-                border_mode=cv2.BORDER_CONSTANT,
-                fill_value=0,
+            # 10. Affine — traslación + escala, sin rotación (rotate=0)
+            A.Affine(
+                translate_percent=(-0.06, 0.06),
+                scale=(0.85, 1.10),
+                rotate=0,
+                mode=cv2.BORDER_CONSTANT,
+                cval=0,
                 p=0.5,
             ),
             # 11. Rotate — rotación leve, separada de ShiftScaleRotate
             A.Rotate(
                 limit=10,
                 border_mode=cv2.BORDER_CONSTANT,
-                fill_value=0,
+                cval=0,
                 p=0.5,
             ),
             # 12. ElasticTransform — deformación elástica suave

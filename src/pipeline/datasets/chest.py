@@ -51,34 +51,23 @@ class ChestXray14Dataset(Dataset):
       mode="embedding" → FASE 0: devuelve (img, expert_id=0, img_name)
       mode="expert"    → FASE 2: devuelve (img, label_vector_14, img_name)
 
-    Constructor (nueva firma)::
+    Constructor::
 
-        ChestXray14Dataset(split="train",
-                           preprocessed_dir="datasets/nih_chest_xrays/preprocessed",
+        ChestXray14Dataset(preprocessed_dir="datasets/nih_chest_xrays/preprocessed",
+                           split="train",
                            transform=albumentations_compose)
-
-    Compatibilidad con la firma legacy (keyword args ``csv_path``,
-    ``img_dir``, ``file_list``, ``use_cache``) se mantiene: los parámetros
-    legacy se ignoran con un warning y se requiere ``split`` +
-    ``preprocessed_dir``.
     """
 
     FINDING_LABELS: list[str] = list(CHEST_PATHOLOGIES)
 
     def __init__(
         self,
+        preprocessed_dir: str | Path,
         split: str = "train",
-        preprocessed_dir: str | Path = "datasets/nih_chest_xrays/preprocessed",
-        transform: Any = None,
         mode: str = "expert",
-        # ── parámetros legacy (ignorados, mantienen compatibilidad) ───
-        csv_path: str | Path | None = None,
-        img_dir: str | Path | None = None,
-        file_list: str | Path | None = None,
+        transform: Any = None,
         use_cache: bool = True,
         patient_ids_other: set[int] | None = None,
-        filter_view: str | None = None,
-        aug_transform: Any = None,
     ) -> None:
         assert mode in ("embedding", "expert"), (
             f"[Chest] mode debe ser 'embedding' o 'expert', recibido: '{mode}'"
@@ -86,22 +75,6 @@ class ChestXray14Dataset(Dataset):
         assert split in ("train", "val", "test"), (
             f"[Chest] split debe ser 'train', 'val' o 'test', recibido: '{split}'"
         )
-
-        # Warn about legacy params
-        _legacy = {
-            k: v
-            for k, v in [
-                ("csv_path", csv_path),
-                ("img_dir", img_dir),
-                ("file_list", file_list),
-            ]
-            if v is not None
-        }
-        if _legacy:
-            log.warning(
-                f"[Chest] Parámetros legacy ignorados: {list(_legacy.keys())}. "
-                f"El dataset ahora lee desde preprocessed_dir='{preprocessed_dir}'."
-            )
 
         self.split = split
         self.transform = transform

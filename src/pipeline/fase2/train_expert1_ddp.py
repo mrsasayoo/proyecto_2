@@ -51,7 +51,7 @@ os.environ.setdefault(
 os.environ.setdefault("NCCL_IB_DISABLE", "1")  # deshabilita InfiniBand si no hay
 os.environ.setdefault("NCCL_P2P_DISABLE", "1")  # fuerza PCIe (más estable con Titan Xp)
 os.environ.setdefault(
-    "NCCL_BLOCKING_WAIT", "1"
+    "TORCH_NCCL_BLOCKING_WAIT", "1"
 )  # timeout bloqueante (más limpio para debug)
 
 import torch
@@ -349,7 +349,13 @@ def validate(
     all_probs_np = torch.cat(all_probs, dim=0).numpy()  # [N, 14]
     all_labels_np = torch.cat(all_labels, dim=0).numpy().astype(int)  # [N, 14]
 
-    # AUC-ROC por clase (skip clases sin positivos o sin negativos en este split)
+    # AUC-ROC por clase. Si una clase no tiene positivos o solo negativos
+    # en el split de validación, roc_auc_score es indeterminado → se asigna NaN.
+    # Con datasets pequeños (dry-run: 64 samples) esto es esperado: muchas
+    # clases raras (ej. Hernia ~1.1% prevalencia) pueden no aparecer.
+    # En entrenamiento real (~11K val samples) todas las 14 clases deberían
+    # tener ambas etiquetas y AUC computable.
+    # macro_auc se calcula solo sobre clases con AUC válido (nanmean).
     auc_per_class: list[float] = []
     for c in range(EXPERT1_NUM_CLASSES):
         y_true_c = all_labels_np[:, c]
@@ -380,24 +386,24 @@ def validate(
 def eval_with_tta(
     model: nn.Module,
     dl_orig: DataLoader,
-    dl_flip: DataLoader,
     device: torch.device,
     use_fp16: bool,
 ) -> tuple[torch.Tensor, torch.Tensor]:
-    """Evaluación con TTA: promedia probabilidades de original + HorizontalFlip."""
+    """Evaluación con TTA: promedia probabilidades de original + HorizontalFlip.
+
+    Aplica flip horizontal vía ``torch.flip`` sobre el tensor, eliminando la
+    necesidad de un dataset duplicado con transforms de albumentations.
+    """
     model.eval()
     all_probs: list[torch.Tensor] = []
     all_labels: list[torch.Tensor] = []
 
-    for (x_orig, labels_orig, _s1), (x_flip, _labels_flip, _s2) in zip(
-        dl_orig, dl_flip
-    ):
+    for x_orig, labels_orig, _sample_ids in dl_orig:
         x_orig = x_orig.to(device, non_blocking=True)
-        x_flip = x_flip.to(device, non_blocking=True)
 
         with torch.amp.autocast(device_type=device.type, enabled=use_fp16):
             probs_orig = model(x_orig)
-            probs_flip = model(x_flip)
+            probs_flip = model(torch.flip(x_orig, dims=[-1]))
 
         tta_probs = (probs_orig + probs_flip) / 2.0
         all_probs.append(tta_probs.cpu())
@@ -418,8 +424,6 @@ def _build_datasets(
     Separa la creación de datasets de la creación de DataLoaders para que
     DDP pueda inyectar su DistributedSampler en el DataLoader de train.
     """
-    csv_path = str(paths["csv_path"])
-    images_dir = str(paths["images_dir"])
     preprocessed_dir = str(paths["images_dir"].parent / "preprocessed")
 
     if max_samples is not None:
@@ -427,49 +431,28 @@ def _build_datasets(
 
     train_tfm = _build_train_transform(dataset_mean, dataset_std)
     val_tfm = _build_val_transform(dataset_mean, dataset_std)
-    flip_tfm = _build_flip_transform(dataset_mean, dataset_std)
 
     train_ds = ChestXray14Dataset(
-        csv_path=csv_path,
-        img_dir=images_dir,
-        file_list=str(paths["train_split"]),
         preprocessed_dir=preprocessed_dir,
-        transform=train_tfm,
-        mode="expert",
         split="train",
+        mode="expert",
+        transform=train_tfm,
         use_cache=use_cache,
     )
 
     val_ds = ChestXray14Dataset(
-        csv_path=csv_path,
-        img_dir=images_dir,
-        file_list=str(paths["val_split"]),
         preprocessed_dir=preprocessed_dir,
-        transform=val_tfm,
-        mode="expert",
         split="val",
+        mode="expert",
+        transform=val_tfm,
         use_cache=use_cache,
     )
 
     test_ds = ChestXray14Dataset(
-        csv_path=csv_path,
-        img_dir=images_dir,
-        file_list=str(paths["test_split"]),
         preprocessed_dir=preprocessed_dir,
+        split="test",
+        mode="expert",
         transform=val_tfm,
-        mode="expert",
-        split="test",
-        use_cache=use_cache,
-    )
-
-    test_flip_ds = ChestXray14Dataset(
-        csv_path=csv_path,
-        img_dir=images_dir,
-        file_list=str(paths["test_split"]),
-        preprocessed_dir=preprocessed_dir,
-        transform=flip_tfm,
-        mode="expert",
-        split="test",
         use_cache=use_cache,
     )
 
@@ -486,17 +469,14 @@ def _build_datasets(
         n_train = min(max_samples, len(train_ds))
         n_val = min(max_samples, len(val_ds))
         n_test = min(max_samples, len(test_ds))
-        n_test_flip = min(max_samples, len(test_flip_ds))
         train_ds = Subset(train_ds, list(range(n_train)))
         val_ds = Subset(val_ds, list(range(n_val)))
         test_ds = Subset(test_ds, list(range(n_test)))
-        test_flip_ds = Subset(test_flip_ds, list(range(n_test_flip)))
 
     return {
         "train_ds": train_ds,
         "val_ds": val_ds,
         "test_ds": test_ds,
-        "test_flip_ds": test_flip_ds,
         "pos_weight": pos_weight,
     }
 
@@ -783,7 +763,6 @@ def train(
     train_ds = datasets["train_ds"]
     val_ds = datasets["val_ds"]
     test_ds = datasets["test_ds"]
-    test_flip_ds = datasets["test_flip_ds"]
     pos_weight = datasets["pos_weight"]
 
     # ── DataLoaders con DDP ────────────────────────────────────────
@@ -824,26 +803,12 @@ def train(
         **({"prefetch_factor": 2} if num_workers_base > 0 else {}),
     )
 
-    test_flip_loader = DataLoader(
-        test_flip_ds,
-        batch_size=effective_batch_per_gpu,
-        shuffle=False,
-        drop_last=False,
-        num_workers=num_workers_base,
-        pin_memory=torch.cuda.is_available(),
-        persistent_workers=num_workers_base > 0,
-        **({"prefetch_factor": 2} if num_workers_base > 0 else {}),
-    )
-
     if is_main_process():
         log.info(
             f"[Expert1/DataLoader] Train: {len(train_ds):,} samples, "
             f"batch_per_gpu={effective_batch_per_gpu}"
         )
-        log.info(
-            f"[Expert1/DataLoader] Val: {len(val_ds):,} | "
-            f"Test: {len(test_ds):,} | Test flip: {len(test_flip_ds):,}"
-        )
+        log.info(f"[Expert1/DataLoader] Val: {len(val_ds):,} | Test: {len(test_ds):,}")
 
     # ── Loss ───────────────────────────────────────────────────────
     # El modelo produce logits crudos (sin sigmoid). Usamos Focal Loss
@@ -995,7 +960,6 @@ def train(
         tta_probs, tta_labels = eval_with_tta(
             model=model,
             dl_orig=test_loader,
-            dl_flip=test_flip_loader,
             device=device,
             use_fp16=use_fp16,
         )
