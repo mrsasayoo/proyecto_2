@@ -134,14 +134,14 @@ def _build_train_transform(
                 scale_limit=(-0.15, 0.10),
                 rotate_limit=0,
                 border_mode=cv2.BORDER_CONSTANT,
-                value=0,
+                fill_value=0,
                 p=0.5,
             ),
             # 11. Rotate — rotación leve, separada de ShiftScaleRotate
             A.Rotate(
                 limit=10,
                 border_mode=cv2.BORDER_CONSTANT,
-                value=0,
+                fill_value=0,
                 p=0.5,
             ),
             # 12. ElasticTransform — deformación elástica suave
@@ -156,7 +156,7 @@ def _build_train_transform(
             A.GaussianBlur(blur_limit=(3, 5), p=0.1),
             # 15. GaussNoise — ruido gaussiano, std ∈ [0.009, 0.022] en escala [0,1]
             #     var_limit espera varianza (σ²), así que (0.009², 0.022²)
-            A.GaussNoise(var_limit=(0.009**2, 0.022**2), p=0.1),
+            A.GaussNoise(std_range=(0.009, 0.022), p=0.1),
             # 16. CoarseDropout — cutout con huecos pequeños
             A.CoarseDropout(
                 num_holes_range=(1, 3),
