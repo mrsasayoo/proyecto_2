@@ -1,0 +1,42 @@
+{
+  "timestamp": "2026-04-10T22:01:02.660863+00:00",
+  "global_mean": 0.09921630471944809,
+  "aug_per_pos": 3,
+  "total_corrupt_input": 757,
+  "results": {
+    "train": {
+      "ok": 107,
+      "skip": 0,
+      "error": 0
+    },
+    "val": {
+      "ok": 84,
+      "skip": 0,
+      "error": 0
+    },
+    "test": {
+      "ok": 566,
+      "skip": 0,
+      "error": 0
+    }
+  },
+  "totals": {
+    "ok": 757,
+    "skip": 0,
+    "error": 0
+  },
+  "train_aug_rows_added": 44,
+  "train_positives_reextracted": [
+    "candidate_000436.npy",
+    "candidate_001009.npy",
+    "candidate_003870.npy",
+    "candidate_004247.npy",
+    "candidate_004311.npy",
+    "candidate_004439.npy",
+    "candidate_018281.npy",
+    "candidate_018505.npy",
+    "candidate_018582.npy",
+    "candidate_008008.npy",
+    "candidate_121200.npy"
+  ]
+}

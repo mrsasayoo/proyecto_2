@@ -23,12 +23,14 @@ dist/
 build/
 .pytest_cache/
 .mypy_cache/
+.ruff_cache/
 venv/
 env/
 .venv/
 .env
 .env.local
 .env.*.local
+node_modules/
 
 # ═══════════════════════════════════════════════════════════════
 # Jupyter Notebooks
@@ -37,34 +39,81 @@ env/
 *.ipynb_checkpoints
 
 # ═══════════════════════════════════════════════════════════════
-# Datasets & Embeddings (Ignorar contenido, mantener estructura)
+# Archivos pesados (datos, modelos, comprimidos)
+# Se ignoran en TODO el proyecto, independientemente del directorio
 # ═══════════════════════════════════════════════════════════════
-# Ignorar todos los datasets excepto los archivos .gitkeep
-datasets/*
-!datasets/*/.gitkeep
+*.npy
+*.npz
+*.h5
+*.hdf5
+*.nii.gz
+*.gz
+*.tar
+*.tar.gz
+*.zip
+*.7z
+*.rar
+*.pt
+*.pth
+*.ckpt
+*.onnx
+*.safetensors
+*.bin
+*.pkl
+*.pickle
 
-# Ignorar los embeddings y archivos pesados generados
-embeddings/
+# Imágenes médicas originales (pesadas)
+*.png
+*.jpg
+*.jpeg
+*.bmp
+*.tiff
+*.tif
+*.dcm
+*.nii
+*.mhd
+*.raw
+*.zraw
 
 # ═══════════════════════════════════════════════════════════════
-# Logs, Scripts temporales y Monitorización
+# Logs & Temporales
 # ═══════════════════════════════════════════════════════════════
 *.log
-logs/
+*.tmp
+tmp/
+temp/
+
+# ═══════════════════════════════════════════════════════════════
+# Scripts de descarga (pueden contener tokens/rutas locales)
+# ═══════════════════════════════════════════════════════════════
 datasets/*.sh
 
 # ═══════════════════════════════════════════════════════════════
-# Documentación Extra
+# Embeddings generados
 # ═══════════════════════════════════════════════════════════════
-docs/
+embeddings/
 
-# Ignorar checkpoints
-checkpoints/
-*.npy
-*.nii.gz
-*.gz
-*.pt
-*.7z
-*.pth
-__pycache__/
-.ipynb_checkpoints/
+# ═══════════════════════════════════════════════════════════════
+# ARCHIVOS LIGEROS QUE SÍ SE SUBEN (excepciones explícitas)
+# CSV, JSON, TXT, MD, PDF se rastrean en todo el proyecto
+# ═══════════════════════════════════════════════════════════════
+!*.csv
+!*.json
+!*.txt
+!*.md
+!*.pdf
+!*.yaml
+!*.yml
+!*.toml
+!*.cfg
+!*.ini
+!*.py
+!*.ipynb
+!*.sh
+
+# Siempre rastrear .gitkeep (preserva estructura de directorios)
+!.gitkeep
+!**/.gitkeep
+
+# Embedded git repository
+datasets/panorama_labels/

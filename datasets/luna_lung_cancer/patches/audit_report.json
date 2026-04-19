@@ -1,0 +1,121 @@
+{
+  "timestamp": "2026-04-14T13:58:01.610546+00:00",
+  "global_mean_check": {
+    "value": 0.09921630471944809,
+    "expected": 0.09921630471944809,
+    "pass": true
+  },
+  "shape_dtype_checks": {
+    "train": {
+      "sampled": 200,
+      "shape_pass": 200,
+      "dtype_pass": 200,
+      "no_nan_pass": 200,
+      "no_inf_pass": 200
+    },
+    "val": {
+      "sampled": 200,
+      "shape_pass": 200,
+      "dtype_pass": 200,
+      "no_nan_pass": 200,
+      "no_inf_pass": 200
+    },
+    "test": {
+      "sampled": 200,
+      "shape_pass": 200,
+      "dtype_pass": 200,
+      "no_nan_pass": 200,
+      "no_inf_pass": 200
+    },
+    "train_aug": {
+      "sampled": 200,
+      "shape_pass": 200,
+      "dtype_pass": 200,
+      "no_nan_pass": 200,
+      "no_inf_pass": 200
+    }
+  },
+  "zero_centering_checks": {
+    "train": {
+      "sampled": 200,
+      "failing_mean_range": 0,
+      "fraction_failing": 0.0,
+      "bounds": [
+        -0.099216,
+        0.9
+      ]
+    },
+    "val": {
+      "sampled": 200,
+      "failing_mean_range": 0,
+      "fraction_failing": 0.0,
+      "bounds": [
+        -0.099216,
+        0.9
+      ]
+    },
+    "test": {
+      "sampled": 200,
+      "failing_mean_range": 0,
+      "fraction_failing": 0.0,
+      "bounds": [
+        -0.099216,
+        0.9
+      ]
+    },
+    "train_aug": {
+      "sampled": 200,
+      "failing_mean_range": 0,
+      "fraction_failing": 0.0,
+      "bounds": [
+        -0.099216,
+        0.9
+      ]
+    }
+  },
+  "balance_checks": {
+    "train": {
+      "pos": 1263,
+      "neg": 12616,
+      "ratio_neg_pos": 9.9889,
+      "pass": true
+    },
+    "val": {
+      "pos": 105,
+      "neg": 1050,
+      "ratio_neg_pos": 10.0
+    },
+    "test": {
+      "pos": 183,
+      "neg": 1830,
+      "ratio_neg_pos": 10.0
+    },
+    "train_aug": {
+      "pos": 5052,
+      "neg": 12616,
+      "ratio_neg_pos": 2.4972,
+      "pass": true
+    }
+  },
+  "augmentation_variability": {
+    "pairs_checked": 90,
+    "mean_std_diff": 0.134284,
+    "min_std_diff": 0.064779,
+    "max_std_diff": 0.256585,
+    "fraction_above_threshold": 1.0
+  },
+  "exact_duplicate_check": {
+    "pairs_checked": 20,
+    "exact_duplicates": 0
+  },
+  "overall_pass": true,
+  "overall_detail": {
+    "shape_dtype_ok": true,
+    "zero_centering_ok": true,
+    "balance_train_ok": true,
+    "balance_train_aug_ok": true,
+    "global_mean_ok": true,
+    "augmentation_variability_ok": true,
+    "no_exact_duplicates_ok": true
+  }
+}

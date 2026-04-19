@@ -1,0 +1,30 @@
+{
+  "global_mean": 0.09921630471944809,
+  "splits": {
+    "train": {
+      "fixed": 0,
+      "ok": 13879,
+      "corrupt": 0,
+      "corrupt_files": []
+    },
+    "val": {
+      "fixed": 0,
+      "ok": 1155,
+      "corrupt": 0,
+      "corrupt_files": []
+    },
+    "test": {
+      "fixed": 0,
+      "ok": 2013,
+      "corrupt": 0,
+      "corrupt_files": []
+    },
+    "train_aug": {
+      "fixed": 0,
+      "ok": 17668,
+      "corrupt": 0,
+      "corrupt_files": []
+    }
+  },
+  "timestamp": "2026-04-14T13:57:58.987581+00:00"
+}

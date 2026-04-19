@@ -1,0 +1,15 @@
+{
+  "run_at": "2026-04-12T07:16:33.192249+00:00",
+  "mode": "DRY-RUN",
+  "total_duration_s": 0.7,
+  "phases": [
+    {
+      "id": 0,
+      "name": "Preparación de datos",
+      "status": "failed",
+      "duration_s": 0.7,
+      "returncode": 2,
+      "skipped_reason": null
+    }
+  ]
+}

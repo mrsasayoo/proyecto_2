@@ -1,0 +1,12 @@
+{
+  "total_images": 25331,
+  "processed_ok": 25331,
+  "skipped_existing": 0,
+  "missing_source": 0,
+  "errors": 0,
+  "target_size": 224,
+  "jpeg_quality": 95,
+  "hair_removal": true,
+  "elapsed_seconds": 494.5,
+  "error_details": []
+}

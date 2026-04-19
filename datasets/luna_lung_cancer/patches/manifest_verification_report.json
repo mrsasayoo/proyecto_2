@@ -1,0 +1,57 @@
+{
+  "generated_at": "2026-04-11T06:23:57.660184+00:00",
+  "candidates_V2_total": 754975,
+  "candidates_V2_positives": 1557,
+  "candidates_V2_negatives": 753418,
+  "splits": {
+    "train": {
+      "split": "train",
+      "manifest_path": "/mnt/hdd/datasets/carlos_andres_ferro/proyecto_2/datasets/luna_lung_cancer/patches/train/manifest.csv",
+      "total_files": 13878,
+      "positives": 1263,
+      "negatives": 12615,
+      "label_errors": 0,
+      "other_errors": 0,
+      "uid_wrong_split": 0,
+      "verification_status": "OK",
+      "error_details": []
+    },
+    "val": {
+      "split": "val",
+      "manifest_path": "/mnt/hdd/datasets/carlos_andres_ferro/proyecto_2/datasets/luna_lung_cancer/patches/val/manifest.csv",
+      "total_files": 1155,
+      "positives": 105,
+      "negatives": 1050,
+      "label_errors": 0,
+      "other_errors": 0,
+      "uid_wrong_split": 0,
+      "verification_status": "OK",
+      "error_details": []
+    },
+    "test": {
+      "split": "test",
+      "manifest_path": "/mnt/hdd/datasets/carlos_andres_ferro/proyecto_2/datasets/luna_lung_cancer/patches/test/manifest.csv",
+      "total_files": 2013,
+      "positives": 183,
+      "negatives": 1830,
+      "label_errors": 0,
+      "other_errors": 0,
+      "uid_wrong_split": 0,
+      "verification_status": "OK",
+      "error_details": []
+    },
+    "train_aug": {
+      "split": "train_aug",
+      "manifest_path": "/mnt/hdd/datasets/carlos_andres_ferro/proyecto_2/datasets/luna_lung_cancer/patches/train_aug/manifest.csv",
+      "total_files": 17571,
+      "positives": 5052,
+      "negatives": 12519,
+      "label_errors": 0,
+      "other_errors": 0,
+      "uid_wrong_split": 0,
+      "verification_status": "OK",
+      "error_details": []
+    }
+  },
+  "overall_status": "ALL_OK"
+}

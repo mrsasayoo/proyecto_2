@@ -1,0 +1,44 @@
+{
+  "cts_total": 888,
+  "subsets": [
+    "subset0",
+    "subset1",
+    "subset2",
+    "subset3",
+    "subset4",
+    "subset5",
+    "subset6",
+    "subset7",
+    "subset8",
+    "subset9"
+  ],
+  "splits": {
+    "train": {
+      "patches": 13879,
+      "pos": 1263,
+      "neg": 12630
+    },
+    "val": {
+      "patches": 1155,
+      "pos": 105,
+      "neg": 1050
+    },
+    "test": {
+      "patches": 2013,
+      "pos": 183,
+      "neg": 1830
+    }
+  },
+  "neg_ratio": 10,
+  "max_neg": null,
+  "patch_size": 64,
+  "physical_mm": 64,
+  "resample_to_1mm": true,
+  "lung_mask": true,
+  "hu_clip": [
+    -1000,
+    400
+  ],
+  "global_mean": 0.09921630471944809,
+  "validation_ok": true
+}

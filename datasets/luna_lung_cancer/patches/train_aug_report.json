@@ -1,0 +1,12 @@
+{
+  "target_ratio": 2,
+  "aug_per_pos": 3,
+  "negatives": 12616,
+  "positives_original": 1263,
+  "positives_augmented": 3789,
+  "total_positives": 5052,
+  "total_files": 17668,
+  "final_ratio": 2.4972,
+  "corrupt_files": [],
+  "timestamp": "2026-04-13T19:19:55.461675+00:00"
+}

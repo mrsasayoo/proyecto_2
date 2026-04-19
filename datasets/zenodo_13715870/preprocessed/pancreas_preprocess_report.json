@@ -1,0 +1,22 @@
+{
+  "n_total": 2238,
+  "n_ok": 1791,
+  "n_skip": 447,
+  "n_error": 0,
+  "elapsed_s": 56927.4,
+  "output_shape": [
+    48,
+    48,
+    48
+  ],
+  "hu_clip": [
+    -150,
+    250
+  ],
+  "resize_to": 64,
+  "crop_size": 48,
+  "centroid_strategy": "mask_centroid_real",
+  "workers_requested": 1,
+  "workers_effective": 1,
+  "errors_sample": []
+}

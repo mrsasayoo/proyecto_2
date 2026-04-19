@@ -1,0 +1,157 @@
+{
+  "n_sample": 10,
+  "n_ok": 10,
+  "n_nontrivial": 10,
+  "results": [
+    {
+      "file": "100448_00001_0000.nii.gz",
+      "shape": [
+        64,
+        64,
+        64
+      ],
+      "min": 0.0,
+      "max": 1.0,
+      "mean": 0.0844,
+      "std": 0.1839,
+      "has_nan": false,
+      "has_inf": false,
+      "ok": true
+    },
+    {
+      "file": "100098_00001_0000.nii.gz",
+      "shape": [
+        64,
+        64,
+        64
+      ],
+      "min": 0.0,
+      "max": 1.0,
+      "mean": 0.1055,
+      "std": 0.2024,
+      "has_nan": false,
+      "has_inf": false,
+      "ok": true
+    },
+    {
+      "file": "101115_00001_0000.nii.gz",
+      "shape": [
+        64,
+        64,
+        64
+      ],
+      "min": 0.0,
+      "max": 1.0,
+      "mean": 0.1133,
+      "std": 0.1845,
+      "has_nan": false,
+      "has_inf": false,
+      "ok": true
+    },
+    {
+      "file": "100993_00001_0000.nii.gz",
+      "shape": [
+        64,
+        64,
+        64
+      ],
+      "min": 0.0,
+      "max": 1.0,
+      "mean": 0.1257,
+      "std": 0.2254,
+      "has_nan": false,
+      "has_inf": false,
+      "ok": true
+    },
+    {
+      "file": "100904_00001_0000.nii.gz",
+      "shape": [
+        64,
+        64,
+        64
+      ],
+      "min": 0.0,
+      "max": 1.0,
+      "mean": 0.0693,
+      "std": 0.1587,
+      "has_nan": false,
+      "has_inf": false,
+      "ok": true
+    },
+    {
+      "file": "100561_00001_0000.nii.gz",
+      "shape": [
+        64,
+        64,
+        64
+      ],
+      "min": 0.0,
+      "max": 1.0,
+      "mean": 0.1377,
+      "std": 0.2237,
+      "has_nan": false,
+      "has_inf": false,
+      "ok": true
+    },
+    {
+      "file": "100413_00001_0000.nii.gz",
+      "shape": [
+        64,
+        64,
+        64
+      ],
+      "min": 0.0,
+      "max": 1.0,
+      "mean": 0.1085,
+      "std": 0.1905,
+      "has_nan": false,
+      "has_inf": false,
+      "ok": true
+    },
+    {
+      "file": "102219_00001_0000.nii.gz",
+      "shape": [
+        64,
+        64,
+        64
+      ],
+      "min": 0.0,
+      "max": 1.0,
+      "mean": 0.0984,
+      "std": 0.185,
+      "has_nan": false,
+      "has_inf": false,
+      "ok": true
+    },
+    {
+      "file": "100350_00001_0000.nii.gz",
+      "shape": [
+        64,
+        64,
+        64
+      ],
+      "min": 0.0,
+      "max": 1.0,
+      "mean": 0.1105,
+      "std": 0.1796,
+      "has_nan": false,
+      "has_inf": false,
+      "ok": true
+    },
+    {
+      "file": "101716_00001_0000.nii.gz",
+      "shape": [
+        64,
+        64,
+        64
+      ],
+      "min": 0.0,
+      "max": 1.0,
+      "mean": 0.1007,
+      "std": 0.1907,
+      "has_nan": false,
+      "has_inf": false,
+      "ok": true
+    }
+  ]
+}

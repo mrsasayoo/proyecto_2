@@ -1,0 +1,1 @@
+/mnt/hdd/datasets/carlos_andres_ferro/proyecto_2/datasets/luna_lung_cancer/patches/train/candidate_319860.npy

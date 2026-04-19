@@ -1,0 +1,182 @@
+uaodeepia@uaodeepia-X10DGQ:~/Carlos_Ferro/Analitica/nicolas_isabella_luz_martin$ bash run_expert.sh 1 --dry-run
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+  MoE Médico — Lanzador DDP
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+  Expert:     1
+  Script:     src/pipeline/fase2/train_expert1_ddp.py
+  Python:     python3
+  GPUs:       2
+  Argumentos: --dry-run
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+WARNING:__main__:
+*****************************************
+Setting OMP_NUM_THREADS environment variable for each process to be 1 in default, to avoid your system being overloaded, please further tune the variable for optimal performance in your application as needed. 
+*****************************************
+[W418 18:21:25.147501909 Utils.hpp:164] Warning: Environment variable NCCL_BLOCKING_WAIT is deprecated; use TORCH_NCCL_BLOCKING_WAIT instead (function operator())
+2026-04-18 18:21:25 [INFO] [DDP] Process group inicializado: backend=nccl, world_size=2, rank=0, local_rank=0
+2026-04-18 18:21:25 [INFO] [Seed] Semillas fijadas a 42 (base=42 + rank=0)
+2026-04-18 18:21:25 [INFO] [Expert1] Dispositivo: cuda:0
+2026-04-18 18:21:25 [INFO] [Expert1] World size: 2
+2026-04-18 18:21:25 [INFO] [Expert1] Config: Expert 1 (ChestXray14) Hybrid-Deep-Vision from scratch: epochs=100 | LR=0.0003 | WD=0.0001 | dropout_fc=0.4 | batch=32 | accum=4 (effective=128) | FP16=False (FP32 forced: pos_weight>500) | img=256 | patience=20
+2026-04-18 18:21:25 [INFO] [Expert1] DDP batch: 16/gpu × 2 GPUs × 4 accum = 128 efectivo
+2026-04-18 18:21:25 [INFO] [Expert1] === MODO DRY-RUN === (2 batches train + 1 batch val)
+[W418 18:21:25.665140518 Utils.hpp:164] Warning: Environment variable NCCL_BLOCKING_WAIT is deprecated; use TORCH_NCCL_BLOCKING_WAIT instead (function operator())
+2026-04-18 18:21:27 [INFO] [Expert1] Modelo Hybrid-Deep-Vision creado: 4,977,678 parámetros totales
+2026-04-18 18:21:27 [INFO] [VRAM post-model] GPU 0: Allocated: 0.02 GB | Reserved: 0.03 GB
+2026-04-18 18:21:27 [INFO] [Expert1/DataLoader] Dataset stats: mean=0.535083, std=0.251232
+/home/uaodeepia/.local/lib/python3.10/site-packages/albumentations/core/validation.py:114: UserWarning: ShiftScaleRotate is a special case of Affine transform. Please use Affine transform instead.
+  original_init(self, **validated_kwargs)
+/home/uaodeepia/Carlos_Ferro/Analitica/nicolas_isabella_luz_martin/src/pipeline/fase2/dataloader_expert1.py:132: UserWarning: Argument(s) 'fill_value' are not valid for transform ShiftScaleRotate
+  A.ShiftScaleRotate(
+/home/uaodeepia/Carlos_Ferro/Analitica/nicolas_isabella_luz_martin/src/pipeline/fase2/dataloader_expert1.py:141: UserWarning: Argument(s) 'fill_value' are not valid for transform Rotate
+  A.Rotate(
+2026-04-18 18:21:27 [WARNING] [Chest] Parámetros legacy ignorados: ['csv_path', 'img_dir', 'file_list']. El dataset ahora lee desde preprocessed_dir='/home/uaodeepia/Carlos_Ferro/Analitica/nicolas_isabella_luz_martin/datasets/nih_chest_xrays/preprocessed'.
+2026-04-18 18:21:27 [WARNING] [Chest] Parámetros legacy ignorados: ['csv_path', 'img_dir', 'file_list']. El dataset ahora lee desde preprocessed_dir='/home/uaodeepia/Carlos_Ferro/Analitica/nicolas_isabella_luz_martin/datasets/nih_chest_xrays/preprocessed'.
+2026-04-18 18:21:31 [INFO] [Chest] Metadata cargada: 88,999 imágenes desde '/home/uaodeepia/Carlos_Ferro/Analitica/nicolas_isabella_luz_martin/datasets/nih_chest_xrays/preprocessed/train/metadata.csv'
+2026-04-18 18:21:32 [INFO] [Chest] Pacientes únicos en split 'train': 26,242
+2026-04-18 18:21:32 [INFO] [Chest] Prevalencia por patología:
+2026-04-18 18:21:32 [INFO]     Atelectasis           : 0.099  ██ [BBox✓]
+2026-04-18 18:21:32 [INFO]     Cardiomegaly          : 0.024  █ [BBox✓]
+2026-04-18 18:21:32 [INFO]     Effusion              : 0.108  ███ [BBox✓]
+2026-04-18 18:21:32 [INFO]     Infiltration          : 0.170  █████ [BBox✓]
+2026-04-18 18:21:32 [INFO]     Mass                  : 0.050  █ [BBox✓]
+2026-04-18 18:21:32 [INFO]     Nodule                : 0.056  █ [BBox✓]
+2026-04-18 18:21:32 [INFO]     Pneumonia             : 0.012  █ [BBox✓]
+2026-04-18 18:21:32 [INFO]     Pneumothorax          : 0.040  █ [BBox✓]
+2026-04-18 18:21:32 [INFO]     Consolidation         : 0.038  █
+2026-04-18 18:21:32 [INFO]     Edema                 : 0.019  █
+2026-04-18 18:21:32 [INFO]     Emphysema             : 0.020  █
+2026-04-18 18:21:32 [INFO]     Fibrosis              : 0.015  █
+2026-04-18 18:21:32 [INFO]     Pleural_Thickening    : 0.028  █
+2026-04-18 18:21:32 [INFO]     Hernia                : 0.002  █
+2026-04-18 18:21:32 [INFO] [Chest] pos_weight — min: 4.9 (Infiltration) | max: 538.4 (Hernia)
+2026-04-18 18:21:32 [INFO] [Chest] Dataset listo: 88,999 imágenes, split='train', mode='expert'
+2026-04-18 18:21:32 [WARNING] [Chest] Parámetros legacy ignorados: ['csv_path', 'img_dir', 'file_list']. El dataset ahora lee desde preprocessed_dir='/home/uaodeepia/Carlos_Ferro/Analitica/nicolas_isabella_luz_martin/datasets/nih_chest_xrays/preprocessed'.
+2026-04-18 18:21:32 [WARNING] [Chest] Parámetros legacy ignorados: ['csv_path', 'img_dir', 'file_list']. El dataset ahora lee desde preprocessed_dir='/home/uaodeepia/Carlos_Ferro/Analitica/nicolas_isabella_luz_martin/datasets/nih_chest_xrays/preprocessed'.
+2026-04-18 18:21:33 [INFO] [Chest] Metadata cargada: 11,349 imágenes desde '/home/uaodeepia/Carlos_Ferro/Analitica/nicolas_isabella_luz_martin/datasets/nih_chest_xrays/preprocessed/val/metadata.csv'
+2026-04-18 18:21:33 [INFO] [Chest] Pacientes únicos en split 'val': 3,301
+2026-04-18 18:21:33 [WARNING] [Chest] Parámetros legacy ignorados: ['csv_path', 'img_dir', 'file_list']. El dataset ahora lee desde preprocessed_dir='/home/uaodeepia/Carlos_Ferro/Analitica/nicolas_isabella_luz_martin/datasets/nih_chest_xrays/preprocessed'.
+2026-04-18 18:21:33 [INFO] [Chest] Prevalencia por patología:
+2026-04-18 18:21:33 [INFO]     Atelectasis           : 0.105  ███ [BBox✓]
+2026-04-18 18:21:33 [INFO]     Cardiomegaly          : 0.020  █ [BBox✓]
+2026-04-18 18:21:33 [INFO]     Effusion              : 0.122  ███ [BBox✓]
+2026-04-18 18:21:33 [INFO]     Infiltration          : 0.167  █████ [BBox✓]
+2026-04-18 18:21:33 [INFO]     Mass                  : 0.047  █ [BBox✓]
+2026-04-18 18:21:33 [INFO]     Nodule                : 0.058  █ [BBox✓]
+2026-04-18 18:21:33 [INFO]     Pneumonia             : 0.011  █ [BBox✓]
+2026-04-18 18:21:33 [INFO]     Pneumothorax          : 0.037  █ [BBox✓]
+2026-04-18 18:21:33 [INFO]     Consolidation         : 0.037  █
+2026-04-18 18:21:33 [INFO]     Edema                 : 0.019  █
+2026-04-18 18:21:33 [INFO]     Emphysema             : 0.019  █
+2026-04-18 18:21:33 [INFO]     Fibrosis              : 0.013  █
+2026-04-18 18:21:33 [INFO]     Pleural_Thickening    : 0.029  █
+2026-04-18 18:21:33 [INFO]     Hernia                : 0.002  █
+2026-04-18 18:21:33 [INFO] [Chest] pos_weight — min: 5.0 (Infiltration) | max: 492.4 (Hernia)
+2026-04-18 18:21:33 [INFO] [Chest] Dataset listo: 11,349 imágenes, split='val', mode='expert'
+2026-04-18 18:21:33 [WARNING] [Chest] Parámetros legacy ignorados: ['csv_path', 'img_dir', 'file_list']. El dataset ahora lee desde preprocessed_dir='/home/uaodeepia/Carlos_Ferro/Analitica/nicolas_isabella_luz_martin/datasets/nih_chest_xrays/preprocessed'.
+2026-04-18 18:21:33 [INFO] [Chest] Metadata cargada: 11,772 imágenes desde '/home/uaodeepia/Carlos_Ferro/Analitica/nicolas_isabella_luz_martin/datasets/nih_chest_xrays/preprocessed/test/metadata.csv'
+2026-04-18 18:21:33 [INFO] [Chest] Pacientes únicos en split 'test': 1,262
+2026-04-18 18:21:33 [WARNING] [Chest] Parámetros legacy ignorados: ['csv_path', 'img_dir', 'file_list']. El dataset ahora lee desde preprocessed_dir='/home/uaodeepia/Carlos_Ferro/Analitica/nicolas_isabella_luz_martin/datasets/nih_chest_xrays/preprocessed'.
+2026-04-18 18:21:33 [INFO] [Chest] Prevalencia por patología:
+2026-04-18 18:21:33 [INFO]     Atelectasis           : 0.135  ████ [BBox✓]
+2026-04-18 18:21:33 [INFO]     Cardiomegaly          : 0.034  █ [BBox✓]
+2026-04-18 18:21:33 [INFO]     Effusion              : 0.196  █████ [BBox✓]
+2026-04-18 18:21:33 [INFO]     Infiltration          : 0.244  ███████ [BBox✓]
+2026-04-18 18:21:33 [INFO]     Mass                  : 0.068  ██ [BBox✓]
+2026-04-18 18:21:33 [INFO]     Nodule                : 0.060  █ [BBox✓]
+2026-04-18 18:21:33 [INFO]     Pneumonia             : 0.021  █ [BBox✓]
+2026-04-18 18:21:33 [INFO]     Pneumothorax          : 0.109  ███ [BBox✓]
+2026-04-18 18:21:33 [INFO]     Consolidation         : 0.071  ██
+2026-04-18 18:21:33 [INFO]     Edema                 : 0.033  █
+2026-04-18 18:21:33 [INFO]     Emphysema             : 0.044  █
+2026-04-18 18:21:33 [INFO]     Fibrosis              : 0.019  █
+2026-04-18 18:21:33 [INFO]     Pleural_Thickening    : 0.047  █
+2026-04-18 18:21:33 [INFO]     Hernia                : 0.003  █
+2026-04-18 18:21:33 [INFO] [Chest] pos_weight — min: 3.1 (Infiltration) | max: 300.8 (Hernia)
+2026-04-18 18:21:33 [INFO] [Chest] Dataset listo: 11,772 imágenes, split='test', mode='expert'
+2026-04-18 18:21:33 [WARNING] [Chest] Parámetros legacy ignorados: ['csv_path', 'img_dir', 'file_list']. El dataset ahora lee desde preprocessed_dir='/home/uaodeepia/Carlos_Ferro/Analitica/nicolas_isabella_luz_martin/datasets/nih_chest_xrays/preprocessed'.
+2026-04-18 18:21:33 [INFO] [Chest] Metadata cargada: 11,772 imágenes desde '/home/uaodeepia/Carlos_Ferro/Analitica/nicolas_isabella_luz_martin/datasets/nih_chest_xrays/preprocessed/test/metadata.csv'
+2026-04-18 18:21:33 [INFO] [Chest] Pacientes únicos en split 'test': 1,262
+2026-04-18 18:21:33 [INFO] [Chest] Prevalencia por patología:
+2026-04-18 18:21:33 [INFO]     Atelectasis           : 0.135  ████ [BBox✓]
+2026-04-18 18:21:33 [INFO]     Cardiomegaly          : 0.034  █ [BBox✓]
+2026-04-18 18:21:33 [INFO]     Effusion              : 0.196  █████ [BBox✓]
+2026-04-18 18:21:33 [INFO]     Infiltration          : 0.244  ███████ [BBox✓]
+2026-04-18 18:21:33 [INFO]     Mass                  : 0.068  ██ [BBox✓]
+2026-04-18 18:21:33 [INFO]     Nodule                : 0.060  █ [BBox✓]
+2026-04-18 18:21:33 [INFO]     Pneumonia             : 0.021  █ [BBox✓]
+2026-04-18 18:21:33 [INFO]     Pneumothorax          : 0.109  ███ [BBox✓]
+2026-04-18 18:21:33 [INFO]     Consolidation         : 0.071  ██
+2026-04-18 18:21:33 [INFO]     Edema                 : 0.033  █
+2026-04-18 18:21:33 [INFO]     Emphysema             : 0.044  █
+2026-04-18 18:21:33 [INFO]     Fibrosis              : 0.019  █
+2026-04-18 18:21:33 [INFO]     Pleural_Thickening    : 0.047  █
+2026-04-18 18:21:33 [INFO]     Hernia                : 0.003  █
+2026-04-18 18:21:33 [INFO] [Chest] pos_weight — min: 3.1 (Infiltration) | max: 300.8 (Hernia)
+2026-04-18 18:21:33 [INFO] [Chest] Dataset listo: 11,772 imágenes, split='test', mode='expert'
+2026-04-18 18:21:33 [INFO] [Expert1/DataLoader] Train: 64 samples, batch_per_gpu=16
+2026-04-18 18:21:33 [INFO] [Expert1/DataLoader] Val: 64 | Test: 64 | Test flip: 64
+2026-04-18 18:21:33 [INFO] [Expert1] Loss: FocalLoss(alpha shape=torch.Size([14]), gamma=2.0)
+[rank1]:[W418 18:21:39.141535513 Utils.hpp:110] Warning: Environment variable NCCL_BLOCKING_WAIT is deprecated; use TORCH_NCCL_BLOCKING_WAIT instead (function operator())
+[rank0]:[W418 18:21:39.141776934 Utils.hpp:110] Warning: Environment variable NCCL_BLOCKING_WAIT is deprecated; use TORCH_NCCL_BLOCKING_WAIT instead (function operator())
+2026-04-18 18:22:05 [INFO] [DDP] Modelo envuelto en DistributedDataParallel (device_ids=[0], find_unused=False)
+2026-04-18 18:22:05 [INFO] [Expert1] EarlyStopping: monitor=val_macro_auc, patience=20, min_delta=0.001
+2026-04-18 18:22:05 [INFO] 
+======================================================================
+2026-04-18 18:22:05 [INFO]   INICIO DE ENTRENAMIENTO — Expert 1 DDP (Hybrid-Deep-Vision / ChestXray14)
+2026-04-18 18:22:05 [INFO]   Épocas: 100 | LR=0.0003 | WD=0.0001
+2026-04-18 18:22:05 [INFO]   Batch efectivo: 16×2×4=128
+2026-04-18 18:22:05 [INFO]   FP16: False | Accumulation: 4 | GPUs: 2
+2026-04-18 18:22:05 [INFO] ======================================================================
+
+2026-04-18 18:22:05 [INFO] 
+======================================================================
+2026-04-18 18:22:05 [INFO]   ENTRENAMIENTO: Hybrid-Deep-Vision desde cero
+2026-04-18 18:22:05 [INFO]   Épocas: 1 (desde 1 hasta 1)
+2026-04-18 18:22:05 [INFO]   Params entrenables: 4,977,678
+2026-04-18 18:22:05 [INFO]   Param group 0: lr=3.00e-04, wd=1.0e-04
+2026-04-18 18:22:05 [INFO]   DDP: world_size=2, batch_per_gpu=16, batch_total=32
+2026-04-18 18:22:05 [INFO] ======================================================================
+
+2026-04-18 18:22:22 [INFO]   [Train batch 0] imgs=[16, 1, 256, 256] | probs=[16, 14] | loss=0.4811
+2026-04-18 18:22:24 [INFO]   [Train batch 1] imgs=[16, 1, 256, 256] | probs=[16, 14] | loss=0.4298
+2026-04-18 18:22:27 [INFO]   [Val batch 0] imgs=[16, 1, 256, 256] | probs=[16, 14] | loss=0.3130
+2026-04-18 18:22:29 [WARNING] [Val] AUC calculado sobre 5/14 clases (9 sin positivos o sin negativos)
+2026-04-18 18:22:29 [INFO] [Epoch   1/100] train_loss=0.4554 | val_loss=0.3130 | val_macro_auc=0.6157 | lr=3.00e-04 | time=23.3s ★ BEST
+2026-04-18 18:22:29 [INFO] [VRAM epoch-1] GPU 0: Allocated: 0.10 GB | Reserved: 7.86 GB
+2026-04-18 18:22:29 [INFO] 
+[Resumen] Mejor época: 1 | val_macro_auc=0.6157
+2026-04-18 18:22:29 [INFO] 
+======================================================================
+2026-04-18 18:22:29 [INFO]   EVALUACIÓN FINAL — Test set con TTA (original + HorizontalFlip)
+2026-04-18 18:22:29 [INFO] ======================================================================
+
+2026-04-18 18:22:29 [INFO] [TTA] Usando modelo del final del entrenamiento (no hay checkpoint)
+2026-04-18 18:22:40 [INFO] [TTA] AUC-ROC por clase:
+2026-04-18 18:22:40 [INFO]   [ 0] Atelectasis         : 0.4626
+2026-04-18 18:22:40 [INFO]   [ 1] Cardiomegaly        : 0.5963
+2026-04-18 18:22:40 [INFO]   [ 2] Effusion            : 0.5616
+2026-04-18 18:22:40 [INFO]   [ 3] Infiltration        : 0.6587
+2026-04-18 18:22:40 [INFO]   [ 4] Mass                : 0.5176
+2026-04-18 18:22:40 [INFO]   [ 5] Nodule              : 0.9841
+2026-04-18 18:22:40 [INFO]   [ 6] Pneumonia           : 0.2222
+2026-04-18 18:22:40 [INFO]   [ 7] Pneumothorax        : 0.5238
+2026-04-18 18:22:40 [INFO]   [ 8] Consolidation       : nan
+2026-04-18 18:22:40 [INFO]   [ 9] Edema               : nan
+2026-04-18 18:22:40 [INFO]   [10] Emphysema           : 0.3500
+2026-04-18 18:22:40 [INFO]   [11] Fibrosis            : 0.0000
+2026-04-18 18:22:40 [INFO]   [12] Pleural_Thickening  : 0.6000
+2026-04-18 18:22:40 [INFO]   [13] Hernia              : nan
+2026-04-18 18:22:40 [INFO]   ──────────────────────────────
+2026-04-18 18:22:40 [INFO]   Macro AUC (TTA): 0.4979
+2026-04-18 18:22:40 [INFO] 
+======================================================================
+2026-04-18 18:22:40 [INFO]   ENTRENAMIENTO FINALIZADO — Expert 1 DDP (Hybrid-Deep-Vision / ChestXray14)
+2026-04-18 18:22:40 [INFO]   Mejor val_macro_auc: 0.6157
+2026-04-18 18:22:40 [INFO]   Test macro AUC (TTA): 0.4979
+2026-04-18 18:22:40 [INFO]   Mejor época: 1 | val_macro_auc: 0.6157
+2026-04-18 18:22:40 [INFO] ======================================================================
+2026-04-18 18:22:40 [INFO] 
+[DRY-RUN] Pipeline verificado exitosamente. Ejecuta sin --dry-run para entrenar.
+2026-04-18 18:22:41 [INFO] [DDP] Process group destruido.
