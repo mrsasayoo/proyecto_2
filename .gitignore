@@ -117,3 +117,8 @@ embeddings/
 
 # Embedded git repository
 datasets/panorama_labels/
+
+# Large CSV files from LUNA dataset (downloadable, not version controlled)
+datasets/luna_lung_cancer/candidates.csv
+datasets/luna_lung_cancer/candidates_V2/candidates_V2.csv
+datasets/luna_lung_cancer/evaluationScript/**/*.csv
