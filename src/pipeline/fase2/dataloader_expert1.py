@@ -133,15 +133,17 @@ def _build_train_transform(
                 translate_percent=(-0.06, 0.06),
                 scale=(0.85, 1.10),
                 rotate=0,
-                mode=cv2.BORDER_CONSTANT,
-                cval=0,
+                border_mode=cv2.BORDER_CONSTANT,
+                fill=0,
+                fill_mask=0,
                 p=0.5,
             ),
             # 11. Rotate — rotación leve, separada de ShiftScaleRotate
             A.Rotate(
                 limit=10,
                 border_mode=cv2.BORDER_CONSTANT,
-                cval=0,
+                fill=0,
+                fill_mask=0,
                 p=0.5,
             ),
             # 12. ElasticTransform — deformación elástica suave

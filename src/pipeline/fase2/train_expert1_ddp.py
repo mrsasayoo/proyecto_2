@@ -59,7 +59,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 from torch.amp import GradScaler
 from torch.utils.data import DataLoader
-from sklearn.metrics import roc_auc_score
+from sklearn.metrics import f1_score, roc_auc_score
 
 # ── Configurar paths ───────────────────────────────────────────────────
 _PROJECT_ROOT = Path(__file__).resolve().parents[3]  # proyecto_2/
@@ -375,9 +375,16 @@ def validate(
         )
     macro_auc = float(np.nanmean(auc_per_class)) if n_valid > 0 else 0.0
 
+    # F1 score macro (umbral 0.5 sobre probabilidades)
+    val_preds = (all_probs_np > 0.5).astype(int)
+    macro_f1 = float(
+        f1_score(all_labels_np, val_preds, average="macro", zero_division=0)
+    )
+
     return {
         "val_loss": avg_loss,
         "val_macro_auc": macro_auc,
+        "val_macro_f1": macro_f1,
         "val_auc_per_class": auc_per_class,
     }
 
@@ -571,6 +578,7 @@ def _run_training(
         epoch_time = time.time() - epoch_start
         val_loss = val_results["val_loss"]
         val_macro_auc = val_results["val_macro_auc"]
+        val_macro_f1 = val_results["val_macro_f1"]
 
         is_best = val_macro_auc > best_macro_auc + _MIN_DELTA
 
@@ -580,6 +588,7 @@ def _run_training(
                 f"[Epoch {epoch_global:3d}/{_TOTAL_EPOCHS}] "
                 f"train_loss={train_loss:.4f} | val_loss={val_loss:.4f} | "
                 f"val_macro_auc={val_macro_auc:.4f} | "
+                f"val_macro_f1={val_macro_f1:.4f} | "
                 f"lr={current_lr:.2e} | time={epoch_time:.1f}s"
                 f"{' ★ BEST' if is_best else ''}"
             )
@@ -592,6 +601,7 @@ def _run_training(
                 "train_loss": train_loss,
                 "val_loss": val_loss,
                 "val_macro_auc": val_macro_auc,
+                "val_macro_f1": val_macro_f1,
                 "val_auc_per_class": val_results["val_auc_per_class"],
                 "lr": current_lr,
                 "epoch_time_s": round(epoch_time, 1),
