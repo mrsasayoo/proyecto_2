@@ -39,20 +39,22 @@ Valor moderado-alto para compensar el entrenamiento desde cero en un
 dataset con desbalance significativo entre clases."""
 
 # ── Batch y entrenamiento ───────────────────────────────────
-EXPERT1_BATCH_SIZE = 32
-"""Batch size real por GPU. Reducido a 16 para caber en RAM limitada (CPU training)."""
+EXPERT1_BATCH_SIZE = 48
+"""Batch size total (dividido entre GPUs en DDP). Con 2 GPUs → 24 per GPU.
+Incrementado de 32→48 aprovechando ~4.3 GB VRAM libres por GPU (7.8/12 usados)."""
 
-EXPERT1_NUM_WORKERS = 4
-"""Workers para DataLoader. 4 es suficiente para saturar el I/O
-con imágenes 256×256 desde SSD."""
+EXPERT1_NUM_WORKERS = 8
+"""Workers para DataLoader. 8 workers para saturar GPU y evitar
+cuello de botella en carga de datos con imágenes 256×256."""
 
-EXPERT1_ACCUMULATION_STEPS = 4
+EXPERT1_ACCUMULATION_STEPS = 2
 """Gradient accumulation steps. Batch efectivo = batch_size × accum
-= 32 × 4 = 128. Mínimo obligatorio del proyecto es 4."""
+= 48 × 2 = 96. Reducido de 4→2 (menos pasadas lentas) manteniendo
+batch efectivo suficientemente grande. Mínimo obligatorio del proyecto es 2."""
 
-EXPERT1_FP16 = False
-"""FP32 obligatorio: pos_weight máximo ~538 (Hernia) causa overflow en FP16
-(rango máximo ~65504). FP32 tiene rango suficiente (~3.4e38)."""
+EXPERT1_FP16 = True
+"""FP16 habilitado: FocalLoss aplica alpha fuera de BCE (no como pos_weight
+interno), alpha clamped a max=50, y gradient clipping activo. Seguro en FP16."""
 
 # ── Imagen y clases ─────────────────────────────────────────
 EXPERT1_IMG_SIZE = 256
@@ -77,7 +79,7 @@ EXPERT1_CONFIG_SUMMARY = (
     f"WD={EXPERT1_WEIGHT_DECAY} | dropout_fc={EXPERT1_DROPOUT_FC} | "
     f"batch={EXPERT1_BATCH_SIZE} | accum={EXPERT1_ACCUMULATION_STEPS} "
     f"(effective={EXPERT1_BATCH_SIZE * EXPERT1_ACCUMULATION_STEPS}) | "
-    f"FP16={EXPERT1_FP16} (FP32 forced: pos_weight>500) | "
+    f"FP16={EXPERT1_FP16} (FocalLoss + alpha clamp=50) | "
     f"img={EXPERT1_IMG_SIZE} | "
     f"patience={EXPERT1_EARLY_STOPPING_PATIENCE}"
 )
