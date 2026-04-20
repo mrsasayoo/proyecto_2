@@ -44,6 +44,60 @@ rsync -avP --delete \
   /home/nicolas/Escritorio/Academico/analitica_datos/carlos_andres_ferro/proyecto_2/
 ```
 
+#### del server local al server institucional ####
+```bash
+sshpass -p 'uaodeepia11306' rsync -avzP --delete \
+  -e "ssh -o StrictHostKeyChecking=no" \
+  --exclude="*.zip" \
+  --exclude="*.7z" \
+  --exclude="*.zip.part*" \
+  --exclude=".git/" \
+  --exclude="venv/" \
+  --exclude="__pycache__/" \
+  /mnt/ssd_m2/almacenamiento/carlos_andres_ferro/proyecto_2/ \
+  uaodeepia@45.5.190.201:/home/uaodeepia/Carlos_Ferro/Analitica/nicolas_isabella_luz_martin/
+```
+
+```bash
+sshpass -p 'uaodeepia11306' rsync -avzP --delete --dry-run \
+  -e "ssh -o StrictHostKeyChecking=no" \
+  --exclude="*.zip" \
+  --exclude="*.7z" \
+  --exclude="*.zip.part*" \
+  --exclude=".git/" \
+  --exclude="venv/" \
+  --exclude="__pycache__/" \
+  /mnt/ssd_m2/almacenamiento/carlos_andres_ferro/proyecto_2/ \
+  uaodeepia@45.5.190.201:/home/uaodeepia/Carlos_Ferro/Analitica/nicolas_isabella_luz_martin/
+```
+
+#### del server institucional al server local: #####
+
+```bash
+sshpass -p 'uaodeepia11306' rsync -avzP --delete \
+  -e "ssh -o StrictHostKeyChecking=no" \
+  --exclude="*.zip" \
+  --exclude="*.7z" \
+  --exclude="*.zip.part*" \
+  --exclude=".git/" \
+  --exclude="venv/" \
+  --exclude="__pycache__/" \
+  uaodeepia@45.5.190.201:/home/uaodeepia/Carlos_Ferro/Analitica/nicolas_isabella_luz_martin/ \
+  /mnt/ssd_m2/almacenamiento/carlos_andres_ferro/proyecto_2/
+```
+
+```bash
+sshpass -p 'uaodeepia11306' rsync -avzP --delete --dry-run \
+  -e "ssh -o StrictHostKeyChecking=no" \
+  --exclude="*.zip" \
+  --exclude="*.7z" \
+  --exclude="*.zip.part*" \
+  --exclude=".git/" \
+  --exclude="venv/" \
+  --exclude="__pycache__/" \
+  uaodeepia@45.5.190.201:/home/uaodeepia/Carlos_Ferro/Analitica/nicolas_isabella_luz_martin/ \
+  /mnt/ssd_m2/almacenamiento/carlos_andres_ferro/proyecto_2/
+```
 
 ## Visualización de Archivos
 Ver estructura sin archivos voluminosos:

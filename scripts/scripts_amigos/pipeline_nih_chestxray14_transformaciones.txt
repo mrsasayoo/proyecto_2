@@ -1,0 +1,123 @@
+PIPELINE DE TRANSFORMACIONES Y AUGMENTACIONES
+NIH ChestX-ray14 — Clasificación multietiqueta de patologías torácicas
+Orden estricto de ejecución
+
+FASE 1: PREPROCESAMIENTO BASE (CARGA Y ESTANDARIZACIÓN)
+Aplicación: Train / Val / Test
+Tipo: Determinista
+
+1. Carga de imagen en escala de grises
+- Acción: Cargar la radiografía como imagen 2D en un solo canal usando cv2.IMREAD_GRAYSCALE o Pillow.
+- Formato recomendado: uint8, rango [0,255].
+- Justificación del orden: Este paso debe ir primero porque todas las transformaciones posteriores dependen de una lectura consistente del archivo fuente.
+- Si se altera el orden: No se puede garantizar que CLAHE, resize o normalización operen sobre la misma representación de intensidades.
+- Valor técnico de referencia: En NIH ChestX-ray14, la resolución original usada habitualmente es 1024x1024 px.
+
+2. Validación de integridad y metadatos
+- Acción: Verificar que la imagen no esté corrupta, que conserve dimensiones esperadas y que el identificador de paciente exista.
+- Regla recomendada: Descartar imágenes anómalas o fuera del rango esperado; conservar trazabilidad del patient_id.
+- Justificación del orden: Debe ir antes de cualquier procesamiento para evitar propagar muestras dañadas al dataset final.
+- Si se altera el orden: El pipeline podría guardar en disco imágenes inválidas ya transformadas, contaminando train, val o test.
+- Valor técnico de referencia: Umbral práctico de seguridad: imágenes >= 800x800 px antes del resize final.
+
+3. Split estricto por paciente
+- Acción: Separar Train / Val / Test por patient_id, nunca por imagen.
+- Proporción propuesta: 80/10/10.
+- Justificación del orden: Debe ocurrir antes de guardar imágenes procesadas o generar lotes para evitar data leakage entre particiones.
+- Si se altera el orden: El modelo podría ver radiografías del mismo paciente en train y val/test, inflando artificialmente AUROC, F1 y sensibilidad.
+- Valor técnico de referencia: Split paciente-nivel obligatorio en CXR; no usar split imagen-nivel.
+
+4. Resize a resolución de entrada
+- Acción: Redimensionar de 1024x1024 a 256x256.
+- Interpolación recomendada: cv2.INTER_LINEAR para downsampling; cv2.INTER_CUBIC solo si hubiera upsampling.
+- Justificación del orden: Debe ir antes de CLAHE cuando se desea que el realce local se calcule exactamente sobre la resolución final que verá la red.
+- Si se altera el orden: Aplicar CLAHE antes del resize cambia la estructura local del contraste tras la interpolación y puede amplificar o suavizar regiones de forma inconsistente.
+- Valor técnico de referencia: Tamaño de entrada propuesto para la arquitectura custom: 256x256x1.
+
+5. Realce local de contraste con CLAHE
+- Acción: Aplicar Contrast Limited Adaptive Histogram Equalization.
+- Parámetros recomendados: clipLimit=2.0, tileGridSize=(8,8).
+- Justificación del orden: Va después del resize para que las celdas 8x8 del algoritmo correspondan a la escala final de análisis del modelo.
+- Si se altera el orden: El realce local se calcula sobre una malla distinta y luego se deforma al redimensionar, lo que puede introducir contraste no estable entre muestras.
+- Valor técnico de referencia: clip=2.0 evita sobre-amplificación del ruido; grid 8x8 es una configuración estable en CXR.
+
+6. Conversión a float32 y escalado al rango [0,1]
+- Acción: img = img.astype(np.float32) / 255.0
+- Justificación del orden: Debe ir después de CLAHE porque CLAHE suele trabajar de forma natural sobre uint8 y antes de cualquier normalización final o augmentación fotométrica.
+- Si se altera el orden: Aplicar CLAHE sobre float reescalado o mezclar escalas de intensidad puede romper la coherencia del pipeline y dificultar depuración.
+- Valor técnico de referencia: Salida esperada: float32 en [0.0, 1.0].
+
+7. Guardado en disco del dataset base
+- Acción: Guardar la versión preprocesada y separada por split.
+- Formato sugerido: PNG o tensor serializado con estructura /train /val /test.
+- Justificación del orden: Debe ir al final de la fase determinista para reutilizar la misma base en todos los experimentos y acelerar entrenamiento.
+- Si se altera el orden: Se mezclarían muestras sin split definitivo o se guardarían versiones inconsistentes del pipeline.
+- Valor técnico de referencia: Mantener checksum, patient_id y label vector asociados a cada archivo procesado.
+
+Nota científica importante:
+- No se recomienda segmentar antes del remuestreo en este pipeline general si la máscara fue entrenada o diseñada para otra resolución o contraste; hacerlo puede degradar bordes anatómicos y producir errores geométricos al redimensionar posteriormente.
+- En radiografías de tórax no aplican Unidades Hounsfield; ese rango es propio de CT, no de CXR 2D proyectiva.
+
+FASE 2: AUMENTACIONES ONLINE (SOLO TRAIN) Y NORMALIZACIÓN FINAL (TRAIN / VAL)
+Aplicación: Train con aleatoriedad; Val/Test sin augmentación estocástica
+Tipo: Estocástico en Train, determinista en Val/Test
+
+9. Horizontal Flip aleatorio (solo Train)
+- Acción: Aplicar flip horizontal con probabilidad p=0.5.
+- Justificación del orden: Debe ir temprano dentro de las augmentaciones geométricas porque es barato, estable y no modifica la distribución de intensidades.
+- Si se altera el orden: No suele ser crítico, pero conviene ejecutarlo antes de augmentaciones fotométricas para mantener una secuencia limpia de transformaciones espaciales primero e intensidades después.
+- Valor técnico de referencia: p=0.5.
+- Restricción: No usar Vertical Flip en CXR.
+
+10. Rotación aleatoria pequeña (solo Train, opcional pero recomendable)
+- Acción: Rotar con límite pequeño para simular variaciones de posicionamiento.
+- Parámetro sugerido: limit=10 grados, p=0.5, borde reflect o constant según implementación.
+- Justificación del orden: Debe ir junto a las transformaciones geométricas antes de brillo, gamma y ruido.
+- Si se altera el orden: Si se añade ruido antes de rotar, la interpolación modifica la estadística del ruido y reduce control sobre la augmentación.
+- Valor técnico de referencia: rango seguro habitual ±10 grados en CXR estándar.
+
+11. Brightness / Contrast o Gamma aleatorio (solo Train)
+- Acción: Aplicar RandomBrightnessContrast o RandomGamma.
+- Parámetros sugeridos: brightness_limit=0.15, contrast_limit=0.15, p=0.5; o gamma_limit=(80,120), p=0.5.
+- Justificación del orden: Debe ir después de las deformaciones geométricas y antes del ruido, porque modifica la luminancia global o local preservando la estructura anatómica.
+- Si se altera el orden: Si se normaliza antes de este paso, la augmentación actúa sobre una distribución ya estandarizada y puede producir valores fuera del rango esperado por el modelo.
+- Valores técnicos de referencia: gamma equivalente aproximada 0.8 a 1.2.
+
+12. Ruido gaussiano aleatorio (solo Train)
+- Acción: Añadir ruido de baja magnitud para robustez a adquisición no ideal.
+- Parámetro sugerido: p=0.1; magnitud baja a moderada.
+- Referencia práctica: sigma aproximado 0.009 a 0.022 en escala [0,1], equivalente aproximado a 2.2 a 5.5 niveles sobre [0,255].
+- Justificación del orden: Debe ir después de brillo/gamma para que el ruido sea la última perturbación fotométrica antes de la normalización.
+- Si se altera el orden: Si se aplica antes de cambios intensivos de gamma o contraste, parte de su efecto estadístico queda distorsionado y se pierde control sobre la severidad real.
+
+13. Normalización final para el modelo
+- Acción: Aplicar la normalización que corresponda al backbone y al esquema de entrenamiento.
+- Opción requerida: normalización vía timm para Train/Val/Test cuando se use un pipeline compatible con modelos de 3 canales.
+- Parámetros estándar timm/ImageNet: mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225].
+- Justificación del orden: Siempre va al final porque cualquier augmentación fotométrica o de ruido debe operar sobre valores físicos/intuitivos de imagen, no sobre datos ya estandarizados.
+- Si se altera el orden: Brightness, gamma o noise sobre tensores ya normalizados generan distribuciones artificiales que no corresponden al espacio esperado durante entrenamiento estable.
+- Valor técnico de referencia: salida final tipo tensor normalizado listo para DataLoader y red.
+
+14. Regla de evaluación
+- Acción: En validación y prueba aplicar solo la cadena determinista de preprocesamiento y la normalización final; nunca augmentaciones aleatorias.
+- Justificación del orden: Mantiene comparabilidad entre épocas, reproducibilidad y métricas honestas.
+- Si se altera el orden: Las métricas de validación dejan de medir desempeño real y pasan a depender del azar de las augmentaciones.
+
+RESUMEN EJECUTIVO DEL ORDEN
+Fase 1 (offline):
+1) Carga
+2) Validación
+3) Split por paciente
+4) Resize 256x256
+5) CLAHE 2.0, 8x8
+6) float32 + [0,1]
+7) Replicación de canales si aplica
+8) Guardado en disco
+
+Fase 2 (online):
+9) Horizontal Flip p=0.5 (Train)
+10) Rotación ±10 grados p=0.5 (Train, opcional recomendable)
+11) Brightness/Contrast o Gamma p=0.5 (Train)
+12) GaussNoise p=0.1 (Train)
+13) Normalización final vía timm (Train/Val/Test)
+14) Evaluación sin augmentación estocástica
